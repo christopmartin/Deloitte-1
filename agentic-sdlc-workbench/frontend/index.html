@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Agentic SDLC Workbench — manage your AI-assisted software delivery lifecycle" />
+  <title>ServiceNow Agentic SDLC Workbench</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- User Picker Modal -->
+  <div id="user-modal" class="modal-overlay" aria-modal="true" role="dialog" aria-labelledby="user-modal-title">
+    <div class="modal-card user-picker-card">
+      <div class="modal-header">
+        <div class="modal-logo">
+          <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect width="32" height="32" rx="8" fill="#3b82f6"/>
+            <path d="M8 22L13 10L16 18L19 13L24 22H8Z" fill="white" opacity="0.9"/>
+            <circle cx="23" cy="10" r="2.5" fill="white"/>
+          </svg>
+        </div>
+        <div>
+          <h1 id="user-modal-title">Agentic SDLC Workbench</h1>
+          <p class="modal-subtitle">Select your user profile to continue</p>
+        </div>
+      </div>
+      <div id="user-list" class="user-list">
+        <div class="loading-state">Loading users&hellip;</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- App Shell -->
+  <div id="app" class="app-shell" style="display:none;">
+
+    <!-- Topbar -->
+    <header id="topbar" class="topbar">
+      <div class="topbar-left">
+        <button id="sidebar-toggle" class="sidebar-toggle" aria-label="Toggle sidebar">
+          <span></span><span></span><span></span>
+        </button>
+        <div class="topbar-logo">
+          <img src="assets/deloitte-logo.svg" alt="Deloitte" class="topbar-deloitte-logo" />
+        </div>
+        <span class="topbar-divider" aria-hidden="true">|</span>
+        <span class="topbar-title">ServiceNow Agentic SDLC Workbench</span>
+      </div>
+      <div class="topbar-center">
+        <div class="project-selector-wrap">
+          <label for="project-select" class="sr-only">Active Application</label>
+          <select id="project-select" class="project-select">
+            <option value="">— Select Application —</option>
+          </select>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <span id="user-pill" class="user-pill">
+          <span class="user-avatar" id="user-avatar">?</span>
+          <span id="user-name-display">Not signed in</span>
+        </span>
+      </div>
+    </header>
+
+    <!-- Body: Sidebar + Main -->
+    <div class="app-body">
+
+      <!-- Sidebar -->
+      <nav id="sidebar" class="sidebar" aria-label="Main navigation">
+        <ul class="sidebar-nav" role="list">
+
+          <!-- ── Application Design ─────────────────────── -->
+          <li class="nav-section">Application Design</li>
+
+          <li>
+            <button class="nav-item" data-module="home" aria-current="false">
+              <span class="nav-icon">
+                <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                  <path d="M10.707 2.293a1 1 0 00-1.414 0l-7 7a1 1 0 001.414 1.414L4 10.414V17a1 1 0 001 1h3a1 1 0 001-1v-3h2v3a1 1 0 001 1h3a1 1 0 001-1v-6.586l.293.293a1 1 0 001.414-1.414l-7-7z"/>
+                </svg>
+              </span>
+              <span class="nav-label">Dashboard</span>
+            </button>
+          </li>
+
+          <li>
+            <button class="nav-item" data-module="ingest" aria-current="false">
+              <span class="nav-icon">
+                <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                  <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd"/>
+                </svg>
+              </span>
+              <span class="nav-label">Ingest Documents</span>
+            </button>
+          </li>
+
+          <li>
+            <button class="nav-item" data-module="evidence" aria-current="false">
+              <span class="nav-icon">
+                <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                  <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clip-rule="evenodd"/>
+                </svg>
+              </span>
+              <span class="nav-label">Evidence Sources</span>
+            </button>
+          </li>
+
+          <li>
+            <button class="nav-item" data-module="library" aria-current="false">
+              <span class="nav-icon">
+                <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                  <path d="M9 4.804A7.968 7.968 0 005.5 4c-1.255 0-2.443.29-3.5.804v10A7.969 7.969 0 015.5 14c1.669 0 3.218.51 4.5 1.385A7.962 7.962 0 0114.5 14c1.255 0 2.443.29 3.5.804v-10A7.968 7.968 0 0014.5 4c-1.255 0-2.443.29-3.5.804V12a1 1 0 11-2 0V4.804z"/>
+                </svg>
+              </span>
+              <span class="nav-label">Design Library</span>
+            </button>
+          </li>
+
+          <li>
+            <button class="nav-item" data-module="design_review" aria-current="false">
+              <span class="nav-icon">
+                <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                  <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clip-rule="evenodd"/>
+                </svg>
+              </span>
+              <span class="nav-label">Design Review</span>
+            </button>
+          </li>
+
+          <li>
+            <button class="nav-item" data-module="cost_projections" aria-current="false">
+              <span class="nav-icon">
+                <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v1.07a4.001 4.001 0 00-2.74 5.86l-.22.22a1 1 0 001.42 1.42l.22-.22A4 4 0 0011 13.93V15a1 1 0 102 0v-1.07a4.001 4.001 0 002.74-5.86l.22-.22a1 1 0 00-1.42-1.42l-.22.22A4 4 0 0011 6.07V6z" clip-rule="evenodd"/>
+                </svg>
+              </span>
+              <span class="nav-label">Costs</span>
+            </button>
+          </li>
+
+          <li>
+            <button class="nav-item" data-module="testing" aria-current="false">
+              <span class="nav-icon">
+                <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                  <path fill-rule="evenodd" d="M2.166 4.999A11.954 11.954 0 0010 1.944 11.954 11.954 0 0017.834 5c.11.65.166 1.32.166 2.001 0 5.225-3.34 9.67-8 11.317C5.34 16.67 2 12.225 2 7c0-.682.057-1.35.166-2.001zm11.541 3.708a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                </svg>
+              </span>
+              <span class="nav-label">Testing</span>
+            </button>
+          </li>
+
+          <li>
+            <button class="nav-item" data-module="build_export" aria-current="false">
+              <span class="nav-icon">
+                <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                  <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd"/>
+                </svg>
+              </span>
+              <span class="nav-label">Build Export</span>
+            </button>
+          </li>
+
+          <li>
+            <button class="nav-item" data-module="change_packets" aria-current="false">
+              <span class="nav-icon">
+                <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                  <path d="M4 4a2 2 0 00-2 2v1h16V6a2 2 0 00-2-2H4z"/>
+                  <path fill-rule="evenodd" d="M18 9H2v5a2 2 0 002 2h12a2 2 0 002-2V9zM4 13a1 1 0 011-1h1a1 1 0 110 2H5a1 1 0 01-1-1zm5-1a1 1 0 100 2h1a1 1 0 100-2H9z" clip-rule="evenodd"/>
+                </svg>
+              </span>
+              <span class="nav-label">Change Packets</span>
+            </button>
+          </li>
+
+          <!-- ── Administration ─────────────────────────── -->
+          <li class="nav-section">Administration</li>
+
+          <li>
+            <button class="nav-item" data-module="projects" aria-current="false">
+              <span class="nav-icon">
+                <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                  <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/>
+                </svg>
+              </span>
+              <span class="nav-label">Applications</span>
+              <span class="nav-badge-admin">Admin</span>
+            </button>
+          </li>
+
+          <li>
+            <button class="nav-item" data-module="trust" aria-current="false">
+              <span class="nav-icon">
+                <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                  <path fill-rule="evenodd" d="M2.166 4.999A11.954 11.954 0 0010 1.944 11.954 11.954 0 0017.834 5c.11.65.166 1.32.166 2.001 0 5.225-3.34 9.67-8 11.317C5.34 16.67 2 12.225 2 7c0-.682.057-1.35.166-2.001zm11.541 3.708a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                </svg>
+              </span>
+              <span class="nav-label">Agent Trust</span>
+              <span class="nav-badge-admin">Admin</span>
+            </button>
+          </li>
+
+          <li>
+            <button class="nav-item" data-module="audit" aria-current="false">
+              <span class="nav-icon">
+                <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clip-rule="evenodd"/>
+                </svg>
+              </span>
+              <span class="nav-label">Audit Log</span>
+              <span class="nav-badge-admin">Admin</span>
+            </button>
+          </li>
+
+          <li>
+            <button class="nav-item" data-module="baseline" aria-current="false">
+              <span class="nav-icon">
+                <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                  <path d="M5 3a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2V5a2 2 0 00-2-2H5zM5 11a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2v-2a2 2 0 00-2-2H5zM11 5a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V5zM14 11a1 1 0 011 1v1h1a1 1 0 110 2h-1v1a1 1 0 11-2 0v-1h-1a1 1 0 110-2h1v-1a1 1 0 011-1z"/>
+                </svg>
+              </span>
+              <span class="nav-label">Baselines</span>
+              <span class="nav-badge-admin">Admin</span>
+            </button>
+          </li>
+
+          <li>
+            <button class="nav-item" data-module="validation" aria-current="false">
+              <span class="nav-icon">
+                <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                  <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>
+                </svg>
+              </span>
+              <span class="nav-label">Validation</span>
+              <span class="nav-badge-admin">Admin</span>
+            </button>
+          </li>
+
+          <li>
+            <button class="nav-item" data-module="cost_management" aria-current="false">
+              <span class="nav-icon">
+                <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                  <path d="M8.433 7.418c.155-.103.346-.196.567-.267v1.698a2.305 2.305 0 01-.567-.267C8.07 8.34 8 8.114 8 8c0-.114.07-.34.433-.582zM11 12.849v-1.698c.22.071.412.164.567.267.364.243.433.468.433.582 0 .114-.07.34-.433.582a2.305 2.305 0 01-.567.267z"/>
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-13a1 1 0 10-2 0v.092a4.535 4.535 0 00-1.676.662C6.602 6.234 6 7.009 6 8c0 .99.602 1.765 1.324 2.246.48.32 1.054.545 1.676.662v1.941c-.391-.127-.68-.317-.843-.504a1 1 0 10-1.51 1.31c.562.649 1.413 1.076 2.353 1.253V15a1 1 0 102 0v-.092a4.535 4.535 0 001.676-.662C13.398 13.766 14 12.991 14 12c0-.99-.602-1.765-1.324-2.246A4.535 4.535 0 0011 9.092V7.151c.391.127.68.317.843.504a1 1 0 101.511-1.31c-.563-.649-1.413-1.076-2.354-1.253V5z" clip-rule="evenodd"/>
+                </svg>
+              </span>
+              <span class="nav-label">Cost Management</span>
+              <span class="nav-badge-admin">Admin</span>
+            </button>
+          </li>
+
+          <li>
+            <button class="nav-item" data-module="reports" aria-current="false">
+              <span class="nav-icon">
+                <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                  <path fill-rule="evenodd" d="M6 2a2 2 0 00-2 2v12a2 2 0 002 2h8a2 2 0 002-2V7.414A2 2 0 0015.414 6L12 2.586A2 2 0 0010.586 2H6zm2 10a1 1 0 10-2 0v3a1 1 0 102 0v-3zm2-3a1 1 0 011 1v5a1 1 0 11-2 0v-5a1 1 0 011-1zm4-1a1 1 0 10-2 0v6a1 1 0 102 0V8z" clip-rule="evenodd"/>
+                </svg>
+              </span>
+              <span class="nav-label">Reports</span>
+              <span class="nav-badge-admin">Admin</span>
+            </button>
+          </li>
+
+        </ul>
+      </nav>
+
+      <!-- Main Content -->
+      <main id="main-content" class="main-content" role="main" aria-live="polite">
+        <div class="loading-state">Initializing&hellip;</div>
+      </main>
+
+    </div><!-- .app-body -->
+  </div><!-- #app -->
+
+  <!-- Toast container -->
+  <div id="toast-container" class="toast-container" aria-live="assertive"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,2780 @@
+﻿Agentic SDLC Workbench
+Repository Database Design — Merged v1.0
+Synthesizes prior database-design drafts. Adds Documented/Inferred tagging, a Required column, source-spec citations, and pulls cross-cutting attributes out once.
+1. How to read this document
+This document defines a logical database design for the Agentic SDLC Workbench repository. It synthesizes two prior drafts: one organized strictly around the spec's §9 entity list, and one with a fuller table inventory derived by extension. The merged version keeps the broader inventory and adds rigor to call out which design decisions are documented in the source spec and which are inferred.
+References to the source spec ("Agentic SDLC Workbench Future-State Design v0.2") use § notation throughout — e.g. §9, §A.5.
+Source-tagging legend (Src column on every field table)
+D  Documented — the field name, value, or concept appears in the source spec.
+I  Inferred — added to make the schema implementable. Treat as design proposals open to review.
+Required column legend
+Y required.   N optional.   C conditionally required (rule explained in Notes).
+Caveat: this is a logical model, not authoritative DDL. Field names are illustrative, types are best-fit guesses, and a few questions remain unresolved (see §13). Treat this document as input for a schema-review session, not the final schema.
+2. Design Principles
+Principle
+Source
+The atomic unit of truth is the field value.
+§3
+Every meaningful field value should be traceable to evidence: a source document or transcript with date/time.
+§3
+The repository is internal only. Clients receive reports and exports, not direct repository access.
+§3
+Agents propose changes; humans approve through Change Packets with field-level audit underneath.
+§3, §6
+Project separation is required. Reusable records have explicit scope: Project-only, Client-only, All-clients.
+§10
+Field-level audit is retained but hidden from normal users unless needed.
+§3, §9
+The trust dial is per project, per agent, set manually 1-5.
+§8
+Baselines provide human-readable design snapshots: Draft, Build, optional Pilot, Production, Post-Prod vX.Y.
+§7
+Hybrid field model: high-use fields are typed columns on entity tables; all fields also exist in asdlc_field_value for source/audit/baseline truth.
+Inferred — see §13 Open Q. 2
+3. Naming Convention
+Tables use the prefix asdlc_ for Agentic SDLC. The prefix and identifiers are a logical naming convention — they can be adapted when the repository is implemented in ServiceNow, an external database, or a hybrid architecture.
+Convention
+Recommendation
+Primary key
+UUID. Field named <entity>_id, e.g. project_id, change_packet_id.
+Foreign key
+Field named <referenced_entity>_id. The FK column on each entity table identifies the referenced table.
+Scope field
+visibility_scope with values PROJECT, CLIENT, ALL_CLIENTS.
+Status fields
+Use enums (controlled values), not free text.
+Audit fields
+created_by, created_at, updated_by, updated_at on every table — pulled out once in §4 below.
+Soft delete
+lifecycle_status (draft / active / under_review / deprecated / archived). No hard deletes for design records.
+Polymorphic ref
+Use (scope_type, scope_id) pair where one table can reference multiple entity types (Cost Estimate, Governance Control, Test Scenario, Field Value, Field Audit, Exception, Validation Result, Baseline Item).
+4. Cross-cutting attributes
+These attributes apply to every entity table in the repository. They are defined here once rather than repeated on every table. The combination of project_id, visibility_scope, and (for Client- and All-client patterns) a separate functional owner implements the access model from §10.
+Field
+Type
+Req
+FK
+Src
+Notes
+<entity>_id
+UUID
+Y
+—
+I
+Primary key on every table. Naming pattern follows §2.
+project_id
+FK
+C
+→ asdlc_project
+D
+Required for project-only records; null permitted only for client-only or all-client reusable records (§10).
+visibility_scope
+enum
+Y
+—
+D
+PROJECT | CLIENT | ALL_CLIENTS (§10). Drives row-level access.
+lifecycle_status
+enum
+Y
+—
+I
+draft | active | under_review | deprecated | archived. Used instead of hard delete (§2 naming convention).
+created_by
+reference
+Y
+→ user
+I
+Human or agent run that created the row.
+created_at
+datetime
+Y
+—
+I
+System timestamp.
+updated_by
+reference
+Y
+→ user
+I
+Last modifier.
+updated_at
+datetime
+Y
+—
+I
+Last modified timestamp.
+version
+int
+Y
+—
+I
+Optimistic-lock counter. Field-level history lives in asdlc_field_value_audit.
+5. High-Level Entity Model
+The repository has six layers: Workspace & Access, Design Content, Field Truth & Evidence, Change & Validation, Baselines & Reporting, and Agent Operations. 35 tables total. The shaded "Src" indicates whether the table maps directly to a §9 entity (D) or was added during this design as derivation/architectural support (I).
+Layer
+Table count
+Tables
+Workspace & Access
+6
+asdlc_client, asdlc_project, asdlc_project_member, asdlc_functional_owner, asdlc_agent_catalog, asdlc_project_agent_setting
+Design Content
+15
+asdlc_use_case, asdlc_process_segment, asdlc_workflow, asdlc_workflow_step, asdlc_agent_spec, asdlc_tool, asdlc_agent_tool, asdlc_data_source, asdlc_guardrail, asdlc_hitl_gate, asdlc_test_scenario, asdlc_cost_estimate, asdlc_governance_control, asdlc_user_story, asdlc_knowledge_article
+Field Truth, Evidence & Audit
+4
+asdlc_field_value, asdlc_field_value_audit, asdlc_evidence_source, asdlc_source_reference
+Change, Validation & Exception
+4
+asdlc_change_packet, asdlc_change_packet_item, asdlc_validation_result, asdlc_exception
+Baselines & Reporting
+3
+asdlc_baseline, asdlc_baseline_item, asdlc_report_export
+Agent Operations
+3
+asdlc_agent_run, asdlc_agent_task, asdlc_orchestration_event
+
+Coverage map (Documented vs Inferred):
+35 tables total — 22 documented (D, mapped directly to §9 or other explicit spec sections), 13 inferred (I, added during design as supporting structure or junction tables).
+
+6. Entity tables
+One section per table, grouped by layer. Cross-cutting attributes from §4 are not repeated.
+6.1 Workspace & Access
+6.1.1  asdlc_client
+Client-level boundary for project separation and client-only reusable records. One row per external client account.
+Source: §10 Access and reuse model.   ·   Overall src: I
+Note: Concept of client boundary is documented (§10); modeling it as a separate table is a design choice to support client-only reuse scope.
+Field
+Type
+Req
+FK
+Src
+Notes
+client_id
+UUID
+Y
+—
+I
+Primary key.
+client_name
+text
+Y
+—
+D
+External client identity.
+client_code
+text
+Y
+—
+I
+Short internal code (e.g. ACME).
+default_visibility_scope
+enum
+Y
+—
+D
+PROJECT | CLIENT (default scope for new reusable records, §10).
+notes
+long text
+N
+—
+I
+Administrative notes.
+
+6.1.2  asdlc_project
+Top-level container for one design effort. All project-only data is partitioned by project_id.
+Source: §9 (Project entity); §15 (Project Setup module).   ·   Overall src: D
+Field
+Type
+Req
+FK
+Src
+Notes
+project_id
+UUID
+Y
+—
+I
+Primary key.
+client_id
+FK
+Y
+→ asdlc_client
+D
+Owning client.
+project_name
+text
+Y
+—
+D
+§9 entity description.
+project_code
+text
+Y
+—
+I
+Short code used in record IDs and reports (e.g. ACME-P1).
+stage
+enum
+Y
+—
+D
+draft | build | pilot | production | archived. Tracks which baseline series the project sits in (§7).
+uses_pilot_baseline
+bool
+Y
+—
+D
+§7 — Pilot Baseline is optional.
+inherit_from_project_id
+FK
+N
+→ asdlc_project
+I
+Source project for inherited reusable records. Open question 4 in §11.
+default_human_approval_required
+bool
+Y
+—
+D
+§4 — any project member can approve in v1; flag allows tightening later.
+repository_access_model
+enum
+Y
+—
+D
+INTERNAL_ONLY in v1 (§3 — clients receive reports only).
+
+6.1.3  asdlc_project_member
+Junction: which internal humans belong to a project, with their permissions. Approvers, Exception Handlers, and Owners (§4) are all stored here.
+Source: §4 Target operating model; §15 Project Setup members.   ·   Overall src: D
+Note: Membership is documented; modeling as a junction table is the standard pattern.
+Field
+Type
+Req
+FK
+Src
+Notes
+project_member_id
+UUID
+Y
+—
+I
+Primary key.
+project_id
+FK
+Y
+→ asdlc_project
+D
+Project membership.
+user_id
+reference
+Y
+→ external IdP
+D
+Reference to enterprise identity (§4 — "internal human").
+display_name
+text
+Y
+—
+I
+Cached for reports.
+member_role
+enum
+Y
+—
+D
+methodology_owner | reviewer | functional_owner | technical | governance | qa | other (§15).
+can_approve
+bool
+Y
+—
+D
+§4 — any member can approve in v1; later versions may restrict.
+hitl_role
+enum
+N
+—
+D
+A | E | O — Approver, Exception Handler, Owner (§4, §12).
+active
+bool
+Y
+—
+I
+Soft enable/disable.
+
+6.1.4  asdlc_functional_owner
+Owners of all-client reusable patterns. Per §10, all-client content is "maintained outside this system" — this table provides traceability without holding the patterns themselves.
+Source: §10; §15 Pattern Library functional_owner column.   ·   Overall src: I
+Note: The role is documented (§10); making it a separate table is a design choice.
+Field
+Type
+Req
+FK
+Src
+Notes
+functional_owner_id
+UUID
+Y
+—
+I
+Primary key.
+owner_name
+text
+Y
+—
+D
+Person or group that owns a domain.
+domain
+text
+Y
+—
+I
+e.g. ITSM, ITOM, HRSD, Governance, Testing, Cost.
+contact_reference
+text
+N
+—
+I
+Contact details or distribution list.
+review_cadence
+enum
+Y
+—
+D
+quarterly | semiannual | annual | as_needed (§15 Pattern Library review dates).
+
+6.1.5  asdlc_agent_catalog
+Catalog of workbench agent types. Defines what agents *can* exist; per-project enable/disable and trust live in asdlc_project_agent_setting.
+Source: §11 Agent catalog; Appendix A.   ·   Overall src: D
+Field
+Type
+Req
+FK
+Src
+Notes
+workbench_agent_id
+UUID
+Y
+—
+I
+Primary key.
+agent_type
+enum
+Y
+—
+D
+orchestrator | intake | change_intake | process | workflow_design | agent_architect | cost | testing | validation | governance | story | reviewer (§11).
+agent_name
+text
+Y
+—
+D
+Human-readable name.
+purpose
+long text
+Y
+—
+D
+§11 / Appendix A purpose statement.
+default_trust_level
+int (1-5)
+Y
+—
+D
+§8 trust dial.
+hitl_tags
+list<enum>
+Y
+—
+D
+A | E | O (§12).
+version
+text
+Y
+—
+I
+Prompt/configuration version label.
+functional_owner_id
+FK
+N
+→ asdlc_functional_owner
+D
+Owner for all-client agent patterns (§10).
+
+6.1.6  asdlc_project_agent_setting
+Per-project, per-agent trust and enablement. The trust dial is set here (§8). Splitting from asdlc_agent_catalog allows the same agent type to have different trust per project.
+Source: §8 Trust dial model; §15 Trust console.   ·   Overall src: D
+Field
+Type
+Req
+FK
+Src
+Notes
+project_agent_setting_id
+UUID
+Y
+—
+I
+Primary key.
+project_id
+FK
+Y
+→ asdlc_project
+D
+Project boundary.
+workbench_agent_id
+FK
+Y
+→ asdlc_agent_catalog
+D
+Which agent.
+trust_level
+int (1-5)
+Y
+—
+D
+§8 — overrides default for this project.
+enabled
+bool
+Y
+—
+D
+§15 Project Setup — agent enable/disable.
+allowed_actions
+json
+N
+—
+D
+Behavior matrix derived from trust level (§8).
+requires_human_approval
+bool
+Y
+—
+D
+Whether agent output goes through Change Packet approval. §8 + §6.
+notes
+long text
+N
+—
+I
+Project rationale for this trust setting.
+
+6.2 Design Content
+6.2.1  asdlc_use_case
+Business intent of one piece of agentic work. Created by the Intake Agent. The atomic field values inside are the "atomic unit of truth" per §3.
+Source: §9; Appendix A §1 (Intake Agent).   ·   Overall src: D
+Field
+Type
+Req
+FK
+Src
+Notes
+use_case_id
+UUID
+Y
+—
+I
+Primary key.
+title
+text
+Y
+—
+I
+Short label.
+summary
+long text
+Y
+—
+D
+Intake Agent output: "use case summary".
+business_objective
+long text
+Y
+—
+D
+§9 entity description.
+expected_value
+long text
+Y
+—
+D
+Intake Agent output.
+users
+long text
+Y
+—
+D
+§9 entity description.
+volume_assumptions
+json
+Y
+—
+D
+Transactions/period. Used by Cost Agent.
+urgency
+enum
+N
+—
+D
+Intake Agent output.
+success_criteria
+list<text>
+Y
+—
+D
+§9 entity description.
+constraints
+list<text>
+N
+—
+D
+§9 entity description.
+supervision_model
+enum
+Y
+—
+D
+Manual | Assisted | Supervised | Autonomous. Drives required-by-supervision-model field rules (§13).
+next_step
+enum
+Y
+—
+D
+requirements | process_redesign (Intake Agent output).
+readiness
+enum
+Y
+—
+I
+not_ready | ready_for_requirements | ready_for_redesign.
+
+6.2.2  asdlc_process_segment
+Output of the Process Agent when process redesign is needed. Captures as-is/to-be process framing before workflow design begins.
+Source: Appendix A §3 Process Agent.   ·   Overall src: I
+Note: Concept is documented (Process Agent has outputs); modeling as a separate table — rather than fields on Use Case or Workflow — is GPT's structural choice. Reasonable, but optional.
+Field
+Type
+Req
+FK
+Src
+Notes
+process_segment_id
+UUID
+Y
+—
+I
+Primary key.
+use_case_id
+FK
+Y
+→ asdlc_use_case
+D
+Owning use case.
+scope_statement
+long text
+Y
+—
+D
+Process Agent output: "process scope statement".
+as_is_summary
+long text
+N
+—
+D
+Process Agent output.
+to_be_summary
+long text
+N
+—
+D
+Process Agent output.
+hitl_gate_candidates
+list<text>
+N
+—
+D
+Process Agent output: "HITL gate candidates".
+process_risks
+list<text>
+N
+—
+D
+Process Agent output: "process risk list".
+role_change_assessment
+long text
+N
+—
+D
+Process Agent output.
+redesign_required
+bool
+Y
+—
+D
+Process Agent decision.
+
+6.2.3  asdlc_workflow
+Structured representation of how work flows. Authored by the Workflow Design Agent.
+Source: §9; Appendix A §4.   ·   Overall src: D
+Field
+Type
+Req
+FK
+Src
+Notes
+workflow_id
+UUID
+Y
+—
+I
+Primary key.
+use_case_id
+FK
+Y
+→ asdlc_use_case
+D
+Owning use case.
+name
+text
+Y
+—
+I
+Short label.
+trigger
+json
+Y
+—
+D
+§9 entity description.
+handoffs
+list<json>
+Y
+—
+D
+§9 entity description.
+decisions
+list<json>
+Y
+—
+D
+§9 entity description.
+fallback_paths
+list<json>
+Y
+—
+D
+§9 entity description.
+workflow_data_needs
+list<FK>
+N
+→ asdlc_data_source
+D
+§9 entity description.
+readiness
+enum
+Y
+—
+I
+draft | review | approved.
+
+6.2.4  asdlc_workflow_step
+Atomic step within a workflow. The §15 wireframe addresses individual steps (e.g. WF-014.step[4].owner), confirming step-level fields are addressable.
+Source: §9 (Process Step); §15 example references; Appendix A §4.   ·   Overall src: D
+Field
+Type
+Req
+FK
+Src
+Notes
+workflow_step_id
+UUID
+Y
+—
+I
+Primary key.
+workflow_id
+FK
+Y
+→ asdlc_workflow
+D
+Parent workflow.
+step_number
+int
+Y
+—
+I
+Ordinal.
+name
+text
+Y
+—
+I
+Short label.
+actor_role
+text
+Y
+—
+D
+§9 — "actors".
+owner_member_id
+FK
+N
+→ asdlc_project_member
+D
+§15 wireframe example: step[4].owner.
+raci
+json
+N
+—
+D
+Process Agent input/output.
+inputs
+list<json>
+Y
+—
+D
+§9 entity description.
+outputs
+list<json>
+Y
+—
+D
+§9 entity description.
+decisions
+list<json>
+N
+—
+D
+§9 entity description.
+hitl_gate_id
+FK
+N
+→ asdlc_hitl_gate
+D
+Implied by §9 + §12.
+sla_hours
+int
+N
+—
+D
+Per §15 wireframe example (step[4].sla_hours).
+
+6.2.5  asdlc_agent_spec
+Designed agent (the agent being designed FOR the client, not the workbench agent). Authored by the Agent Architect.
+Source: §9 (Agent entity); Appendix A §5.   ·   Overall src: D
+Field
+Type
+Req
+FK
+Src
+Notes
+agent_spec_id
+UUID
+Y
+—
+I
+Primary key.
+use_case_id
+FK
+Y
+→ asdlc_use_case
+D
+Owning use case.
+workflow_id
+FK
+N
+→ asdlc_workflow
+D
+Workflow this agent participates in.
+name
+text
+Y
+—
+I
+Display name.
+scope
+long text
+Y
+—
+D
+§9 entity description.
+instructions
+long text
+Y
+—
+D
+§9 entity description.
+goals
+list<text>
+Y
+—
+D
+Agent Architect output.
+done_criteria
+list<text>
+Y
+—
+D
+Agent Architect output.
+inputs
+json
+Y
+—
+D
+§9 entity description.
+outputs
+json
+Y
+—
+D
+§9 entity description.
+run_as_model
+json
+Y
+—
+D
+§9 entity description.
+memory_strategy
+json
+N
+—
+D
+Agent Architect output: "memory/context strategy".
+design_risks
+list<text>
+N
+—
+D
+Agent Architect output.
+
+6.2.6  asdlc_tool
+Tool contract — a callable capability the designed agent can invoke (ServiceNow flow, MCP server, REST endpoint, etc.).
+Source: §9; Appendix A §5.   ·   Overall src: D
+Field
+Type
+Req
+FK
+Src
+Notes
+tool_id
+UUID
+Y
+—
+I
+Primary key.
+name
+text
+Y
+—
+I
+Display name.
+contract
+json
+Y
+—
+D
+§9 — "Tool contract".
+inputs
+json
+Y
+—
+D
+§9 entity description.
+outputs
+json
+Y
+—
+D
+§9 entity description.
+errors
+list<json>
+Y
+—
+D
+§9 entity description.
+access_requirements
+json
+Y
+—
+D
+§9 entity description.
+execution_mode
+enum
+Y
+—
+D
+sync | async | batch (§9).
+cost_impact
+json
+N
+—
+D
+§9 entity description.
+boundaries
+list<text>
+N
+—
+D
+Agent Architect output: "tool contracts and boundaries".
+
+6.2.7  asdlc_agent_tool
+Junction: which tools each designed agent can use, with per-binding constraints.
+Source: §9; Appendix A §5.   ·   Overall src: I
+Note: Many-to-many between agent and tool is implied by §9; junction table is the standard pattern.
+Field
+Type
+Req
+FK
+Src
+Notes
+agent_tool_id
+UUID
+Y
+—
+I
+Primary key.
+agent_spec_id
+FK
+Y
+→ asdlc_agent_spec
+D
+Agent half of binding.
+tool_id
+FK
+Y
+→ asdlc_tool
+D
+Tool half of binding.
+expected_call_count
+int
+N
+—
+D
+Used by Cost Agent estimation (§A.6).
+notes
+long text
+N
+—
+I
+Per-binding constraints or rationale.
+
+6.2.8  asdlc_data_source
+A system, table, document, or feed that a designed agent reads from or writes to. Sensitivity drives Governance Agent classification.
+Source: §9; Appendix A §5, §9.   ·   Overall src: D
+Field
+Type
+Req
+FK
+Src
+Notes
+data_source_id
+UUID
+Y
+—
+I
+Primary key.
+source_system
+text
+Y
+—
+D
+§9 entity description.
+table_or_document
+text
+Y
+—
+D
+§9 entity description.
+fields
+list<json>
+Y
+—
+D
+§9 entity description.
+owner_member_id
+FK
+Y
+→ asdlc_project_member
+D
+§9 entity description.
+sensitivity
+enum
+Y
+—
+D
+public | internal | confidential | restricted (§9).
+freshness
+text
+Y
+—
+D
+§9 entity description.
+access_rule
+json
+Y
+—
+D
+§9 entity description.
+classification_ref
+text
+N
+—
+D
+Link to enterprise data classification catalog (Governance Agent).
+
+6.2.9  asdlc_guardrail
+A behavioral or policy rule constraining one or more designed agents. Often reusable.
+Source: §9; Appendix A §5.   ·   Overall src: D
+Field
+Type
+Req
+FK
+Src
+Notes
+guardrail_id
+UUID
+Y
+—
+I
+Primary key.
+guardrail_type
+enum
+Y
+—
+D
+must_do | must_not_do | refusal | escalation | policy | data_protection (§9).
+description
+long text
+Y
+—
+D
+§9 entity description.
+policy_reference
+text
+N
+—
+D
+Link to source policy or regulation.
+agent_spec_id
+FK
+N
+→ asdlc_agent_spec
+I
+Null when reusable across many agents.
+severity
+enum
+N
+—
+I
+low | med | high.
+
+6.2.10  asdlc_hitl_gate
+A human checkpoint within a workflow. Trust dial (§8) and HITL mapping (§12) determine which gates are mandatory.
+Source: §9; §8; §12.   ·   Overall src: D
+Field
+Type
+Req
+FK
+Src
+Notes
+hitl_gate_id
+UUID
+Y
+—
+I
+Primary key.
+workflow_id
+FK
+Y
+→ asdlc_workflow
+D
+Owning workflow.
+workflow_step_id
+FK
+N
+→ asdlc_workflow_step
+D
+Step the gate sits in front of.
+gate_type
+enum
+Y
+—
+D
+approval | review | exception (§9).
+criteria
+long text
+Y
+—
+D
+§9 entity description.
+owner_role
+text
+Y
+—
+D
+§9 entity description.
+sla
+text
+Y
+—
+D
+§9 entity description.
+handoff_mechanism
+enum
+Y
+—
+D
+§9 entity description.
+
+6.2.11  asdlc_test_scenario
+Test case authored by the Testing Agent. Linked to use case, workflow, agent, or tool for traceability.
+Source: §9; Appendix A §7.   ·   Overall src: D
+Field
+Type
+Req
+FK
+Src
+Notes
+test_scenario_id
+UUID
+Y
+—
+I
+Primary key.
+scenario_type
+enum
+Y
+—
+D
+behavioral | edge_case | red_team | cost | performance | regression | monitoring (§9).
+description
+long text
+Y
+—
+I
+Plain-language scenario.
+inputs
+json
+Y
+—
+I
+Test inputs / fixtures.
+expected_outputs
+json
+Y
+—
+I
+Expected behavior.
+pass_criteria
+list<text>
+Y
+—
+D
+Testing Agent output.
+linked_entity_type
+enum
+Y
+—
+D
+use_case | workflow | agent | tool.
+linked_entity_id
+UUID
+Y
+—
+D
+Polymorphic link target.
+evidence_required
+list<text>
+N
+—
+D
+Testing Agent output.
+last_run_result
+enum
+N
+—
+I
+pass | fail | not_run.
+
+6.2.12  asdlc_cost_estimate
+Cost expectations and actuals. Authored and maintained by the Cost Agent. Variance triggers a Change Packet.
+Source: §9; Appendix A §6.   ·   Overall src: D
+Field
+Type
+Req
+FK
+Src
+Notes
+cost_estimate_id
+UUID
+Y
+—
+I
+Primary key.
+scope_type
+enum
+Y
+—
+I
+use_case | workflow | agent.
+scope_id
+UUID
+Y
+—
+I
+Polymorphic FK target based on scope_type.
+expected_actions
+int
+Y
+—
+D
+§9 entity description.
+expected_assists
+int
+Y
+—
+D
+§9 entity description (ServiceNow Now Assist units).
+expected_tokens
+int
+Y
+—
+D
+§9 entity description.
+volume_assumption
+json
+Y
+—
+D
+§9 entity description.
+cost_band
+enum
+Y
+—
+D
+low | med | high (§9).
+per_execution_cost
+decimal
+Y
+—
+D
+Cost Agent output.
+annual_run_cost
+decimal
+Y
+—
+D
+Cost Agent output.
+actuals
+json
+N
+—
+D
+§9 — pilot/production actuals.
+variance_pct
+decimal
+N
+—
+D
+§9 entity description.
+
+6.2.13  asdlc_governance_control
+A specific control applied to a use case, workflow, agent, or tool. Authored by the Governance Agent.
+Source: §9; Appendix A §9.   ·   Overall src: D
+Field
+Type
+Req
+FK
+Src
+Notes
+governance_control_id
+UUID
+Y
+—
+I
+Primary key.
+risk_classification
+enum
+Y
+—
+D
+§9 entity description.
+control_description
+long text
+Y
+—
+I
+What the control does.
+scope_type
+enum
+Y
+—
+I
+use_case | workflow | agent | tool.
+scope_id
+UUID
+Y
+—
+I
+Polymorphic FK target.
+approvals_required
+list<json>
+Y
+—
+D
+§9 entity description.
+audit_requirements
+list<text>
+Y
+—
+D
+§9 entity description.
+monitoring_requirements
+list<text>
+Y
+—
+D
+§9 entity description.
+recertification_date
+date
+Y
+—
+D
+§9 entity description.
+ai_asset_registration
+text
+N
+—
+D
+Governance Agent output.
+
+6.2.14  asdlc_user_story
+Build-ready story produced by the Story Agent from approved design data.
+Source: §9; Appendix A §10.   ·   Overall src: D
+Field
+Type
+Req
+FK
+Src
+Notes
+user_story_id
+UUID
+Y
+—
+I
+Primary key.
+story_type
+enum
+Y
+—
+D
+deterministic | prompt | skill | tool | trigger | memory | test | governance (§A.10).
+title
+text
+Y
+—
+I
+Short label.
+description
+long text
+Y
+—
+I
+Story body.
+acceptance_criteria
+list<text>
+Y
+—
+D
+§9 entity description.
+definition_of_ready
+json
+Y
+—
+D
+Story Agent output.
+linked_use_case_id
+FK
+N
+→ asdlc_use_case
+D
+Traceability.
+linked_workflow_id
+FK
+N
+→ asdlc_workflow
+D
+Traceability.
+linked_agent_spec_id
+FK
+N
+→ asdlc_agent_spec
+D
+Traceability.
+suggested_sprint
+text
+N
+—
+D
+Story Agent output.
+
+6.2.15  asdlc_knowledge_article
+Approved reference material used as grounding for designed agents (§3 — "Learning approach"). KAs are also reusable patterns at all-client scope.
+Source: §9; §3; §11.   ·   Overall src: D
+Field
+Type
+Req
+FK
+Src
+Notes
+knowledge_article_id
+UUID
+Y
+—
+I
+Primary key.
+title
+text
+Y
+—
+I
+KA title.
+body
+long text
+Y
+—
+D
+§9 entity description.
+trigger
+long text
+N
+—
+D
+When agents should retrieve this KA. §15 wireframe references KA-3001.trigger.
+linked_use_case_id
+FK
+N
+→ asdlc_use_case
+D
+Optional grounding link.
+linked_workflow_id
+FK
+N
+→ asdlc_workflow
+D
+Optional grounding link.
+approved_by
+FK
+Y
+→ asdlc_project_member
+D
+§3 — "approved Knowledge Articles".
+approved_at
+datetime
+Y
+—
+D
+§3.
+next_review_date
+date
+Y
+—
+D
+§15 Pattern Library.
+embedding_vector
+vector
+N
+—
+I
+For RAG retrieval. Open question 6 in §11.
+
+6.3 Field Truth, Evidence & Audit
+6.3.1  asdlc_field_value
+Generic field-level truth across all design records. This is the architectural pattern that makes §3 — "atomic unit of truth = field value" — physically work. Every meaningful design field has a row here, alongside its typed column on the parent table. Recommend hybrid model (see §11 Open Question 2).
+Source: §3 (atomic unit of truth); §15 Field-Level Audit Viewer.   ·   Overall src: I
+Note: The principle is documented and central; modeling as a generic field_value table is GPT's solution and the recommended one.
+Field
+Type
+Req
+FK
+Src
+Notes
+field_value_id
+UUID
+Y
+—
+I
+Primary key.
+entity_type
+text
+Y
+—
+D
+Logical entity name (e.g. USE_CASE, WORKFLOW_STEP).
+entity_id
+UUID
+Y
+—
+D
+Record ID in the parent table.
+field_path
+text
+Y
+—
+D
+Field name or dotted path (e.g. "step[4].owner"). §15 example.
+field_value
+long text/json
+Y
+—
+D
+Current active value.
+value_format
+enum
+Y
+—
+I
+text | number | date | bool | enum | json | url | reference.
+source_reference_id
+FK
+N
+→ asdlc_source_reference
+D
+Evidence supporting the value (§3).
+validation_status
+enum
+Y
+—
+D
+not_validated | validated | failed | not_required (Validation Agent, §A.8).
+approval_status
+enum
+Y
+—
+D
+draft | proposed | approved | rejected | superseded (§5, §6).
+approved_by_member_id
+FK
+N
+→ asdlc_project_member
+D
+Human approver.
+approved_at
+datetime
+N
+—
+D
+Approval timestamp.
+active_baseline_id
+FK
+N
+→ asdlc_baseline
+D
+Last baseline that locked this value.
+governance_sensitive
+bool
+Y
+—
+D
+§11 robustness suggestion: field-level sensitive-data flag.
+
+6.3.2  asdlc_field_value_audit
+Hidden field-level history. One row per field change. The Change Packet bundles many field audit rows for one approval decision (§3, §6).
+Source: §9 (Field Audit); §3; §15 Audit Viewer.   ·   Overall src: D
+Field
+Type
+Req
+FK
+Src
+Notes
+field_value_audit_id
+UUID
+Y
+—
+I
+Primary key.
+field_value_id
+FK
+Y
+→ asdlc_field_value
+D
+Field being changed.
+old_value
+long text/json
+N
+—
+D
+§9 — "old value".
+new_value
+long text/json
+Y
+—
+D
+§9 — "new value".
+change_packet_id
+FK
+Y
+→ asdlc_change_packet
+D
+CP that grouped this audit (§5, §6).
+source_reference_id
+FK
+Y
+→ asdlc_source_reference
+D
+§9 — "source".
+agent_run_id
+FK
+N
+→ asdlc_agent_run
+D
+Agent run that proposed change.
+approver_member_id
+FK
+N
+→ asdlc_project_member
+D
+§9 — "approver".
+change_reason
+long text
+N
+—
+D
+Why the change was made (§6).
+baseline_impact
+enum
+Y
+—
+D
+pre_baseline | post_pilot | post_prod_revision (§7, §15).
+changed_at
+datetime
+Y
+—
+D
+§9 — "timestamp".
+
+6.3.3  asdlc_evidence_source
+Source documents, transcripts, uploaded reports, corrected templates, voice notes, production signals, or knowledge articles used as evidence (§3 — link + date/time is sufficient for v1).
+Source: §9; §3; §15 Evidence Registry.   ·   Overall src: D
+Field
+Type
+Req
+FK
+Src
+Notes
+evidence_source_id
+UUID
+Y
+—
+I
+Primary key.
+source_title
+text
+Y
+—
+I
+Display label.
+source_type
+enum
+Y
+—
+D
+transcript | document | report_markup | corrected_template | voice_note | ka | test_result | production_signal | other (§5).
+source_url
+text
+Y
+—
+D
+§9 entity description.
+source_datetime
+datetime
+Y
+—
+D
+§3 — "with date/time".
+uploaded_by
+reference
+Y
+—
+I
+Who provided it.
+ingestion_status
+enum
+Y
+—
+D
+new | ingested | failed | archived (§15).
+validation_status
+enum
+Y
+—
+D
+validated | unverified | conflicting | draft (§15 Evidence Registry).
+transcript_text
+long text
+N
+—
+I
+Full content for transcripts/voice notes.
+notes
+long text
+N
+—
+D
+§9 entity description.
+
+6.3.4  asdlc_source_reference
+Citation layer between a field value and an evidence source. One source can support many field values; this table holds the per-citation specifics (page, line, timecode, confidence).
+Source: §3; §A.8 Validation Agent.   ·   Overall src: I
+Note: Spec says source link + date/time is sufficient for v1; a separate citation entity is GPT's structural choice. Useful for richer citations and disputes (Open Question 9).
+Field
+Type
+Req
+FK
+Src
+Notes
+source_reference_id
+UUID
+Y
+—
+I
+Primary key.
+evidence_source_id
+FK
+Y
+→ asdlc_evidence_source
+D
+Underlying source.
+reference_label
+text
+Y
+—
+I
+Human-readable citation label.
+timestamp_or_location
+text
+N
+—
+D
+Timecode, page, line, section, paragraph reference.
+reference_url
+text
+N
+—
+I
+Deep link if available.
+summary
+long text
+N
+—
+I
+Brief description of what the source supports.
+confidence
+enum
+Y
+—
+D
+high | medium | low | unknown (Validation Agent confidence rating).
+
+6.4 Change, Validation & Exception
+6.4.1  asdlc_change_packet
+The unit of human review. §6 lists explicit fields. The CP groups multiple field audit rows that share a source, summary, and approval decision.
+Source: §6; §15 Change Packet Queue; Appendix A §2.   ·   Overall src: D
+Field
+Type
+Req
+FK
+Src
+Notes
+change_packet_id
+UUID
+Y
+—
+I
+Primary key.
+packet_code
+text
+Y
+—
+D
+§6 — "Packet ID" (e.g. CP-2041).
+status
+enum
+Y
+—
+D
+pending | approved | rejected | sent_back | split (§6, §15).
+summary
+long text
+Y
+—
+D
+§6 — "Summary of proposed change".
+source_evidence_id
+FK
+Y
+→ asdlc_evidence_source
+D
+§6 — "Source input and timestamp".
+source_timestamp
+datetime
+Y
+—
+D
+§6.
+conflict_classification
+enum
+Y
+—
+D
+conflict | net_new | replacing | no_impact (§5, §6).
+risk_level
+enum
+Y
+—
+D
+low | med | high (§6).
+recommended_action
+enum
+Y
+—
+D
+§6 — "recommended approval action".
+baseline_impacting
+bool
+Y
+—
+D
+§5 step 7; §15 wireframe filter.
+validation_status
+enum
+Y
+—
+D
+passed | failed | low_confidence (Validation Agent).
+authoring_agent_run_id
+FK
+Y
+→ asdlc_agent_run
+D
+Agent run that authored the packet.
+approver_member_id
+FK
+N
+→ asdlc_project_member
+D
+§6 — "Approver".
+approval_timestamp
+datetime
+N
+—
+D
+§6 — "approval timestamp".
+decision_notes
+long text
+N
+—
+D
+§6 — "decision notes".
+design_summary_report_id
+FK
+N
+→ asdlc_report_export
+D
+§6 — "Link to generated design change summary report".
+
+6.4.2  asdlc_change_packet_item
+Junction: each individual field-level change inside a Change Packet. One CP contains many items; one item maps to one field_value_audit row when applied.
+Source: §6 — "Affected records and fields".   ·   Overall src: I
+Note: Spec calls for per-item old/new/rationale (§6); modeling as a separate junction table is the standard pattern.
+Field
+Type
+Req
+FK
+Src
+Notes
+change_packet_item_id
+UUID
+Y
+—
+I
+Primary key.
+change_packet_id
+FK
+Y
+→ asdlc_change_packet
+D
+Parent CP.
+entity_type
+text
+Y
+—
+D
+Target entity name.
+entity_id
+UUID
+Y
+—
+D
+Target record.
+field_path
+text
+Y
+—
+D
+Field being changed.
+old_value
+long text/json
+N
+—
+D
+§6.
+new_value
+long text/json
+Y
+—
+D
+§6.
+rationale
+long text
+N
+—
+D
+§6 — "change rationale".
+applied_audit_id
+FK
+N
+→ asdlc_field_value_audit
+I
+Set when CP is approved and item is applied.
+
+6.4.3  asdlc_validation_result
+Detailed validation findings produced by the Validation Agent for a Change Packet, packet item, or proposed field value. Supports per-field validation drill-down beyond the packet-level status.
+Source: Appendix A §8 Validation Agent.   ·   Overall src: I
+Note: The Validation Agent's outputs are documented (§A.8). Storing them as discrete rows is GPT's choice — keeps validation history queryable independent of CPs.
+Field
+Type
+Req
+FK
+Src
+Notes
+validation_result_id
+UUID
+Y
+—
+I
+Primary key.
+target_type
+enum
+Y
+—
+I
+change_packet | change_packet_item | field_value.
+target_id
+UUID
+Y
+—
+I
+Polymorphic FK target.
+result
+enum
+Y
+—
+D
+pass | fail | low_confidence (§A.8).
+confidence
+decimal
+N
+—
+D
+§A.8 — "confidence rating".
+notes
+long text
+N
+—
+D
+§A.8 — "field-level validation notes".
+exception_id
+FK
+N
+→ asdlc_exception
+D
+§A.8 — "exception router" output.
+validated_by_agent_run_id
+FK
+Y
+→ asdlc_agent_run
+D
+Validation Agent run.
+validated_at
+datetime
+Y
+—
+I
+When validation ran.
+
+6.4.4  asdlc_exception
+Items the agents could not safely resolve: failed validations, conflicts, low-confidence outputs, missing owners or evidence, governance-sensitive or baseline-impacting changes. The §15 Exception Queue reads from this table.
+Source: §15 Validation & Exception Queue.   ·   Overall src: D
+Note: The Exception Queue is documented in §15; modeling it as its own table is the natural implementation.
+Field
+Type
+Req
+FK
+Src
+Notes
+exception_id
+UUID
+Y
+—
+I
+Primary key.
+exception_type
+enum
+Y
+—
+D
+conflict | failed_validation | low_confidence | missing_owner | missing_evidence | governance_sensitive | baseline_impacting | other (§15 KPIs).
+severity
+enum
+Y
+—
+I
+low | med | high | critical.
+description
+long text
+Y
+—
+D
+§15 — "Reason" column.
+related_entity_type
+text
+Y
+—
+D
+§15 — "Record / field" column.
+related_entity_id
+UUID
+Y
+—
+D
+§15.
+suggested_action
+long text
+N
+—
+D
+§15 — "Suggested action" column.
+assigned_member_id
+FK
+N
+→ asdlc_project_member
+D
+§15.
+status
+enum
+Y
+—
+D
+open | in_review | resolved | deferred | closed.
+resolution_summary
+long text
+N
+—
+I
+How it was resolved.
+raised_by_agent_run_id
+FK
+N
+→ asdlc_agent_run
+D
+Agent run that raised the exception.
+
+6.5 Baselines & Reporting
+6.5.1  asdlc_baseline
+Named approved snapshot of the design (§7). Locks the state of all repository records at a point in time.
+Source: §7; §15 Baseline Manager.   ·   Overall src: D
+Field
+Type
+Req
+FK
+Src
+Notes
+baseline_id
+UUID
+Y
+—
+I
+Primary key.
+baseline_type
+enum
+Y
+—
+D
+draft | build | pilot | production | post_prod_revision (§7).
+baseline_name
+text
+Y
+—
+D
+§7 names: Draft Design, Build Baseline, etc.
+baseline_version
+text
+N
+—
+D
+Used for Post-Prod Revisions vX.Y (§7).
+baseline_status
+enum
+Y
+—
+D
+draft | approved | superseded | archived.
+summary_of_changes
+long text
+N
+—
+I
+Narrative of what changed vs prior baseline.
+parent_baseline_id
+FK
+N
+→ asdlc_baseline
+I
+Previous baseline this one branched from.
+created_from_change_packet_id
+FK
+N
+→ asdlc_change_packet
+D
+CP that triggered the baseline lock.
+locked_at
+datetime
+N
+—
+D
+§15 — "lock baselines".
+locked_by_member_id
+FK
+N
+→ asdlc_project_member
+I
+Who performed the lock.
+record_count
+int
+N
+—
+I
+Number of records included.
+field_count
+int
+N
+—
+I
+Number of fields included.
+
+6.5.2  asdlc_baseline_item
+Junction: which records and field values belong to a baseline, with their snapshotted values.
+Source: §7; §15.   ·   Overall src: I
+Note: The baseline-snapshot relationship is documented (§7); the per-item snapshot table is the standard pattern.
+Field
+Type
+Req
+FK
+Src
+Notes
+baseline_item_id
+UUID
+Y
+—
+I
+Primary key.
+baseline_id
+FK
+Y
+→ asdlc_baseline
+D
+Parent baseline.
+entity_type
+text
+Y
+—
+D
+Entity included.
+entity_id
+UUID
+Y
+—
+D
+Record included.
+field_value_id
+FK
+N
+→ asdlc_field_value
+D
+Field value included, when baselining at field level.
+snapshot_value
+long text/json
+N
+—
+D
+Value at time of baseline.
+
+6.5.3  asdlc_report_export
+History of generated client-facing or reviewer-facing reports. Per §3, clients consume reports — not the repository UI.
+Source: §14 Reporting model; §15 Report Builder.   ·   Overall src: I
+Note: Reports are explicitly documented (§14); tracking exports as a table is GPT's addition for traceability/auditability.
+Field
+Type
+Req
+FK
+Src
+Notes
+report_export_id
+UUID
+Y
+—
+I
+Primary key.
+report_type
+enum
+Y
+—
+D
+consolidated_design | template_specific | excel_review_pack | governance_packet | baseline_comparison | change_summary | traceability | exceptions (§14).
+baseline_id
+FK
+N
+→ asdlc_baseline
+D
+Baseline represented in the report.
+file_url
+text
+Y
+—
+I
+Generated report storage location.
+format
+enum
+Y
+—
+D
+docx | pdf | xlsx | html (§15).
+audience
+enum
+Y
+—
+D
+client_steerco | reviewer | internal_qa | governance.
+client_visible
+bool
+Y
+—
+D
+§3 — clients receive reports, not repository access.
+generated_by_agent_run_id
+FK
+N
+→ asdlc_agent_run
+D
+When generated by agent.
+generated_by_member_id
+FK
+N
+→ asdlc_project_member
+I
+When generated manually.
+generated_at
+datetime
+Y
+—
+I
+Generation timestamp.
+
+6.6 Agent Operations
+6.6.1  asdlc_agent_run
+One execution of a workbench agent. Provides auditability, troubleshooting, and the FK target that links Change Packets, Field Audits, and Validation Results back to the agent execution that produced them.
+Source: Implied by §3 (agent updates with audit trail) and §15 (recent repository changes feed). Not a documented entity in §9.   ·   Overall src: I
+Note: Operational logging is implied by every agent's audit/traceability requirement. Modeling as a table is necessary if agent runs are to be referenced from audits, CPs, exceptions, etc.
+Field
+Type
+Req
+FK
+Src
+Notes
+agent_run_id
+UUID
+Y
+—
+I
+Primary key.
+workbench_agent_id
+FK
+Y
+→ asdlc_agent_catalog
+D
+Which agent ran.
+trigger_type
+enum
+Y
+—
+D
+new_request | change_input | human_request | baseline_event | test_signal | production_signal | scheduled (§5 step 1).
+input_summary
+long text
+N
+—
+I
+Summary of input.
+output_summary
+long text
+N
+—
+I
+Summary of output.
+status
+enum
+Y
+—
+I
+started | completed | failed | needs_human_review | cancelled.
+started_at
+datetime
+Y
+—
+I
+Run start.
+ended_at
+datetime
+N
+—
+I
+Run end.
+cost_consumption
+json
+N
+—
+D
+Tokens/Assists/actions consumed (§A.6 Cost Agent uses this).
+
+6.6.2  asdlc_agent_task
+Unit of work assigned by the Orchestrator to a specialist agent or human. Implements the Orchestrator's queue (§A.0).
+Source: Appendix A §0 Orchestrator (task assignments, status dashboard).   ·   Overall src: I
+Note: Orchestrator outputs include "agent task assignments" and "status dashboard" — implies a task queue. Modeling as a table is the natural implementation.
+Field
+Type
+Req
+FK
+Src
+Notes
+agent_task_id
+UUID
+Y
+—
+I
+Primary key.
+assigned_to_agent_id
+FK
+N
+→ asdlc_agent_catalog
+D
+Agent assigned (null when assigned to human).
+assigned_to_member_id
+FK
+N
+→ asdlc_project_member
+D
+Human assigned (null when assigned to agent).
+task_type
+enum
+Y
+—
+D
+draft | validate | review | approve | resolve_exception | generate_report | update_records (§A.0).
+task_summary
+long text
+Y
+—
+I
+Task description.
+related_entity_type
+text
+N
+—
+I
+Related record type.
+related_entity_id
+UUID
+N
+—
+I
+Related record ID.
+parent_orchestration_event_id
+FK
+N
+→ asdlc_orchestration_event
+I
+Event that created this task.
+status
+enum
+Y
+—
+I
+open | in_progress | complete | blocked | cancelled.
+due_at
+datetime
+N
+—
+I
+Optional due date.
+
+6.6.3  asdlc_orchestration_event
+Decision trail of the Orchestrator. Records why the Orchestrator routed work the way it did, including which methodology rules and trust settings drove the decision.
+Source: Appendix A §0 — "approval and exception routing log", "traceability map".   ·   Overall src: I
+Note: Orchestrator decision trail is documented as an output. Optional in v1 — can be deferred if simpler logging suffices.
+Field
+Type
+Req
+FK
+Src
+Notes
+orchestration_event_id
+UUID
+Y
+—
+I
+Primary key.
+orchestrator_run_id
+FK
+Y
+→ asdlc_agent_run
+D
+Orchestrator run that emitted the event.
+event_type
+enum
+Y
+—
+D
+route_agent | request_human_review | apply_change_packet | create_baseline | generate_report | raise_exception (§A.0).
+decision_summary
+long text
+Y
+—
+D
+Why the Orchestrator took this action.
+rules_used
+json
+N
+—
+D
+Methodology rules and trust settings consulted.
+target_agent_task_id
+FK
+N
+→ asdlc_agent_task
+D
+Task created by event, when applicable.
+
+
+7. Key Relationships
+Principal cardinality patterns. The repository is a directed graph rooted at asdlc_project. Many cross-references in this list use polymorphic FKs (entity_type, entity_id) — see §3 naming convention.
+From
+Card.
+To
+Src
+Spec ref
+asdlc_client
+1:N
+asdlc_project
+D
+§10
+asdlc_project
+1:N
+asdlc_use_case
+D
+§9
+asdlc_project
+1:N
+asdlc_baseline
+D
+§7
+asdlc_project
+M:N
+asdlc_project_member (via junction)
+D
+§4
+asdlc_project
+1:N
+asdlc_project_agent_setting
+D
+§8
+asdlc_use_case
+1:N
+asdlc_workflow
+I
+Multiple workflows per use case implied by §11
+asdlc_use_case
+1:N
+asdlc_process_segment
+I
+§A.3
+asdlc_workflow
+1:N
+asdlc_workflow_step
+D
+§9
+asdlc_workflow
+1:N
+asdlc_hitl_gate
+D
+§9
+asdlc_workflow_step
+N:1
+asdlc_hitl_gate (optional)
+I
+A step may sit behind one gate
+asdlc_agent_spec
+M:N
+asdlc_tool (via asdlc_agent_tool)
+D
+§9
+asdlc_agent_spec
+M:N
+asdlc_guardrail
+D
+§9
+asdlc_agent_spec
+M:N
+asdlc_data_source
+D
+§A.5
+asdlc_field_value
+N:1
+asdlc_source_reference
+D
+§3
+asdlc_field_value
+1:N
+asdlc_field_value_audit
+D
+§9
+asdlc_field_value_audit
+N:1
+asdlc_change_packet
+D
+§6
+asdlc_change_packet
+1:N
+asdlc_change_packet_item
+D
+§6
+asdlc_change_packet
+N:1
+asdlc_evidence_source
+D
+§6
+asdlc_change_packet
+N:1
+asdlc_project_member (approver)
+D
+§6
+asdlc_validation_result
+N:1
+asdlc_change_packet (or item, or field_value)
+D
+§A.8
+asdlc_exception
+N:1
+asdlc_project_member (assigned)
+D
+§15
+asdlc_baseline
+1:N
+asdlc_baseline_item
+D
+§7
+asdlc_baseline_item
+N:1
+asdlc_field_value (snapshot)
+D
+§7
+asdlc_report_export
+N:1
+asdlc_baseline (optional)
+D
+§14
+asdlc_agent_run
+1:N
+asdlc_agent_task
+I
+§A.0
+asdlc_agent_run
+1:N
+asdlc_orchestration_event
+I
+§A.0
+asdlc_test_scenario
+N:1
+use_case / workflow / agent_spec / tool (polymorphic)
+D
+§A.7
+asdlc_user_story
+M:N
+use_case / workflow / agent_spec / tests
+D
+§A.10
+8. Trust Dial Model
+The trust dial is set per (project, agent) in asdlc_project_agent_setting. Levels are documented in §8 of the spec.
+Level
+Meaning
+Behavior
+1
+Low trust
+Agent drafts only. All proposed changes require human review.
+2
+Developing trust
+Agent prepares Change Packets. Most changes require human approval.
+3
+Moderate trust
+Agent may group low-risk changes. Human approval remains the default for approved baselines.
+4
+High trust
+Agent can apply low-risk draft changes with audit; approved baseline changes still require approval.
+5
+Very high trust
+Agent can apply low-risk changes under defined rules. Exceptions, conflicts, high-risk fields, and baselines still route to humans.
+9. Scope and Reuse Model
+The visibility_scope cross-cutting attribute (§4) implements the access model from §10. All-client patterns are owned outside the system (§10) but tracked here via asdlc_functional_owner for traceability.
+Reuse scope
+Meaning
+Access / control
+PROJECT
+Visible only inside one project.
+Default for client-specific design data.
+CLIENT
+Reusable across projects for the same client.
+Requires client-specific governance by the internal client team.
+ALL_CLIENTS
+Reusable method pattern across clients.
+Maintained outside this system by Functional Owners. Must not contain proprietary client assumptions.
+10. Suggested Indexes and Constraints
+Implementation guidance for whichever physical store the repository ends up in. Required for performance at scale; optional for early MVP.
+• Index every (project_id) column. Most queries filter by project.
+• Index (entity_type, entity_id) on asdlc_field_value, asdlc_field_value_audit, asdlc_baseline_item, asdlc_test_scenario (linked_*), asdlc_governance_control, asdlc_cost_estimate, asdlc_change_packet_item, asdlc_validation_result, asdlc_exception. These are the polymorphic-FK lookup keys.
+• Index (visibility_scope) on every reusable-pattern table to support fast filtering in the Pattern Library UI.
+• Index (status) and (lifecycle_status) on asdlc_change_packet, asdlc_exception, asdlc_agent_task — these drive queue UIs.
+• Composite index (project_id, baseline_id) on asdlc_field_value for baseline reports.
+• Composite index (workbench_agent_id, started_at DESC) on asdlc_agent_run for agent-activity views.
+• Unique constraint on asdlc_field_value (entity_type, entity_id, field_path) — only one active value per field.
+• Unique constraint on asdlc_project_agent_setting (project_id, workbench_agent_id) — one trust setting per (project, agent).
+• Unique constraint on asdlc_change_packet (packet_code) — human-readable IDs cannot collide.
+• Foreign-key constraints with ON DELETE RESTRICT on every reference. No cascade deletes — soft-delete only via lifecycle_status.
+• Check constraint: trust_level BETWEEN 1 AND 5.
+• Check constraint: when visibility_scope = PROJECT, project_id must be non-null. When ALL_CLIENTS, functional_owner_id must be non-null.
+
+11. Suggestions to make the design more robust
+• Create a formal field dictionary listing each field, owner, allowed values, required-by-supervision rules, and governance-sensitive flag.
+• Define risk tiers for Change Packets so low-risk edits can eventually be approved more quickly than high-risk ones. The asdlc_change_packet.risk_level column is the hook.
+• Generate a Design Change Summary report automatically for every approved Change Packet (the asdlc_report_export.report_type = change_summary path).
+• Generate Baseline Comparison reports so teams can easily see what changed Draft → Build → Pilot → Production → Post-Prod.
+• Use the trust dial cautiously. Start most agents at levels 1-3 and increase only after successful project experience.
+• Add automated duplicate detection on asdlc_tool, asdlc_guardrail, asdlc_test_scenario, asdlc_agent_spec — avoid creating multiple versions of the same reusable pattern.
+• Add data-leakage checks before any record is promoted from PROJECT to CLIENT or ALL_CLIENTS scope.
+• Use the asdlc_field_value.governance_sensitive flag to mask values from client-facing reports automatically.
+• Build a repository health dashboard (the §15 Admin Home view): open Change Packets, failed validations, stale reusable records, missing evidence, unapproved baselines, trust-level exceptions.
+• Keep client-facing outputs simple and report-based. Do not expose the repository UI to clients in v1.
+• Treat the design repository as a product. Assign a product owner, data steward/admin, and Functional Owners for reusable patterns.
+12. Recommended MVP Build Sequence
+Phased build order. Each phase produces a usable workbench; later phases add agent assistance, reuse, and operate-phase loops.
+Phase
+Theme
+Tables / agents added
+Why
+MVP 1
+Core repository
+asdlc_client, asdlc_project, asdlc_project_member, asdlc_evidence_source, the design content tables (use_case, workflow, workflow_step, agent_spec, tool, etc.), asdlc_field_value, asdlc_field_value_audit, asdlc_change_packet, asdlc_change_packet_item, asdlc_baseline, asdlc_baseline_item, asdlc_report_export.
+Creates the minimum viable living repository. Humans drive most input.
+MVP 2
+Agent assistance
+asdlc_agent_catalog, asdlc_project_agent_setting, asdlc_agent_run, asdlc_agent_task, asdlc_validation_result, Change Intake / Validation / Orchestrator agents.
+Adds agent-assisted change handling and trust dial.
+MVP 3
+Quality & cost
+asdlc_test_scenario, asdlc_cost_estimate, asdlc_governance_control, asdlc_user_story; Testing, Cost, Governance, Story agents.
+Connects design to delivery readiness.
+MVP 4
+Reuse
+visibility_scope enforcement, asdlc_functional_owner, asdlc_knowledge_article, Pattern Library UI, asdlc_source_reference (rich citations).
+Enables reuse while preserving data separation.
+MVP 5
+Operate-phase
+Production signal ingestion (evidence_source.source_type = production_signal), post-prod baseline versioning, drift/cost variance loops, asdlc_orchestration_event for full decision trail.
+Turns the repository into an operate-phase learning system.
+13. Open Questions
+Items where the source spec is silent, ambiguous, or contains an apparent gap. Resolve items 1-3 before DDL is finalized; items 4-10 can be deferred to a v1.1 review.
+Question
+Why it matters
+Recommendation
+1. Implementation location: ServiceNow-native, external workbench, or hybrid?
+Affects security model, integrations, UI, agent orchestration, and client delivery model.
+Keep open. Decide after MVP-1 scope and ServiceNow app feasibility are confirmed.
+2. Hybrid field model: how many fields are physical typed columns vs. only in asdlc_field_value?
+Columns improve reporting and queryability; generic field values improve audit and flexibility.
+Use hybrid: keep typed columns on entity tables for high-use fields AND insert/update a matching asdlc_field_value row for source/audit/baseline truth.
+3. Polymorphic FK pattern: (scope_type, scope_id) vs. explicit nullable FKs to each candidate.
+Affects queryability and referential integrity. Cost Estimate, Governance Control, Test Scenario, Field Value, Field Audit, Exception, Validation Result, and Baseline Item all need this.
+Recommend (scope_type, scope_id) pair for compactness; add a check constraint or trigger to enforce that scope_id exists in the table named by scope_type.
+4. Is User a first-class entity inside the workbench, or a reference to an external IdP?
+Affects whether asdlc_project_member.user_id is a UUID FK or a reference string.
+Recommend external IdP reference (Entra ID / ServiceNow user table) — workbench does not own identity.
+5. Where do all-client patterns physically live?
+§10 says all-client patterns are "maintained outside this system" — could mean separate tables or same tables with project_id = NULL.
+Same tables, project_id NULL, visibility_scope = ALL_CLIENTS, functional_owner_id required. Simpler than separate tables.
+6. Knowledge Article retrieval: is RAG (vector search) required?
+Affects whether asdlc_knowledge_article.embedding_vector is populated and refreshed.
+Defer to MVP 4 when KAs become operationally important. Cosmetic field in MVP 1.
+7. Trust dial overrides: is the override per-(project, agent) only, or per-(project, agent, behavior_class)?
+Affects whether asdlc_project_agent_setting needs additional rows per behavior class.
+Per-(project, agent) for v1. Add behavior-class granularity only if v1 experience shows it is needed.
+8. Reuse boundary on Project.inherit_from_project_id: do inherited records appear with parent IDs or get re-IDed?
+Has implications for how Field Audit reads back across project boundaries.
+Inherited records remain parent-owned and read-only from the child project. Field Audit reads cross-project for inherited records.
+9. How rich should asdlc_source_reference be in v1?
+§3 says source link + date/time is sufficient for v1; full citation (timestamp, page, line, confidence) adds robustness for disputes.
+Build the table in MVP 1 but only require evidence_source_id and source_datetime; promote richer citation fields to required in MVP 4.
+10. asdlc_orchestration_event scope and retention.
+Could grow large. Not strictly required if simpler logging suffices.
+Optional in v1. Defer to MVP 5 when operate-phase analytics are needed.
+14. Appendix: Workbench Agent List
+The 12 workbench agents catalogued in §11 of the source spec, populated into asdlc_agent_catalog at install time.
+Agent
+Primary role
+Orchestrator
+Routes work, applies approved Change Packets, manages readiness and agent sequencing.
+Intake
+Creates initial structured use case data from stakeholder requests.
+Change Intake / Impact Assessment
+Assesses new inputs as net-new, replacement, conflict, correction, or enhancement.
+Process
+Determines whether process redesign is needed and drafts process impact.
+Workflow Design
+Creates workflow steps, triggers, HITL gates, fallback paths.
+Agent Architect
+Creates designed-solution agent specs, tool contracts, guardrails, context strategy.
+Cost
+Estimates and monitors Assist/token/action consumption and cost variance.
+Testing
+Creates and maintains test scenarios and regression packs.
+Validation
+Checks source-to-field accuracy and flags failed validation.
+Governance
+Creates governance readiness, controls, and approval evidence.
+Story
+Creates user stories and acceptance criteria from approved design data.
+Reviewer
+Checks completeness, consistency, traceability, and readiness.
+

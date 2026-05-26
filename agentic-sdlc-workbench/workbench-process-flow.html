@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agentic SDLC Workbench — Process Flow</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: #f0f2f5;
+  color: #1a1a2e;
+  padding: 32px 24px 80px;
+}
+
+h1 {
+  text-align: center;
+  font-size: 22px;
+  font-weight: 700;
+  color: #1a1a2e;
+  margin-bottom: 6px;
+}
+.subtitle {
+  text-align: center;
+  font-size: 13px;
+  color: #64748b;
+  margin-bottom: 28px;
+}
+
+/* ── Legend ── */
+.legend {
+  display: flex;
+  justify-content: center;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-bottom: 36px;
+}
+.legend-item { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: #374151; }
+.swatch { width: 26px; height: 16px; border-radius: 3px; border: 2px solid transparent; }
+.sw-human    { background: #e8f0fe; border-color: #4a80d9; }
+.sw-ai       { background: #fef3c7; border-color: #d97706; }
+.sw-decision { background: #f3e8ff; border-color: #8b5cf6; }
+.sw-output   { background: #dcfce7; border-color: #16a34a; }
+.sw-export   { background: #fee2e2; border-color: #dc2626; }
+
+/* ── Section header ── */
+.section-hdr {
+  max-width: 1080px;
+  margin: 0 auto 10px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: #475569;
+  border-left: 3px solid #4a80d9;
+  padding-left: 10px;
+}
+
+/* ── Canvas wrapper ── */
+.canvas {
+  max-width: 1080px;
+  margin: 0 auto 36px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 28px 24px;
+}
+
+/* ── Shared node ── */
+.node {
+  border-radius: 8px;
+  border: 2px solid transparent;
+  padding: 10px 13px;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+  position: relative;
+}
+.node strong { display: block; margin-bottom: 2px; font-size: 12.5px; }
+.node-human    { background: #e8f0fe; border-color: #4a80d9; color: #1e3a8a; }
+.node-ai       { background: #fef3c7; border-color: #d97706; color: #78350f; }
+.node-output   { background: #dcfce7; border-color: #16a34a; color: #14532d; border-style: dashed; }
+.node-export   { background: #fee2e2; border-color: #dc2626; color: #7f1d1d; }
+/* Decision diamond — rotate the box 45°, counter-rotate the text so it stays readable.
+   This avoids clip-path which crops text that overflows the shape boundary. */
+.decision-outer {
+  width: 88px;
+  height: 88px;
+  background: #f3e8ff;
+  border: 2px solid #8b5cf6;
+  transform: rotate(45deg);
+  margin: 26px auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 4px;
+}
+.decision-inner {
+  transform: rotate(-45deg);
+  font-size: 11px;
+  font-weight: 700;
+  color: #4c1d95;
+  text-align: center;
+  width: 150px;
+  line-height: 1.4;
+}
+
+.ai-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 10px; font-weight: 700;
+  background: #d97706; color: #fff;
+  border-radius: 3px; padding: 1px 5px;
+  margin-bottom: 4px;
+  text-transform: uppercase; letter-spacing: 0.3px;
+}
+
+/* ── Arrow helpers ── */
+.arr { text-align: center; color: #94a3b8; font-size: 20px; line-height: 1; margin: 4px 0; }
+.arr-label { text-align: center; font-size: 10.5px; color: #64748b; margin-top: -2px; margin-bottom: 2px; }
+.arr-yes  { color: #16a34a; font-weight: 700; font-size: 11px; margin-top: -2px; }
+.arr-no   { color: #dc2626; font-weight: 700; font-size: 11px; margin-top: -2px; }
+
+/* ════════════════════════════════════
+   SECTION 1 — gather paths
+════════════════════════════════════ */
+.gather-paths {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-bottom: 16px;
+}
+.path-col {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  background: #fafafa;
+}
+.path-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #475569;
+  background: #e2e8f0;
+  border-radius: 4px;
+  padding: 3px 10px;
+  margin-bottom: 4px;
+  align-self: stretch;
+  text-align: center;
+}
+.path-col .node { width: 100%; max-width: 300px; }
+
+/* ── Converge bar ── */
+.converge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  margin-bottom: 12px;
+  position: relative;
+}
+.converge::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 50%;
+  transform: translateX(-50%);
+  width: 55%; height: 1px;
+  border-top: 2px dashed #94a3b8;
+}
+.converge-arr { text-align: center; color: #94a3b8; font-size: 20px; }
+.converge-label {
+  font-size: 11px; color: #64748b;
+  background: #f1f5f9; border-radius: 3px;
+  padding: 2px 8px; white-space: nowrap;
+}
+
+/* ════════════════════════════════════
+   LOOP BOX
+════════════════════════════════════ */
+.loop-box {
+  border: 2.5px dashed #4a80d9;
+  border-radius: 12px;
+  padding: 20px 20px 16px;
+  position: relative;
+  margin-bottom: 16px;
+}
+.loop-badge {
+  position: absolute;
+  top: -13px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #4a80d9;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  padding: 2px 14px;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+.loop-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.loop-inner .node { width: 100%; max-width: 480px; }
+
+/* re-gather split */
+.regather-split {
+  width: 100%;
+  max-width: 480px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 0 auto;
+}
+.regather-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.regather-col .node { width: 100%; }
+
+/* loop-back arrow */
+.loop-back {
+  width: 100%;
+  max-width: 480px;
+  margin: 4px auto 0;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  border: 1.5px dashed #4a80d9;
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  padding: 6px 14px;
+  background: #eff6ff;
+}
+.loop-back-arrow {
+  font-size: 18px; color: #4a80d9; margin-right: 8px;
+}
+.loop-back-text {
+  font-size: 11px; color: #1e40af; font-weight: 600;
+}
+.loop-cycle-tag {
+  margin-left: auto;
+  font-size: 10px;
+  background: #dbeafe;
+  color: #1e40af;
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-weight: 700;
+}
+
+/* ════════════════════════════════════
+   SECTION 2 — parallel governance
+════════════════════════════════════ */
+.parallel-banner {
+  max-width: 1080px;
+  margin: 0 auto 10px;
+  background: linear-gradient(90deg, #1e293b, #334155);
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 8px 20px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.parallel-pill {
+  background: #0ea5e9; color: #fff;
+  border-radius: 3px; padding: 1px 7px;
+  font-size: 10px;
+}
+
+.gov-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+.gov-col {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fafafa;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+}
+.gov-col-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: #475569;
+  background: #e2e8f0;
+  border-radius: 4px;
+  padding: 3px 10px;
+  align-self: stretch;
+  text-align: center;
+  margin-bottom: 4px;
+}
+.gov-col .node { width: 100%; }
+
+/* ════════════════════════════════════
+   SECTION 3 — export & generate
+════════════════════════════════════ */
+.export-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+.export-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.export-col .node { width: 100%; }
+.col-hdr {
+  font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.4px;
+  color: #475569; background: #e2e8f0;
+  border-radius: 4px; padding: 3px 12px;
+  align-self: stretch; text-align: center;
+  margin-bottom: 4px;
+}
+
+/* ── Notes ── */
+.notes {
+  max-width: 1080px;
+  margin: 0 auto;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 18px 22px;
+}
+.notes h3 {
+  font-size: 12px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.4px;
+  color: #1e293b; margin-bottom: 10px;
+}
+.notes ul { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.notes li {
+  font-size: 12px; color: #374151;
+  padding-left: 16px; position: relative;
+}
+.notes li::before { content: '→'; position: absolute; left: 0; color: #4a80d9; font-weight: 700; }
+.notes li strong { color: #1e293b; }
+
+.spacer { height: 20px; }
+</style>
+</head>
+<body>
+
+<h1>Agentic SDLC Workbench — End-to-End Process Flow</h1>
+<p class="subtitle">Iterative gather &rarr; ingest cycle &nbsp;|&nbsp; Parallel governance &nbsp;|&nbsp; ServiceNow configuration generation</p>
+
+<!-- Legend -->
+<div class="legend">
+  <div class="legend-item"><div class="swatch sw-human"></div>Human step</div>
+  <div class="legend-item"><div class="swatch sw-ai"></div>AI Agent / AI process</div>
+  <div class="legend-item"><div class="swatch sw-decision"></div>Decision / branch</div>
+  <div class="legend-item"><div class="swatch sw-output"></div>Output / artefact</div>
+  <div class="legend-item"><div class="swatch sw-export"></div>Generate / deploy</div>
+</div>
+
+
+<!-- ════════════════════════════════════════
+     SECTION 1 — GATHER / INGEST LOOP
+═════════════════════════════════════════ -->
+<div class="section-hdr">① Gather &amp; Ingest — iterative cycle (repeats N times until design is complete)</div>
+
+<div class="canvas">
+
+  <!-- INITIAL GATHER — two parallel paths -->
+  <div style="text-align:center; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:#64748b; margin-bottom:10px;">
+    Initial Gather — choose one path (or both)
+  </div>
+
+  <div class="gather-paths">
+
+    <!-- Path A -->
+    <div class="path-col">
+      <div class="path-label">Path A &mdash; AI-Led Interview</div>
+      <div class="node node-human"><strong>Project owner / PM</strong>Decides to capture requirements; selects AI interview option</div>
+      <div class="arr">↓</div>
+      <div class="node node-ai">
+        <div class="ai-badge">🤖 AI Agent</div>
+        <strong>Claude Skill — AI Interviewer</strong>
+        Conducts structured interview with PO using the Agentic Use Case Interview Guide. No human interviewer needed.
+      </div>
+      <div class="arr">↓</div>
+      <div class="node node-output"><strong>Interview transcript</strong>Audio + AI-generated text transcript</div>
+    </div>
+
+    <!-- Path B -->
+    <div class="path-col">
+      <div class="path-label">Path B &mdash; Human-Led Interview</div>
+      <div class="node node-human"><strong>Human interviewer</strong>Conducts structured interview with PO using the Interview Guide</div>
+      <div class="arr">↓</div>
+      <div class="node node-output"><strong>Audio recording</strong>WAV / MP3 saved locally</div>
+      <div class="arr">↓</div>
+      <div class="node node-ai">
+        <div class="ai-badge">🤖 AI Process</div>
+        <strong>Whisper Transcription</strong>
+        Converts audio → text transcript with metadata header
+      </div>
+      <div class="arr">↓</div>
+      <div class="node node-output"><strong>Text transcript</strong>Ready to upload</div>
+    </div>
+
+  </div>
+
+  <!-- Converge note -->
+  <div style="text-align:center; margin-bottom:8px;">
+    <span style="font-size:11px; color:#64748b; background:#f1f5f9; border-radius:3px; padding:3px 12px;">
+      ↙ &nbsp;Both paths produce a transcript or document&nbsp; ↘
+    </span>
+  </div>
+  <div style="text-align:center; margin-bottom:4px;">
+    <span style="font-size:11px; color:#64748b;">Also: collect supporting documents (process maps, data specs, RASIC CSVs…)</span>
+  </div>
+  <div class="arr">↓</div>
+  <div style="display:flex; justify-content:center; margin-bottom:4px;">
+    <div class="node node-human" style="max-width:400px;">
+      <strong>Upload to Workbench</strong>
+      Drag-and-drop files via Ingest module (transcript, audio, DOCX, CSV, etc.)
+    </div>
+  </div>
+  <div class="arr">↓</div>
+
+  <!-- ════ LOOP BOX ════ -->
+  <div class="loop-box">
+    <div class="loop-badge">🔄 &nbsp; Gather → Ingest Cycle &nbsp;—&nbsp; repeats until all design content is staged</div>
+
+    <div class="loop-inner">
+
+      <div class="node node-human" style="max-width:480px;">
+        <strong>Click "Process Document"</strong>
+        Triggers extraction agent on this document
+      </div>
+      <div class="arr">↓</div>
+
+      <div class="node node-ai" style="max-width:480px;">
+        <div class="ai-badge">🤖 AI Agent</div>
+        <strong>Claude Extraction Agent (Round N)</strong>
+        Reads the document. Calls 10 typed extraction tools — one per entity found. Self-assesses confidence on every item. On re-runs: uses previous clarification answers to improve low-confidence extractions.
+      </div>
+      <div class="arr">↓</div>
+
+      <div class="node node-output" style="max-width:480px;">
+        <strong>Extractions staged &amp; clarifications raised</strong>
+        High-confidence items → <em>staged</em>. Low-confidence items → <em>needs_clarification</em> + specific question written.
+      </div>
+      <div class="arr">↓</div>
+
+      <div class="decision-outer"><div class="decision-inner">Any open clarification questions?</div></div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; max-width:480px; width:100%; margin: 0 auto 2px;">
+        <div class="arr-yes" style="text-align:right; padding-right:28px;">YES ↙</div>
+        <div class="arr-no" style="text-align:left; padding-left:28px;">↘ NO</div>
+      </div>
+
+      <!-- YES branch — re-gather split -->
+      <div class="regather-split">
+
+        <div class="regather-col">
+          <div style="font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.4px; color:#64748b; background:#f1f5f9; border-radius:3px; padding:2px 8px; text-align:center; width:100%;">
+            Path A Re-Gather
+          </div>
+          <div class="node node-ai">
+            <div class="ai-badge">🤖 AI Agent</div>
+            <strong>Claude Skill — Follow-up Session</strong>
+            AI takes PO through the specific clarification questions. Produces targeted answers.
+          </div>
+        </div>
+
+        <div class="regather-col">
+          <div style="font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.4px; color:#64748b; background:#f1f5f9; border-radius:3px; padding:2px 8px; text-align:center; width:100%;">
+            Path B Re-Gather
+          </div>
+          <div class="node node-human">
+            <strong>Human returns to PO / SME</strong>
+            Reviewer takes clarification questions back to the source — interview, email, or follow-up session.
+          </div>
+        </div>
+
+      </div>
+
+      <div class="arr">↓</div>
+      <div class="node node-human" style="max-width:480px;">
+        <strong>Answers entered into Workbench</strong>
+        Clarifications panel in the Ingest module — answer field per question
+      </div>
+      <div class="arr">↓</div>
+
+      <!-- Loop-back footer -->
+      <div class="loop-back">
+        <span class="loop-back-arrow">↩</span>
+        <span class="loop-back-text">Loop back → re-run Claude Extraction Agent with answers incorporated</span>
+        <span class="loop-cycle-tag">Cycle N+1</span>
+      </div>
+
+    </div><!-- /loop-inner -->
+  </div><!-- /loop-box -->
+
+  <!-- NO branch — exit loop -->
+  <div style="text-align:center; margin-bottom:4px;">
+    <span class="arr-no">↓ NO — all items staged</span>
+  </div>
+  <div class="arr">↓</div>
+  <div style="display:flex; justify-content:center; margin-bottom:4px;">
+    <div class="node node-human" style="max-width:400px;">
+      <strong>Reviewer clicks "Promote"</strong>
+      Staged extractions become pending Change Packets in the Workbench
+    </div>
+  </div>
+  <div class="arr">↓</div>
+  <div style="display:flex; justify-content:center;">
+    <div class="node node-output" style="max-width:400px;">
+      <strong>Change Packets created</strong>
+      One packet per entity type — queued for human review &amp; approval
+    </div>
+  </div>
+
+</div><!-- /canvas -->
+
+
+<!-- ════════════════════════════════════════
+     SECTION 2 — PARALLEL GOVERNANCE
+═════════════════════════════════════════ -->
+<div class="parallel-banner">
+  <span class="parallel-pill">PARALLEL</span>
+  ② Workbench Content Management — separate but related process; runs continuously; fed by Change Packets from the ingest cycle
+</div>
+<div class="spacer"></div>
+
+<div class="section-hdr">② Workbench Governance (always-on, runs alongside the gather/ingest cycle)</div>
+
+<div class="canvas">
+  <div class="gov-grid">
+
+    <div class="gov-col">
+      <div class="gov-col-title">Change Packet Review</div>
+      <div class="node node-human"><strong>Reviewer</strong>Opens Change Packet Queue; inspects diff rows per entity</div>
+      <div class="arr">↓</div>
+      <div class="decision-outer"><div class="decision-inner">Approve / Reject / Send Back?</div></div>
+      <div class="arr">↓</div>
+      <div class="node node-output"><strong>Decision recorded</strong>Audit log entry; entity promoted or returned to sender</div>
+    </div>
+
+    <div class="gov-col">
+      <div class="gov-col-title">Design Content &amp; Exceptions</div>
+      <div class="node node-human"><strong>Methodology / functional owner</strong>Manages use cases, workflows, agent specs, guardrails, HITL gates, user stories in Library &amp; Design modules. Assigns owners. Sets visibility scope.</div>
+      <div class="arr">↓</div>
+      <div class="node node-human"><strong>Exception Queue</strong>Monitors schema violations, missing owners, conflicts. Assigns &amp; resolves exceptions.</div>
+      <div class="arr">↓</div>
+      <div class="node node-output"><strong>Evidence Registry</strong>Each change packet linked to source evidence for full traceability</div>
+    </div>
+
+    <div class="gov-col">
+      <div class="gov-col-title">Baselines &amp; Trust</div>
+      <div class="node node-human"><strong>Methodology owner</strong>Sets Trust Dial (1–5) per agent in Trust Console</div>
+      <div class="arr">↓</div>
+      <div class="node node-human"><strong>Baseline Manager</strong>Locks a baseline when design is stable for a phase<br><em>Draft → Build → Pilot → Production</em></div>
+      <div class="arr">↓</div>
+      <div class="node node-output"><strong>Locked baseline</strong>Immutable snapshot. Compare tool shows diffs between phases.</div>
+      <div class="arr">↓</div>
+      <div class="node node-output"><strong>Audit log always on</strong>Every change timestamped; actor + before/after values stored</div>
+    </div>
+
+  </div>
+</div><!-- /canvas -->
+
+
+<!-- ════════════════════════════════════════
+     SECTION 3 — EXPORT & GENERATE
+═════════════════════════════════════════ -->
+<div class="section-hdr">③ Export &amp; Generate ServiceNow Configuration (once a baseline is locked and approved)</div>
+
+<div class="canvas">
+  <div class="export-grid">
+
+    <div class="export-col">
+      <div class="col-hdr">Workbench Export</div>
+      <div class="node node-human"><strong>Methodology owner</strong>Selects approved baseline from Report Builder</div>
+      <div class="arr">↓</div>
+      <div class="node node-human"><strong>Chooses export scope</strong>Use cases, workflows, agent specs, guardrails, HITL gates, user stories</div>
+      <div class="arr">↓</div>
+      <div class="node node-output"><strong>Structured export package</strong>JSON / DOCX containing all approved design entities, field values, and baseline metadata — the "spec" for generation</div>
+    </div>
+
+    <div class="export-col">
+      <div class="col-hdr">AI Generation</div>
+      <div class="node node-ai">
+        <div class="ai-badge">🤖 AI Agent</div>
+        <strong>Claude Code</strong>
+        Reads the export package. Interprets agent specs, workflow steps, guardrails, and HITL gates. Generates ServiceNow Flow Designer flows, agent definitions, business rules, and approval policies.
+      </div>
+      <div class="arr">↓</div>
+      <div class="node node-ai">
+        <div class="ai-badge">🤖 AI Process</div>
+        <strong>ServiceNow SDK</strong>
+        Applies generated configuration to the target instance via update set or scripted REST
+      </div>
+    </div>
+
+    <div class="export-col">
+      <div class="col-hdr">Deploy &amp; Validate</div>
+      <div class="node node-export"><strong>ServiceNow configuration deployed</strong>Flows, agents, guardrails, and HITL approvals live in the instance</div>
+      <div class="arr">↓</div>
+      <div class="node node-human"><strong>Functional owner validates</strong>Smoke test against acceptance criteria from user stories</div>
+      <div class="arr">↓</div>
+      <div class="decision-outer"><div class="decision-inner">Passes validation?</div></div>
+      <div class="arr">↓</div>
+      <div class="arr-yes">↓ YES</div>
+      <div class="node node-export"><strong>✓ Ready for pilot / production</strong></div>
+    </div>
+
+  </div>
+</div><!-- /canvas -->
+
+
+<!-- ── Notes ── -->
+<div class="notes">
+  <h3>AI touchpoints in this flow</h3>
+  <ul>
+    <li><strong>AI Interviewer (Path A, initial + re-gather):</strong> Claude Skill conducts the PO interview and any follow-up sessions autonomously using the structured Interview Guide.</li>
+    <li><strong>Whisper Transcription (Path B):</strong> Audio recordings converted to text by OpenAI Whisper before upload.</li>
+    <li><strong>Claude Extraction Agent (each loop iteration):</strong> Reads the document, calls 10 typed extraction tools, self-assesses confidence, raises targeted clarification questions, and on re-runs uses the provided answers to improve accuracy. Loops until all items are staged.</li>
+    <li><strong>Claude Code (Generation):</strong> Consumes the approved Workbench export package and generates ServiceNow configuration artifacts.</li>
+    <li><strong>ServiceNow SDK (Deploy):</strong> Applies generated configuration to the target instance programmatically.</li>
+    <li><strong>Human gates remain at:</strong> interview conduct (Path B), clarification answers, Change Packet approve/reject, baseline locking, trust dial settings, and final validation. AI never acts without a human checkpoint in the current design.</li>
+  </ul>
+</div>
+
+</body>
+</html>

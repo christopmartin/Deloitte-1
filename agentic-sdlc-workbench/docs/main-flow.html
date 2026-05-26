@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SDLC Workbench — Main Flow</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f4f8;
+      color: #1e293b;
+      padding: 32px 24px 60px;
+    }
+
+    .page-header {
+      max-width: 1100px;
+      margin: 0 auto 32px;
+    }
+    .page-header h1 {
+      font-size: 24px;
+      font-weight: 800;
+      color: #1e3a5f;
+      margin-bottom: 6px;
+    }
+    .page-header p {
+      font-size: 14px;
+      color: #64748b;
+    }
+
+    /* ── Legend ── */
+    .legend {
+      max-width: 1100px;
+      margin: 0 auto 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      padding: 16px 20px;
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+    }
+    .legend-title {
+      width: 100%;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #94a3b8;
+      margin-bottom: 4px;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: #475569;
+    }
+    .legend-swatch {
+      width: 28px;
+      height: 16px;
+      border-radius: 4px;
+      flex-shrink: 0;
+    }
+    .sw-phase   { background: #1e3a5f; }
+    .sw-action  { background: #3b82f6; }
+    .sw-decision{ background: #f59e0b; }
+    .sw-system  { background: #8b5cf6; }
+    .sw-patha   { background: #10b981; }
+    .sw-pathb   { background: #f97316; }
+    .sw-terminal{ background: #1e293b; border-radius: 50px; }
+
+    /* ── Diagram card ── */
+    .diagram-card {
+      max-width: 1100px;
+      margin: 0 auto;
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 32px 24px 40px;
+      overflow-x: auto;
+    }
+
+    .mermaid {
+      display: flex;
+      justify-content: center;
+    }
+
+    /* ── Edge label fix: dark text on white pill ── */
+    .edgeLabel foreignObject div,
+    .edgeLabel .label {
+      background: #1e293b !important;
+      color: #ffffff !important;
+      border-radius: 4px !important;
+      padding: 2px 6px !important;
+      font-size: 11px !important;
+      font-weight: 600 !important;
+    }
+    .edgeLabel rect {
+      fill: #1e293b !important;
+      rx: 4 !important;
+    }
+
+    /* ── Phase label pills ── */
+    .phase-labels {
+      max-width: 1100px;
+      margin: 0 auto 16px;
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 8px;
+    }
+    .phase-pill {
+      text-align: center;
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+    }
+    .ph1 { background: #dbeafe; color: #1e40af; }
+    .ph2 { background: #dcfce7; color: #166534; }
+    .ph3 { background: #fef3c7; color: #92400e; }
+    .ph4 { background: #fce7f3; color: #9d174d; }
+    .ph5 { background: #ede9fe; color: #5b21b6; }
+  </style>
+</head>
+<body>
+
+  <div class="page-header">
+    <h1>Agentic SDLC Workbench — Main Flow</h1>
+    <p>End-to-end process from application creation through design approval and export. Admin flows not shown.</p>
+  </div>
+
+  <div class="phase-labels">
+    <div class="phase-pill ph1">Phase 1<br>Setup</div>
+    <div class="phase-pill ph2">Phase 2<br>Ingest</div>
+    <div class="phase-pill ph3">Phase 3<br>Approve</div>
+    <div class="phase-pill ph4">Phase 4<br>Iterate</div>
+    <div class="phase-pill ph5">Phase 5<br>Export</div>
+  </div>
+
+  <div class="legend">
+    <div class="legend-title">Legend</div>
+    <div class="legend-item"><div class="legend-swatch sw-action"></div> User action</div>
+    <div class="legend-item"><div class="legend-swatch sw-decision"></div> Decision point</div>
+    <div class="legend-item"><div class="legend-swatch sw-system"></div> System action (auto)</div>
+    <div class="legend-item"><div class="legend-swatch sw-patha"></div> Iteration Path A — Requirements-driven</div>
+    <div class="legend-item"><div class="legend-swatch sw-pathb"></div> Iteration Path B — Direct edit</div>
+    <div class="legend-item"><div class="legend-swatch sw-terminal"></div> Start / End</div>
+  </div>
+
+  <div class="diagram-card">
+    <div class="mermaid">
+flowchart TD
+
+  %% PHASE 1: SETUP
+  START([" Start "])
+  CREATE["Create Application\n-----------------\nProjects module\nName / Client / Code / Stage"]
+  MEMBERS{"Add team\nmembers?"}
+  ADD_MEM["Add Members and Roles\nMethodology Owner / Reviewer\nFunctional Owner / Technical"]
+
+  %% PHASE 2: INGEST
+  INGEST["Navigate to\nIngest Documents\nSelect application"]
+  ENTRY{"How are\nrequirements\nbeing added?"}
+  UPLOAD["Upload Document\ndocx / txt / md / pdf"]
+  PASTE["Type or Paste\nRequirements\ninto text area"]
+  SUBMIT["Set: Type / Title / Design Area\nSubmit for Processing"]
+  EXTRACT[["System Extracts Entities\n-----------------------------\nUse Cases / Workflows / Agents / Tools\nGuardrails / Data Sources / Test Scenarios\nUser Stories / Governance Controls"]]
+  CPS[["Change Packets Created\nOne per entity group\nStatus: pending"]]
+
+  %% PHASE 3: REVIEW & APPROVE
+  DR["Browse Design Review\n10 scope tabs\nReview extracted design"]
+  DR_EDIT_DEC{"Direct edits\nneeded before\napproving CPs?"}
+  DR_PB_FIND["Find entity\nin Design Review"]
+  DR_PB_MODAL["Click Edit - Modal opens\nFields pre-populated"]
+  DR_PB_SAVE["Save Changes"]
+  DR_PB_AUTO[["Auto-Approved CP Created\nEDIT-XXXXXX / Who / When / What"]]
+  CP_Q["Open Change Packet Queue\nReview each pending CP\nView diff: null -> extracted value"]
+  CP_DEC{"For each CP"}
+  APPROVE["Approve"]
+  REJECT["Reject\nDiscarded"]
+  SENDBACK["Send Back\nFlagged for rework"]
+  ALL_DONE{"All CPs\nreviewed?"}
+  REL_TYPE{"Select\nRelease Type"}
+  MASS["Mass Approve\nSelected CPs"]
+  BUMP[["Version String Bumps\ne.g. 1.0.0 -> 1.1.0"]]
+  BASELINE[["Locked Baseline Created\ne.g. v1.1.0 - Minor Release"]]
+  COMMITTED["Design Committed\nFully visible in Design Review"]
+
+  %% PHASE 4: ITERATE
+  ITER{"Iterate\non design?"}
+
+  %% Path A
+  PA_START["PATH A\nRequirements-Driven"]
+  PA_INGEST["Ingest Documents\nUpload or paste updated\nrequirements"]
+  PA_SUBMIT["Submit\nwith Design Area scope"]
+  PA_CPS[["New Change Packets\nDiff vs current design\nOld value -> New value"]]
+
+  %% Path B
+  PB_START["PATH B\nDirect Edit"]
+  PB_FIND["Design Review\nFind entity to change\nUse Cases / Workflows\nAgents / Tools"]
+  PB_MODAL["Click Edit Button\nModal opens\nAll fields pre-populated"]
+  PB_SAVE["Save Changes"]
+  PB_AUTO[["Auto-Approved CP Created\nCode: EDIT-XXXXXX\nWho / When / What recorded\nProject version increments"]]
+
+  %% PHASE 5: EXPORT
+  EXPORT["Build Export\nSelect application + version\nChoose sections"]
+  SPEC[["Markdown Build Spec\nGenerated and Downloaded\nUse Cases / Workflows / Agents\nTools / Evidence / Governance"]]
+  DONE([" Done\nSpec ready for\nClaude Code / ServiceNow build "])
+
+  %% CONNECTIONS
+  START --> CREATE
+  CREATE --> MEMBERS
+  MEMBERS -->|Yes| ADD_MEM --> INGEST
+  MEMBERS -->|No| INGEST
+
+  INGEST --> ENTRY
+  ENTRY -->|Upload file| UPLOAD --> SUBMIT
+  ENTRY -->|Type or paste| PASTE --> SUBMIT
+  SUBMIT --> EXTRACT --> CPS
+
+  CPS --> DR --> DR_EDIT_DEC
+  DR_EDIT_DEC -->|"Yes - fix something"| DR_PB_FIND
+  DR_PB_FIND --> DR_PB_MODAL --> DR_PB_SAVE --> DR_PB_AUTO --> DR
+  DR_EDIT_DEC -->|"No - looks good"| CP_Q
+  CP_Q --> CP_DEC
+  CP_DEC -->|Approve| APPROVE
+  CP_DEC -->|Reject| REJECT
+  CP_DEC -->|Send Back| SENDBACK
+  APPROVE & REJECT & SENDBACK --> ALL_DONE
+  ALL_DONE -->|No - more to review| CP_Q
+  ALL_DONE -->|Yes| REL_TYPE
+
+  REL_TYPE -->|"Patch x.y.Z+1 small fixes"| MASS
+  REL_TYPE -->|"Minor x.Y+1.0 new entities"| MASS
+  REL_TYPE -->|"Major X+1.0.0 arch change"| MASS
+
+  MASS --> BUMP --> BASELINE --> COMMITTED
+
+  COMMITTED --> ITER
+  ITER -->|No| EXPORT
+  ITER -->|"Yes - new requirements"| PA_START
+  ITER -->|"Yes - targeted fix"| PB_START
+
+  PA_START --> PA_INGEST --> PA_SUBMIT --> PA_CPS --> CP_Q
+
+  PB_START --> PB_FIND --> PB_MODAL --> PB_SAVE --> PB_AUTO --> ITER
+
+  EXPORT --> SPEC --> DONE
+
+  %% STYLES
+  classDef terminal   fill:#1e293b,stroke:#1e293b,color:#fff,rx:50
+  classDef action     fill:#3b82f6,stroke:#2563eb,color:#fff
+  classDef decision   fill:#f59e0b,stroke:#d97706,color:#1e293b
+  classDef system     fill:#8b5cf6,stroke:#7c3aed,color:#fff
+  classDef pathA      fill:#10b981,stroke:#059669,color:#fff
+  classDef pathB      fill:#f97316,stroke:#ea580c,color:#fff
+
+  class START,DONE terminal
+  class CREATE,ADD_MEM,INGEST,UPLOAD,PASTE,SUBMIT,DR,CP_Q,APPROVE,REJECT,SENDBACK,MASS,EXPORT,PB_FIND,PB_MODAL,PB_SAVE,DR_PB_FIND,DR_PB_MODAL,DR_PB_SAVE action
+  class MEMBERS,ENTRY,CP_DEC,ALL_DONE,REL_TYPE,ITER,DR_EDIT_DEC decision
+  class EXTRACT,CPS,BUMP,BASELINE,PB_AUTO,PA_CPS,SPEC,DR_PB_AUTO system
+  class PA_START,PA_INGEST,PA_SUBMIT pathA
+  class PB_START pathB
+  class COMMITTED action
+    </div>
+  </div>
+
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'base',
+      themeVariables: {
+        primaryColor:        '#3b82f6',
+        primaryTextColor:    '#ffffff',
+        primaryBorderColor:  '#2563eb',
+        lineColor:           '#64748b',
+        secondaryColor:      '#f1f5f9',
+        tertiaryColor:       '#e2e8f0',
+        edgeLabelBackground: '#1e293b',
+        labelTextColor:      '#ffffff',
+        fontSize:            '13px',
+      },
+      flowchart: {
+        curve: 'basis',
+        padding: 20,
+        nodeSpacing: 40,
+        rankSpacing: 55,
+        useMaxWidth: true,
+      }
+    });
+  </script>
+
+</body>
+</html>

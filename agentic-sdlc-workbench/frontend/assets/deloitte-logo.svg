@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 280 64" width="140" height="32" role="img" aria-label="Deloitte">
+  <text x="0" y="52"
+        font-family="'Open Sans', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif"
+        font-weight="800"
+        font-size="60"
+        letter-spacing="-1.5"
+        fill="#000000">Deloitte</text>
+  <circle cx="248" cy="52" r="9" fill="#86BC25"/>
+</svg>

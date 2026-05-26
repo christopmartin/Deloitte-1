@@ -1,0 +1,5035 @@
+// server.js — Agentic SDLC Workbench API
+'use strict';
+
+require('dotenv').config();          // load .env before anything else
+
+const path = require('path');
+const fs = require('fs');
+const express = require('express');
+const { db, generateId, auditLog, nextSlug } = require('./db');
+
+// Phase 1 enum constants (Decisions #2, #16, #17, #18) — used for validation
+// in PUT endpoints. SQLite CHECK constraints back-stop these, but validating
+// at the app layer gives nicer error messages.
+const ENUMS = {
+  risk_tier:              ['High', 'Medium', 'Low'],
+  supervision_model_3val: ['Advisory-only', 'Supervised HITL', 'Autonomous'],
+  orchestration_strategy: ['Base Planner', 'ReActive Planner', 'Batch Planner'],
+  step_type:              ['Start', 'Activity', 'Decision', 'Approval', 'Notification', 'Wait', 'End'],
+  dev_status:             ['Existing', 'To be built'],
+  trigger_type_6val:      ['Manual', 'Record-based trigger', 'Now Assist Panel', 'UI Action', 'Automated/async', 'Timed'],
+  // Phase 2
+  participant_type:       ['Orchestrator Agent', 'Specialist Agent', 'Human Role', 'Human Coordinator'],
+  authority_level:        ['Advise only', 'Draft only', 'Execute (human)', 'Execute (gated)', 'Execute (autonomous)'],
+  handoff_method:         ['Task creation', 'Assignment', 'Comment', 'Panel response', 'Notification', 'Other'],
+  rasic_code:             ['R', 'A', 'S', 'C', 'I'],
+};
+
+/**
+ * Validate that a value belongs to an enum (or is null/undefined/empty).
+ * Throws an Error with a clear message on mismatch.
+ */
+function validateEnum(value, enumValues, fieldName) {
+  if (value === null || value === undefined || value === '') return;
+  if (!enumValues.includes(value)) {
+    throw new Error(`${fieldName}: invalid value "${value}". Must be one of: ${enumValues.join(', ')}`);
+  }
+}
+const { seed } = require('./seed');
+
+// Run seed on startup
+seed();
+
+const multer = require('multer');
+const app  = express();
+const PORT = process.env.PORT || 8000;
+
+// ── Multer — file upload storage ──────────────────────────────────────────────
+const upload = multer({
+  dest: path.join(__dirname, 'uploads'),
+  limits: { fileSize: 30 * 1024 * 1024 }, // 30 MB hard cap
+  fileFilter: (_req, file, cb) => {
+    const allowed = /\.(docx?|txt|csv|json|md|mp3|wav|m4a|mp4|webm|ogg)$/i;
+    if (allowed.test(file.originalname)) return cb(null, true);
+    cb(new Error(`File type not supported: ${path.extname(file.originalname)}`));
+  },
+});
+
+// ──────────────────────────────────────────────
+// Middleware
+// ──────────────────────────────────────────────
+app.use(express.json());
+
+// CORS — allow all origins
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS,PATCH');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-User-ID');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+// Static frontend
+app.use(express.static(path.join(__dirname, '..', 'frontend')));
+
+// ──────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────
+const userId = (req) => req.headers['x-user-id'] || null;
+const now = () => new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+/** Parse a JSON string column safely; return original value if not JSON */
+function parseJson(value) {
+  if (value === null || value === undefined) return value;
+  if (typeof value !== 'string') return value;
+  try { return JSON.parse(value); } catch { return value; }
+}
+
+const JSON_COLS = [
+  'goals', 'done_criteria', 'inputs', 'outputs', 'run_as_model',
+  'design_risks', 'success_criteria', 'constraints_list',
+  'volume_assumptions', 'trigger_def', 'handoffs', 'decisions',
+  'fallback_paths', 'decisions_list', 'raci', 'hitl_tags',
+  'contract', 'errors', 'access_requirements', 'boundaries',
+];
+
+function parseRow(row) {
+  if (!row) return row;
+  const out = { ...row };
+  for (const col of JSON_COLS) {
+    if (col in out) out[col] = parseJson(out[col]);
+  }
+  return out;
+}
+
+function parseRows(rows) {
+  return rows.map(parseRow);
+}
+
+// ──────────────────────────────────────────────
+// COST PARAMETERS (fully per-Application model)
+// ──────────────────────────────────────────────
+// All cost params (pricing + planning + entitlement) live on asdlc_project.
+// Each customer/application negotiates its own ServiceNow price sheet. The
+// legacy global asdlc_cost_assumption row is kept for backward-compat reads
+// only and used as a fallback when a project row has not been populated yet.
+//
+// Pricing fields: cost_per_assist, overage_rate, cost_per_assist_expansion
+//   (cost_per_assist_expansion is stored for forward use; no calc consumes it yet)
+// Plan fields:    planning_period, periods_per_year
+// Entitlement:    entitlement_enabled, annual_included_assists
+function getEffectiveCostParams(projectId) {
+  const globalRow = db.prepare(
+    `SELECT cost_per_assist, overage_rate FROM asdlc_cost_assumption LIMIT 1`
+  ).get() || {};
+  let projRow = null;
+  if (projectId) {
+    projRow = db.prepare(
+      `SELECT planning_period, periods_per_year, entitlement_enabled, annual_included_assists,
+              cost_per_assist, overage_rate, cost_per_assist_expansion
+       FROM asdlc_project WHERE project_id = ?`
+    ).get(projectId);
+  }
+  return {
+    // Per-application pricing (with legacy global fallback for safety).
+    cost_per_assist:           projRow?.cost_per_assist           ?? globalRow.cost_per_assist ?? 0.015,
+    overage_rate:              projRow?.overage_rate              ?? globalRow.overage_rate    ?? null,
+    cost_per_assist_expansion: projRow?.cost_per_assist_expansion ?? null,
+    // Per-application planning + entitlement.
+    planning_period:         projRow?.planning_period         ?? 'Monthly',
+    periods_per_year:        projRow?.periods_per_year        ?? 12,
+    entitlement_enabled:     projRow?.entitlement_enabled     ?? 0,
+    annual_included_assists: projRow?.annual_included_assists ?? null,
+  };
+}
+
+// ──────────────────────────────────────────────
+// USERS
+// ──────────────────────────────────────────────
+app.get('/api/v1/users', (req, res) => {
+  const rows = db.prepare('SELECT * FROM asdlc_user WHERE active = 1').all();
+  res.json(rows);
+});
+
+app.get('/api/v1/users/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM asdlc_user WHERE user_id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'User not found' });
+  res.json(row);
+});
+
+// ──────────────────────────────────────────────
+// DASHBOARD
+// ──────────────────────────────────────────────
+app.get('/api/v1/dashboard', (req, res) => {
+  const activeProjects = db.prepare(
+    "SELECT COUNT(*) AS n FROM asdlc_project WHERE lifecycle_status = 'active'"
+  ).get().n;
+
+  const openChangePkts = db.prepare(
+    "SELECT COUNT(*) AS n FROM asdlc_change_packet WHERE status = 'pending'"
+  ).get().n;
+
+  const failedValidations = db.prepare(
+    "SELECT COUNT(*) AS n FROM asdlc_change_packet WHERE validation_status = 'failed'"
+  ).get().n;
+
+  const pendingApprovals = db.prepare(
+    "SELECT COUNT(*) AS n FROM asdlc_change_packet WHERE status = 'pending' AND baseline_impacting = 1"
+  ).get().n;
+
+  const recentChanges = db.prepare(`
+    SELECT cp.*, p.project_name, p.project_code
+    FROM asdlc_change_packet cp
+    LEFT JOIN asdlc_project p ON p.project_id = cp.project_id
+    ORDER BY cp.updated_at DESC
+    LIMIT 10
+  `).all();
+
+  const missingOwners = db.prepare(`
+    SELECT ws.*, wf.name AS workflow_name, p.project_code
+    FROM asdlc_workflow_step ws
+    LEFT JOIN asdlc_workflow wf ON wf.workflow_id = ws.workflow_id
+    LEFT JOIN asdlc_project p ON p.project_id = ws.project_id
+    WHERE ws.owner_member_id IS NULL
+    LIMIT 6
+  `).all();
+
+  // Reusable records: library-scope use cases, workflows, tools
+  const reusableUc = db.prepare(
+    "SELECT 'use_case' AS type, use_case_id AS id, title AS name FROM asdlc_use_case WHERE visibility_scope != 'PROJECT' LIMIT 3"
+  ).all();
+  const reusableWf = db.prepare(
+    "SELECT 'workflow' AS type, workflow_id AS id, name FROM asdlc_workflow WHERE visibility_scope != 'PROJECT' LIMIT 3"
+  ).all();
+  const reusableTool = db.prepare(
+    "SELECT 'tool' AS type, tool_id AS id, name FROM asdlc_tool WHERE visibility_scope != 'PROJECT' LIMIT 3"
+  ).all();
+  const reusableRecords = [...reusableUc, ...reusableWf, ...reusableTool].slice(0, 9);
+
+  res.json({
+    active_projects: activeProjects,
+    open_change_packets: openChangePkts,
+    failed_validations: failedValidations,
+    pending_approvals: pendingApprovals,
+    recent_changes: parseRows(recentChanges),
+    missing_owners: parseRows(missingOwners),
+    reusable_records: parseRows(reusableRecords),
+  });
+});
+
+// ──────────────────────────────────────────────
+// PROJECTS
+// ──────────────────────────────────────────────
+app.get('/api/v1/projects', (req, res) => {
+  const { client_id } = req.query;
+  let sql = `
+    SELECT p.*, c.client_name, c.client_code
+    FROM asdlc_project p
+    LEFT JOIN asdlc_client c ON c.client_id = p.client_id
+    WHERE p.lifecycle_status = 'active'
+  `;
+  const params = [];
+  if (client_id) { sql += ' AND p.client_id = ?'; params.push(client_id); }
+  sql += ' ORDER BY p.updated_at DESC';
+  res.json(db.prepare(sql).all(...params));
+});
+
+app.get('/api/v1/projects/:id', (req, res) => {
+  const project = db.prepare(`
+    SELECT p.*, c.client_name, c.client_code
+    FROM asdlc_project p
+    LEFT JOIN asdlc_client c ON c.client_id = p.client_id
+    WHERE p.project_id = ?
+  `).get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  const members = db.prepare(`
+    SELECT pm.*, u.email
+    FROM asdlc_project_member pm
+    LEFT JOIN asdlc_user u ON u.user_id = pm.user_id
+    WHERE pm.project_id = ? AND pm.active = 1
+  `).all(req.params.id);
+
+  res.json({ ...project, members });
+});
+
+app.post('/api/v1/projects', (req, res) => {
+  const { client_id, project_name, project_code, stage } = req.body;
+  if (!client_id || !project_name || !project_code) {
+    return res.status(400).json({ error: 'client_id, project_name and project_code are required' });
+  }
+  const id = generateId();
+  const uid = userId(req);
+  db.prepare(`
+    INSERT INTO asdlc_project
+      (project_id, client_id, project_name, project_code, stage, created_by, updated_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, client_id, project_name, project_code, stage || 'draft', uid, uid);
+  const created = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(id);
+  auditLog('asdlc_project', id, 'INSERT', null, created, uid);
+  res.status(201).json(created);
+});
+
+app.put('/api/v1/projects/:id', (req, res) => {
+  const existing = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Project not found' });
+  const uid = userId(req);
+  const { project_name, project_code, stage, lifecycle_status, confidence_threshold } = req.body;
+  db.prepare(`
+    UPDATE asdlc_project
+    SET project_name         = COALESCE(?, project_name),
+        project_code         = COALESCE(?, project_code),
+        stage                = COALESCE(?, stage),
+        lifecycle_status     = COALESCE(?, lifecycle_status),
+        confidence_threshold = COALESCE(?, confidence_threshold),
+        updated_by           = ?,
+        updated_at           = datetime('now'),
+        version              = version + 1
+    WHERE project_id = ?
+  `).run(project_name, project_code, stage, lifecycle_status,
+         confidence_threshold != null ? Number(confidence_threshold) : null,
+         uid, req.params.id);
+  const updated = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(req.params.id);
+  auditLog('asdlc_project', req.params.id, 'UPDATE', existing, updated, uid);
+  res.json(updated);
+});
+
+// ──────────────────────────────────────────────
+// PROJECT MEMBERS
+// ──────────────────────────────────────────────
+app.get('/api/v1/projects/:id/members', (req, res) => {
+  const rows = db.prepare(`
+    SELECT pm.*, u.email
+    FROM asdlc_project_member pm
+    LEFT JOIN asdlc_user u ON u.user_id = pm.user_id
+    WHERE pm.project_id = ? AND pm.active = 1
+  `).all(req.params.id);
+  res.json(rows);
+});
+
+app.post('/api/v1/projects/:id/members', (req, res) => {
+  const { user_id: uid_param, display_name, member_role, can_approve, hitl_role } = req.body;
+  if (!uid_param || !display_name) {
+    return res.status(400).json({ error: 'user_id and display_name are required' });
+  }
+  const id = generateId();
+  const uid = userId(req);
+  db.prepare(`
+    INSERT INTO asdlc_project_member
+      (project_member_id, project_id, user_id, display_name, member_role, can_approve, hitl_role)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, req.params.id, uid_param, display_name, member_role || 'other', can_approve ? 1 : 0, hitl_role || null);
+  const created = db.prepare('SELECT * FROM asdlc_project_member WHERE project_member_id = ?').get(id);
+  auditLog('asdlc_project_member', id, 'INSERT', null, created, uid);
+  res.status(201).json(created);
+});
+
+app.delete('/api/v1/projects/:id/members/:memberId', (req, res) => {
+  const existing = db.prepare(
+    'SELECT * FROM asdlc_project_member WHERE project_member_id = ? AND project_id = ?'
+  ).get(req.params.memberId, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Member not found' });
+  const uid = userId(req);
+  db.prepare(
+    "UPDATE asdlc_project_member SET active = 0, updated_at = datetime('now') WHERE project_member_id = ?"
+  ).run(req.params.memberId);
+  auditLog('asdlc_project_member', req.params.memberId, 'UPDATE', existing, { ...existing, active: 0 }, uid);
+  res.json({ success: true });
+});
+
+// ──────────────────────────────────────────────
+// AGENT SETTINGS
+// ──────────────────────────────────────────────
+app.get('/api/v1/projects/:id/agent-settings', (req, res) => {
+  const rows = db.prepare(`
+    SELECT pas.*, ac.agent_type, ac.agent_name, ac.purpose
+    FROM asdlc_project_agent_setting pas
+    JOIN asdlc_agent_catalog ac ON ac.workbench_agent_id = pas.workbench_agent_id
+    WHERE pas.project_id = ?
+    ORDER BY ac.agent_name
+  `).all(req.params.id);
+  res.json(rows);
+});
+
+app.put('/api/v1/projects/:id/agent-settings/:settingId', (req, res) => {
+  const existing = db.prepare(
+    'SELECT * FROM asdlc_project_agent_setting WHERE project_agent_setting_id = ? AND project_id = ?'
+  ).get(req.params.settingId, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Setting not found' });
+  const uid = userId(req);
+  const { trust_level, enabled, allowed_actions, requires_human_approval, notes } = req.body;
+  const toBool = (v) => v === undefined ? null : (v ? 1 : 0);
+  db.prepare(`
+    UPDATE asdlc_project_agent_setting
+    SET trust_level             = COALESCE(?, trust_level),
+        enabled                 = COALESCE(?, enabled),
+        allowed_actions         = COALESCE(?, allowed_actions),
+        requires_human_approval = COALESCE(?, requires_human_approval),
+        notes                   = COALESCE(?, notes),
+        updated_at              = datetime('now')
+    WHERE project_agent_setting_id = ?
+  `).run(
+    trust_level ?? null,
+    toBool(enabled),
+    allowed_actions ?? null,
+    toBool(requires_human_approval),
+    notes ?? null,
+    req.params.settingId
+  );
+  const updated = db.prepare('SELECT * FROM asdlc_project_agent_setting WHERE project_agent_setting_id = ?').get(req.params.settingId);
+  auditLog('asdlc_project_agent_setting', req.params.settingId, 'UPDATE', existing, updated, uid);
+  res.json(updated);
+});
+
+// ──────────────────────────────────────────────
+// CHANGE PACKETS
+// ──────────────────────────────────────────────
+app.get('/api/v1/change-packets', (req, res) => {
+  const { project_id, status, risk_level, conflict_classification } = req.query;
+  let sql = `
+    SELECT cp.*, p.project_code, es.source_title
+    FROM asdlc_change_packet cp
+    LEFT JOIN asdlc_project p ON p.project_id = cp.project_id
+    LEFT JOIN asdlc_evidence_source es ON es.evidence_source_id = cp.source_evidence_id
+    WHERE cp.lifecycle_status = 'active'
+  `;
+  const params = [];
+  if (project_id)             { sql += ' AND cp.project_id = ?';              params.push(project_id); }
+  if (status)                 { sql += ' AND cp.status = ?';                  params.push(status); }
+  if (risk_level)             { sql += ' AND cp.risk_level = ?';              params.push(risk_level); }
+  if (conflict_classification){ sql += ' AND cp.conflict_classification = ?'; params.push(conflict_classification); }
+  sql += ' ORDER BY cp.updated_at DESC';
+  res.json(db.prepare(sql).all(...params));
+});
+
+app.get('/api/v1/change-packets/:id', (req, res) => {
+  const cp = db.prepare(`
+    SELECT cp.*, p.project_code, es.source_title
+    FROM asdlc_change_packet cp
+    LEFT JOIN asdlc_project p ON p.project_id = cp.project_id
+    LEFT JOIN asdlc_evidence_source es ON es.evidence_source_id = cp.source_evidence_id
+    WHERE cp.change_packet_id = ?
+  `).get(req.params.id);
+  if (!cp) return res.status(404).json({ error: 'Change packet not found' });
+  const items = db.prepare(
+    'SELECT * FROM asdlc_change_packet_item WHERE change_packet_id = ? ORDER BY created_at'
+  ).all(req.params.id);
+  res.json({ ...cp, items });
+});
+
+app.post('/api/v1/change-packets', (req, res) => {
+  const { project_id, packet_code, summary, source_evidence_id, risk_level, conflict_classification, baseline_impacting } = req.body;
+  if (!project_id || !packet_code || !summary) {
+    return res.status(400).json({ error: 'project_id, packet_code and summary are required' });
+  }
+  const id = generateId();
+  const uid = userId(req);
+  db.prepare(`
+    INSERT INTO asdlc_change_packet
+      (change_packet_id, project_id, packet_code, summary, source_evidence_id,
+       risk_level, conflict_classification, baseline_impacting, created_by, updated_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id, project_id, packet_code, summary,
+    source_evidence_id || null,
+    risk_level || 'med',
+    conflict_classification || 'net_new',
+    baseline_impacting ? 1 : 0,
+    uid, uid
+  );
+  const created = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(id);
+  auditLog('asdlc_change_packet', id, 'INSERT', null, created, uid);
+  res.status(201).json(created);
+});
+
+// Helper for approve/reject/send-back status transitions
+function transitionCp(req, res, newStatus) {
+  const existing = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Change packet not found' });
+  const uid = userId(req);
+  const { approver_member_id, decision_notes } = req.body || {};
+  db.prepare(`
+    UPDATE asdlc_change_packet
+    SET status             = ?,
+        approver_member_id = COALESCE(?, approver_member_id),
+        decision_notes     = COALESCE(?, decision_notes),
+        approval_timestamp = datetime('now'),
+        updated_by         = ?,
+        updated_at         = datetime('now'),
+        version            = version + 1
+    WHERE change_packet_id = ?
+  `).run(newStatus, approver_member_id || null, decision_notes || null, uid, req.params.id);
+  const updated = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(req.params.id);
+  auditLog('asdlc_change_packet', req.params.id, 'UPDATE', existing, updated, uid);
+
+  // On approval, increment the project's version counter so the design history tracks it
+  if (newStatus === 'approved' && existing.project_id) {
+    const projBefore = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(existing.project_id);
+    db.prepare(`
+      UPDATE asdlc_project
+      SET version    = version + 1,
+          updated_at = datetime('now'),
+          updated_by = ?
+      WHERE project_id = ?
+    `).run(uid, existing.project_id);
+    const projAfter = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(existing.project_id);
+    auditLog('asdlc_project', existing.project_id, 'UPDATE', projBefore, projAfter, uid);
+  }
+
+  res.json(updated);
+}
+
+app.post('/api/v1/change-packets/:id/approve',    (req, res) => transitionCp(req, res, 'approved'));
+app.post('/api/v1/change-packets/:id/reject',     (req, res) => transitionCp(req, res, 'rejected'));
+app.post('/api/v1/change-packets/:id/send-back',  (req, res) => transitionCp(req, res, 'sent_back'));
+
+// ──────────────────────────────────────────────
+// MASS APPROVE (semantic versioning + baseline)
+// ──────────────────────────────────────────────
+
+/** Bump a "major.minor.patch" version string */
+function bumpVersion(current, releaseType) {
+  const parts = String(current || '1.0.0').split('.').map(n => parseInt(n, 10) || 0);
+  while (parts.length < 3) parts.push(0);
+  if (releaseType === 'major')      { parts[0]++; parts[1] = 0; parts[2] = 0; }
+  else if (releaseType === 'minor') { parts[1]++; parts[2] = 0; }
+  else                              { parts[2]++; } // patch
+  return parts.join('.');
+}
+
+app.post('/api/v1/projects/:id/mass-approve', (req, res) => {
+  const { change_packet_ids, release_type, notes } = req.body || {};
+  if (!Array.isArray(change_packet_ids) || change_packet_ids.length === 0) {
+    return res.status(400).json({ error: 'change_packet_ids array is required' });
+  }
+  const validTypes = ['major', 'minor', 'patch'];
+  const rType = validTypes.includes(release_type) ? release_type : 'patch';
+  const uid = userId(req);
+
+  const proj = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(req.params.id);
+  if (!proj) return res.status(404).json({ error: 'Project not found' });
+
+  const newVersionString = bumpVersion(proj.version_string, rType);
+  const projBefore = { ...proj };
+
+  // Approve all specified CPs that belong to this project
+  const approveStmt = db.prepare(`
+    UPDATE asdlc_change_packet
+    SET status             = 'approved',
+        approval_timestamp = datetime('now'),
+        updated_by         = ?,
+        updated_at         = datetime('now'),
+        version            = version + 1
+    WHERE change_packet_id = ? AND project_id = ? AND status != 'approved'
+  `);
+  let approvedCount = 0;
+  for (const cpId of change_packet_ids) {
+    const cpBefore = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(cpId);
+    if (!cpBefore || cpBefore.project_id !== req.params.id) continue;
+    const info = approveStmt.run(uid, cpId, req.params.id);
+    if (info.changes > 0) {
+      const cpAfter = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(cpId);
+      auditLog('asdlc_change_packet', cpId, 'UPDATE', cpBefore, cpAfter, uid);
+      approvedCount++;
+    }
+  }
+  if (approvedCount === 0) {
+    return res.status(400).json({ error: 'No eligible change packets found for this project' });
+  }
+
+  // Bump version_string and integer version on the project
+  db.prepare(`
+    UPDATE asdlc_project
+    SET version_string = ?,
+        version        = version + 1,
+        updated_at     = datetime('now'),
+        updated_by     = ?
+    WHERE project_id = ?
+  `).run(newVersionString, uid, req.params.id);
+  const projAfter = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(req.params.id);
+  auditLog('asdlc_project', req.params.id, 'UPDATE', projBefore, projAfter, uid);
+
+  // Create a baseline record to represent this release
+  const baselineId = generateId();
+  const relLabel = rType.charAt(0).toUpperCase() + rType.slice(1);
+  const baselineName = `v${newVersionString} — ${relLabel} Release`;
+  try {
+    db.prepare(`
+      INSERT INTO asdlc_baseline
+        (baseline_id, project_id, baseline_name, baseline_type, baseline_status,
+         locked_at, created_by, updated_by)
+      VALUES (?, ?, ?, ?, 'approved', datetime('now'), ?, ?)
+    `).run(baselineId, req.params.id, baselineName, rType, uid, uid);
+  } catch (e) {
+    // baseline_type enum may reject 'major'/'minor'/'patch' — fall back to 'production'
+    try {
+      db.prepare(`
+        INSERT INTO asdlc_baseline
+          (baseline_id, project_id, baseline_name, baseline_type, baseline_status,
+           locked_at, created_by, updated_by)
+        VALUES (?, ?, ?, 'production', 'approved', datetime('now'), ?, ?)
+      `).run(baselineId, req.params.id, baselineName, uid, uid);
+    } catch (e2) {
+      console.warn('[mass-approve] Could not create baseline:', e2.message);
+    }
+  }
+  const baseline = db.prepare('SELECT * FROM asdlc_baseline WHERE baseline_id = ?').get(baselineId);
+
+  res.json({
+    version_string: newVersionString,
+    previous_version_string: proj.version_string || '1.0.0',
+    release_type: rType,
+    approved_count: approvedCount,
+    notes: notes || null,
+    baseline,
+  });
+});
+
+app.post('/api/v1/change-packets/:id/split', (req, res) => {
+  const existing = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Change packet not found' });
+  const uid = userId(req);
+  const newId = generateId();
+  const newCode = existing.packet_code + '-SPLIT';
+  db.prepare(`
+    INSERT INTO asdlc_change_packet
+      (change_packet_id, project_id, packet_code, status, summary,
+       source_evidence_id, risk_level, conflict_classification,
+       baseline_impacting, created_by, updated_by)
+    VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    newId, existing.project_id, newCode,
+    (req.body && req.body.summary) ? req.body.summary : existing.summary + ' (split)',
+    existing.source_evidence_id,
+    existing.risk_level,
+    existing.conflict_classification,
+    existing.baseline_impacting,
+    uid, uid
+  );
+  const created = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(newId);
+  auditLog('asdlc_change_packet', newId, 'INSERT', null, created, uid);
+  res.status(201).json({ new_id: newId, change_packet: created });
+});
+
+// ──────────────────────────────────────────────
+// EVIDENCE SOURCES
+// ──────────────────────────────────────────────
+app.get('/api/v1/evidence-sources', (req, res) => {
+  const { project_id, source_type, validation_status } = req.query;
+  let sql = "SELECT * FROM asdlc_evidence_source WHERE lifecycle_status = 'active'";
+  const params = [];
+  if (project_id)        { sql += ' AND project_id = ?';        params.push(project_id); }
+  if (source_type)       { sql += ' AND source_type = ?';       params.push(source_type); }
+  if (validation_status) { sql += ' AND validation_status = ?'; params.push(validation_status); }
+  sql += ' ORDER BY source_datetime DESC';
+  res.json(db.prepare(sql).all(...params));
+});
+
+app.get('/api/v1/evidence-sources/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM asdlc_evidence_source WHERE evidence_source_id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Evidence source not found' });
+  const refs = db.prepare(
+    'SELECT * FROM asdlc_source_reference WHERE evidence_source_id = ? ORDER BY created_at'
+  ).all(req.params.id);
+  res.json({ ...row, references: refs });
+});
+
+app.post('/api/v1/evidence-sources', (req, res) => {
+  const { project_id, source_title, source_type, validation_status } = req.body;
+  if (!project_id || !source_title) {
+    return res.status(400).json({ error: 'project_id and source_title are required' });
+  }
+  const id = generateId();
+  const uid = userId(req);
+  db.prepare(`
+    INSERT INTO asdlc_evidence_source
+      (evidence_source_id, project_id, source_title, source_type, validation_status, created_by, updated_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, project_id, source_title, source_type || 'document', validation_status || 'draft', uid, uid);
+  const created = db.prepare('SELECT * FROM asdlc_evidence_source WHERE evidence_source_id = ?').get(id);
+  auditLog('asdlc_evidence_source', id, 'INSERT', null, created, uid);
+  res.status(201).json(created);
+});
+
+app.put('/api/v1/evidence-sources/:id', (req, res) => {
+  const existing = db.prepare('SELECT * FROM asdlc_evidence_source WHERE evidence_source_id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Evidence source not found' });
+  const uid = userId(req);
+  const { source_title, source_type, validation_status, notes, ingestion_status } = req.body;
+  db.prepare(`
+    UPDATE asdlc_evidence_source
+    SET source_title      = COALESCE(?, source_title),
+        source_type       = COALESCE(?, source_type),
+        validation_status = COALESCE(?, validation_status),
+        notes             = COALESCE(?, notes),
+        ingestion_status  = COALESCE(?, ingestion_status),
+        updated_by        = ?,
+        updated_at        = datetime('now'),
+        version           = version + 1
+    WHERE evidence_source_id = ?
+  `).run(source_title, source_type, validation_status, notes, ingestion_status, uid, req.params.id);
+  const updated = db.prepare('SELECT * FROM asdlc_evidence_source WHERE evidence_source_id = ?').get(req.params.id);
+  auditLog('asdlc_evidence_source', req.params.id, 'UPDATE', existing, updated, uid);
+  res.json(updated);
+});
+
+app.get('/api/v1/evidence-sources/:id/linked-items', (req, res) => {
+  const count = db.prepare(
+    'SELECT COUNT(*) AS n FROM asdlc_change_packet WHERE source_evidence_id = ?'
+  ).get(req.params.id).n;
+  res.json({ evidence_source_id: req.params.id, linked_change_packets: count });
+});
+
+// ──────────────────────────────────────────────
+// AUDIT LOG
+// ──────────────────────────────────────────────
+app.get('/api/v1/audit-log', (req, res) => {
+  const { table_name, record_id } = req.query;
+  const limit = Math.min(parseInt(req.query.limit) || 50, 500);
+  let sql = 'SELECT * FROM asdlc_audit_log WHERE 1=1';
+  const params = [];
+  if (table_name) { sql += ' AND table_name = ?'; params.push(table_name); }
+  if (record_id)  { sql += ' AND record_id = ?';  params.push(record_id); }
+  sql += ` ORDER BY changed_at DESC LIMIT ${limit}`;
+  const rows = db.prepare(sql).all(...params);
+  res.json(rows.map(r => ({
+    ...r,
+    old_data: parseJson(r.old_data),
+    new_data: parseJson(r.new_data),
+  })));
+});
+
+// ──────────────────────────────────────────────
+// BASELINES
+// ──────────────────────────────────────────────
+app.get('/api/v1/baselines', (req, res) => {
+  const { project_id } = req.query;
+  let sql = "SELECT * FROM asdlc_baseline WHERE lifecycle_status = 'active'";
+  const params = [];
+  if (project_id) { sql += ' AND project_id = ?'; params.push(project_id); }
+  sql += ' ORDER BY created_at DESC';
+  res.json(db.prepare(sql).all(...params));
+});
+
+app.get('/api/v1/baselines/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM asdlc_baseline WHERE baseline_id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Baseline not found' });
+  res.json(row);
+});
+
+app.post('/api/v1/baselines', (req, res) => {
+  const { project_id, baseline_type, baseline_name, baseline_status } = req.body;
+  if (!project_id || !baseline_name) {
+    return res.status(400).json({ error: 'project_id and baseline_name are required' });
+  }
+  const id = generateId();
+  const uid = userId(req);
+  db.prepare(`
+    INSERT INTO asdlc_baseline
+      (baseline_id, project_id, baseline_type, baseline_name, baseline_status, created_by, updated_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, project_id, baseline_type || 'draft', baseline_name, baseline_status || 'draft', uid, uid);
+  const created = db.prepare('SELECT * FROM asdlc_baseline WHERE baseline_id = ?').get(id);
+  auditLog('asdlc_baseline', id, 'INSERT', null, created, uid);
+  res.status(201).json(created);
+});
+
+app.post('/api/v1/baselines/:id/lock', (req, res) => {
+  const existing = db.prepare('SELECT * FROM asdlc_baseline WHERE baseline_id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Baseline not found' });
+  if (existing.locked_at) return res.status(409).json({ error: 'Baseline already locked' });
+  const uid = userId(req);
+  const { locked_by_member_id } = req.body || {};
+  db.prepare(`
+    UPDATE asdlc_baseline
+    SET baseline_status     = 'approved',
+        locked_at           = datetime('now'),
+        locked_by_member_id = COALESCE(?, locked_by_member_id),
+        updated_by          = ?,
+        updated_at          = datetime('now'),
+        version             = version + 1
+    WHERE baseline_id = ?
+  `).run(locked_by_member_id || null, uid, req.params.id);
+  const updated = db.prepare('SELECT * FROM asdlc_baseline WHERE baseline_id = ?').get(req.params.id);
+  auditLog('asdlc_baseline', req.params.id, 'UPDATE', existing, updated, uid);
+  res.json(updated);
+});
+
+app.get('/api/v1/baselines/:id/compare/:otherId', (req, res) => {
+  const a = db.prepare('SELECT * FROM asdlc_baseline WHERE baseline_id = ?').get(req.params.id);
+  const b = db.prepare('SELECT * FROM asdlc_baseline WHERE baseline_id = ?').get(req.params.otherId);
+  if (!a) return res.status(404).json({ error: 'Baseline not found' });
+  if (!b) return res.status(404).json({ error: 'Other baseline not found' });
+
+  // Simple record-level diff using record_count and field_count heuristics
+  const recordDelta  = (b.record_count || 0) - (a.record_count || 0);
+  const fieldDelta   = (b.field_count  || 0) - (a.field_count  || 0);
+  res.json({
+    baseline_a: { id: a.baseline_id, name: a.baseline_name, record_count: a.record_count, field_count: a.field_count },
+    baseline_b: { id: b.baseline_id, name: b.baseline_name, record_count: b.record_count, field_count: b.field_count },
+    added_records:    Math.max(0, recordDelta),
+    removed_records:  Math.max(0, -recordDelta),
+    modified_fields:  Math.abs(fieldDelta),
+  });
+});
+
+// ──────────────────────────────────────────────
+// EXCEPTIONS
+// ──────────────────────────────────────────────
+app.get('/api/v1/exceptions/summary', (req, res) => {
+  const { project_id } = req.query;
+  let sql = `
+    SELECT exception_type, severity, COUNT(*) AS count
+    FROM asdlc_exception
+    WHERE lifecycle_status = 'active'
+  `;
+  const params = [];
+  if (project_id) { sql += ' AND project_id = ?'; params.push(project_id); }
+  sql += ' GROUP BY exception_type, severity ORDER BY exception_type, severity';
+  res.json(db.prepare(sql).all(...params));
+});
+
+app.get('/api/v1/exceptions', (req, res) => {
+  const { project_id, exception_type, status, detected_by, finding_category } = req.query;
+  let sql = "SELECT * FROM asdlc_exception WHERE lifecycle_status = 'active'";
+  const params = [];
+  if (project_id)       { sql += ' AND project_id = ?';        params.push(project_id); }
+  if (exception_type)   { sql += ' AND exception_type = ?';    params.push(exception_type); }
+  if (status)           { sql += ' AND status = ?';            params.push(status); }
+  if (detected_by)      { sql += ' AND detected_by = ?';       params.push(detected_by); }
+  if (finding_category) { sql += ' AND finding_category = ?';  params.push(finding_category); }
+  sql += ' ORDER BY severity DESC, created_at DESC';
+  res.json(db.prepare(sql).all(...params));
+});
+
+app.get('/api/v1/exceptions/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM asdlc_exception WHERE exception_id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Exception not found' });
+  res.json(row);
+});
+
+app.post('/api/v1/exceptions', (req, res) => {
+  const { project_id, exception_type, severity, description, related_entity_type, related_entity_id } = req.body;
+  if (!project_id || !description || !related_entity_id) {
+    return res.status(400).json({ error: 'project_id, description and related_entity_id are required' });
+  }
+  const id = generateId();
+  const uid = userId(req);
+  db.prepare(`
+    INSERT INTO asdlc_exception
+      (exception_id, project_id, exception_type, severity, description,
+       related_entity_type, related_entity_id, created_by, updated_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id, project_id,
+    exception_type || 'other',
+    severity || 'med',
+    description,
+    related_entity_type || '',
+    related_entity_id,
+    uid, uid
+  );
+  const created = db.prepare('SELECT * FROM asdlc_exception WHERE exception_id = ?').get(id);
+  auditLog('asdlc_exception', id, 'INSERT', null, created, uid);
+  res.status(201).json(created);
+});
+
+app.put('/api/v1/exceptions/:id', (req, res) => {
+  const existing = db.prepare('SELECT * FROM asdlc_exception WHERE exception_id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Exception not found' });
+  const uid = userId(req);
+  const { status, severity, description, resolution_summary, assigned_member_id } = req.body;
+  db.prepare(`
+    UPDATE asdlc_exception
+    SET status             = COALESCE(?, status),
+        severity           = COALESCE(?, severity),
+        description        = COALESCE(?, description),
+        resolution_summary = COALESCE(?, resolution_summary),
+        assigned_member_id = COALESCE(?, assigned_member_id),
+        updated_by         = ?,
+        updated_at         = datetime('now'),
+        version            = version + 1
+    WHERE exception_id = ?
+  `).run(status, severity, description, resolution_summary, assigned_member_id, uid, req.params.id);
+  const updated = db.prepare('SELECT * FROM asdlc_exception WHERE exception_id = ?').get(req.params.id);
+  auditLog('asdlc_exception', req.params.id, 'UPDATE', existing, updated, uid);
+  res.json(updated);
+});
+
+// ──────────────────────────────────────────────
+// QUALITY REVIEWER (Feature #9)
+// ──────────────────────────────────────────────
+// Reviewer is on-demand only. Two entry points:
+//   POST /api/v1/projects/:id/quality-review/entity/:type/:id   (delta)
+//   POST /api/v1/projects/:id/quality-review/full               (whole Application)
+// Both write findings to asdlc_exception with detected_by='quality-reviewer'.
+app.post('/api/v1/projects/:id/quality-review/entity/:entityType/:entityId', async (req, res) => {
+  const { id: projectId, entityType, entityId } = req.params;
+  try {
+    const { reviewEntity, applyFindings } = require('./agent/quality-reviewer');
+    const result = await reviewEntity({ projectId, entityType, entityId, db });
+    const counts = applyFindings(db, projectId, entityType, entityId, result.findings);
+    res.json({
+      findings: result.findings,
+      counts,
+      model: result.model,
+      source: result.source,
+      error: result.error,
+    });
+  } catch (err) {
+    console.error('[quality-review/entity]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/v1/projects/:id/quality-review/full', async (req, res) => {
+  const { id: projectId } = req.params;
+  try {
+    const { reviewApplication } = require('./agent/quality-reviewer');
+    const result = await reviewApplication({ projectId, db });
+    res.json(result);
+  } catch (err) {
+    console.error('[quality-review/full]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ──────────────────────────────────────────────
+// CHANGE PACKETS — audit trail UI endpoints (Feature #9)
+// ──────────────────────────────────────────────
+// Read-only browse + drill-in. CPs are still created by createAutoApprovedCP()
+// from the entity PUT paths; these endpoints just surface them.
+app.get('/api/v1/projects/:id/change-packets', (req, res) => {
+  const projectId = req.params.id;
+  const limit  = Math.max(1, Math.min(100, parseInt(req.query.limit, 10) || 20));
+  const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+  const q      = (req.query.q || '').trim();
+
+  // Pull the CPs first
+  let cpSql = `SELECT change_packet_id, packet_code, summary, status, risk_level,
+                      conflict_classification, baseline_impacting,
+                      authoring_agent_run_id, approver_member_id,
+                      created_at, updated_at
+                 FROM asdlc_change_packet
+                WHERE lifecycle_status = 'active' AND project_id = ?`;
+  const params = [projectId];
+  if (q) {
+    cpSql += ` AND (LOWER(summary) LIKE ? OR change_packet_id IN
+                   (SELECT cpi.change_packet_id FROM asdlc_change_packet_item cpi
+                     WHERE LOWER(cpi.entity_id) LIKE ? OR LOWER(cpi.entity_type) LIKE ?))`;
+    const like = `%${q.toLowerCase()}%`;
+    params.push(like, like, like);
+  }
+  cpSql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+  params.push(limit, offset);
+
+  const cps = db.prepare(cpSql).all(...params);
+
+  if (cps.length === 0) return res.json([]);
+
+  // Bulk-load items for the returned CPs
+  const ids = cps.map(c => c.change_packet_id);
+  const placeholders = ids.map(() => '?').join(',');
+  const items = db.prepare(
+    `SELECT change_packet_id, entity_type, entity_id, field_path
+       FROM asdlc_change_packet_item
+      WHERE change_packet_id IN (${placeholders})`
+  ).all(...ids);
+
+  const byCp = {};
+  for (const it of items) (byCp[it.change_packet_id] ||= []).push(it);
+
+  res.json(cps.map(cp => ({
+    ...cp,
+    items: byCp[cp.change_packet_id] || [],
+    entity_count: new Set((byCp[cp.change_packet_id] || []).map(i => `${i.entity_type}/${i.entity_id}`)).size,
+  })));
+});
+
+app.get('/api/v1/change-packets/:cpId', (req, res) => {
+  const cp = db.prepare(
+    `SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?`
+  ).get(req.params.cpId);
+  if (!cp) return res.status(404).json({ error: 'Change packet not found' });
+  const items = db.prepare(
+    `SELECT * FROM asdlc_change_packet_item WHERE change_packet_id = ?`
+  ).all(req.params.cpId);
+  res.json({ ...cp, items });
+});
+
+// ──────────────────────────────────────────────
+// REPORTS
+// ──────────────────────────────────────────────
+app.get('/api/v1/reports', (req, res) => {
+  const { project_id } = req.query;
+  let sql = "SELECT * FROM asdlc_report_export WHERE lifecycle_status = 'active'";
+  const params = [];
+  if (project_id) { sql += ' AND project_id = ?'; params.push(project_id); }
+  sql += ' ORDER BY generated_at DESC';
+  res.json(db.prepare(sql).all(...params));
+});
+
+app.get('/api/v1/reports/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM asdlc_report_export WHERE report_export_id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Report not found' });
+  res.json(row);
+});
+
+app.post('/api/v1/reports', (req, res) => {
+  const { project_id, report_type, format, audience, title, baseline_id } = req.body;
+  if (!project_id || !report_type || !title) {
+    return res.status(400).json({ error: 'project_id, report_type and title are required' });
+  }
+  const id = generateId();
+  const uid = userId(req);
+  db.prepare(`
+    INSERT INTO asdlc_report_export
+      (report_export_id, project_id, report_type, format, audience, title, baseline_id,
+       generated_at, created_by, updated_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)
+  `).run(id, project_id, report_type, format || 'docx', audience || 'reviewer', title, baseline_id || null, uid, uid);
+  const created = db.prepare('SELECT * FROM asdlc_report_export WHERE report_export_id = ?').get(id);
+  auditLog('asdlc_report_export', id, 'INSERT', null, created, uid);
+  res.status(201).json(created);
+});
+
+// ──────────────────────────────────────────────
+// USE CASES
+// ──────────────────────────────────────────────
+app.get('/api/v1/projects/:id/use-cases', (req, res) => {
+  const rows = db.prepare(
+    "SELECT * FROM asdlc_use_case WHERE project_id = ? AND lifecycle_status != 'deleted' ORDER BY updated_at DESC"
+  ).all(req.params.id);
+  res.json(parseRows(rows));
+});
+
+app.get('/api/v1/projects/:id/use-cases/:ucId', (req, res) => {
+  const row = db.prepare(
+    'SELECT * FROM asdlc_use_case WHERE use_case_id = ? AND project_id = ?'
+  ).get(req.params.ucId, req.params.id);
+  if (!row) return res.status(404).json({ error: 'Use case not found' });
+  res.json(parseRow(row));
+});
+
+app.post('/api/v1/projects/:id/use-cases', (req, res) => {
+  const { title, summary, business_objective, lifecycle_status } = req.body;
+  if (!title) return res.status(400).json({ error: 'title is required' });
+  const id = generateId();
+  const uid = userId(req);
+  const slug = nextSlug('asdlc_use_case', 'UC', req.params.id);
+  db.prepare(`
+    INSERT INTO asdlc_use_case
+      (use_case_id, project_id, slug, title, summary, business_objective, lifecycle_status, created_by, updated_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, req.params.id, slug, title, summary || '', business_objective || '', lifecycle_status || 'draft', uid, uid);
+  const created = db.prepare('SELECT * FROM asdlc_use_case WHERE use_case_id = ?').get(id);
+  auditLog('asdlc_use_case', id, 'INSERT', null, created, uid);
+  res.status(201).json(parseRow(created));
+});
+
+// ──────────────────────────────────────────────
+// DIRECT-EDIT HELPERS (auto-approved Change Packets)
+// ──────────────────────────────────────────────
+
+/**
+ * Create an auto-approved Change Packet for a direct design edit.
+ * Records who made the change and when, bumps project integer version.
+ */
+function createAutoApprovedCP(projectId, entityType, entityId, entityLabel, diffItems, uid) {
+  const cpId   = generateId();
+  const short  = Date.now().toString(36).toUpperCase().slice(-6);
+  const cpCode = `EDIT-${short}`;
+  const summary = `Direct edit: ${entityLabel}`;
+
+  db.prepare(`
+    INSERT INTO asdlc_change_packet
+      (change_packet_id, project_id, packet_code, status, summary,
+       conflict_classification, baseline_impacting, validation_status,
+       approval_timestamp, created_by, updated_by)
+    VALUES (?, ?, ?, 'approved', ?, 'update', 0, 'unverified', datetime('now'), ?, ?)
+  `).run(cpId, projectId, cpCode, summary, uid, uid);
+
+  diffItems.forEach(item => {
+    const itemId = generateId();
+    db.prepare(`
+      INSERT INTO asdlc_change_packet_item
+        (change_packet_item_id, change_packet_id, entity_type, entity_id,
+         field_path, old_value, new_value)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(itemId, cpId, entityType, entityId, item.field,
+           item.old_value != null ? JSON.stringify(item.old_value) : null,
+           item.new_value != null ? JSON.stringify(item.new_value) : 'null');
+  });
+
+  // Bump project integer version (semantic version only touched by mass-approve)
+  db.prepare(`
+    UPDATE asdlc_project SET version = version + 1,
+      updated_at = datetime('now'), updated_by = ?
+    WHERE project_id = ?
+  `).run(uid, projectId);
+
+  const cpAfter = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(cpId);
+  auditLog('asdlc_change_packet', cpId, 'INSERT', null, cpAfter, uid);
+
+  return { cpId, cpCode };
+}
+
+/**
+ * Build a field-level diff between an existing DB row and an updates object.
+ * jsonCols: list of column names that hold JSON (compared by normalised string).
+ */
+function diffFields(existing, updates, jsonCols) {
+  const diff = [];
+  for (const [field, newRaw] of Object.entries(updates)) {
+    const oldRaw = existing[field] !== undefined ? existing[field] : null;
+    const toStr = (v, isJson) => {
+      if (v === null || v === undefined) return '';
+      if (isJson) return typeof v === 'string' ? v : JSON.stringify(v);
+      return String(v);
+    };
+    const isJson = jsonCols.includes(field);
+    if (toStr(oldRaw, isJson) !== toStr(newRaw, isJson)) {
+      diff.push({ field, old_value: oldRaw, new_value: newRaw });
+    }
+  }
+  return diff;
+}
+
+// PUT /api/v1/projects/:id/use-cases/:ucId
+app.put('/api/v1/projects/:id/use-cases/:ucId', (req, res) => {
+  const uid = userId(req);
+  const existing = db.prepare('SELECT * FROM asdlc_use_case WHERE use_case_id = ? AND project_id = ?')
+    .get(req.params.ucId, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Use case not found' });
+
+  const ALLOWED = ['title', 'summary', 'business_objective', 'expected_value',
+                   'success_criteria', 'constraints_list', 'readiness', 'supervision_model',
+                   'volume_assumptions',
+                   // Phase 1 additions (Decisions #2, #4, #6, #7, #17):
+                   'risk_tier', 'owner', 'primary_success_metric',
+                   'epic_or_feature_id', 'baseline_cost_annual_usd'];
+  const JSON_UC = ['success_criteria', 'constraints_list', 'volume_assumptions'];
+  // Object-shaped JSON columns get DEEP-MERGED with the existing row so a partial
+  // update (e.g. {volume_assumptions: {monthly_requests: 5000}}) doesn't clobber
+  // other keys already in the JSON. Array-shaped JSON columns are replaced as-is.
+  const JSON_UC_MERGE = new Set(['volume_assumptions']);
+  const updates = {};
+  ALLOWED.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
+  // For merge-shaped JSON fields, fold the incoming object onto the existing one
+  // BEFORE serializing. Frontend already does this, but the safety net protects
+  // direct API callers and the auto-propagation path below.
+  JSON_UC_MERGE.forEach(f => {
+    if (updates[f] !== undefined && typeof updates[f] === 'object' && !Array.isArray(updates[f])) {
+      let existingObj = {};
+      try {
+        const parsed = JSON.parse(existing[f] || '{}');
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) existingObj = parsed;
+      } catch { /* keep empty */ }
+      updates[f] = { ...existingObj, ...updates[f] };
+    }
+  });
+  // Serialise JSON fields
+  JSON_UC.forEach(f => { if (updates[f] !== undefined && typeof updates[f] !== 'string') updates[f] = JSON.stringify(updates[f]); });
+
+  // Phase 1 enum validation (Decisions #2, #4)
+  try {
+    if (updates.risk_tier !== undefined)         validateEnum(updates.risk_tier, ENUMS.risk_tier, 'risk_tier');
+    if (updates.supervision_model !== undefined) validateEnum(updates.supervision_model, ENUMS.supervision_model_3val, 'supervision_model');
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+
+  if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No updatable fields provided' });
+
+  const diff = diffFields(existing, updates, JSON_UC);
+
+  const setClauses = Object.keys(updates).map(f => `${f} = ?`).join(', ');
+  db.prepare(`UPDATE asdlc_use_case SET ${setClauses}, updated_at = datetime('now'), updated_by = ?
+    WHERE use_case_id = ?`).run(...Object.values(updates), uid, req.params.ucId);
+
+  const after = db.prepare('SELECT * FROM asdlc_use_case WHERE use_case_id = ?').get(req.params.ucId);
+  auditLog('asdlc_use_case', req.params.ucId, 'UPDATE', existing, after, uid);
+
+  // Phase 4: auto-propagate UC.volume_assumptions.monthly_requests → child workflows.runs_per_period
+  // so editing the volume on the UC drives the cost recalculation. Triggered only when the value
+  // actually changed (skip no-op edits to notes/peak fields).
+  let propagatedWorkflows = 0;
+  try {
+    const prevVol = (() => { try { return JSON.parse(existing.volume_assumptions || '{}'); } catch { return {}; } })();
+    const newVol  = (() => { try { return JSON.parse(after.volume_assumptions    || '{}'); } catch { return {}; } })();
+    const newMonthly  = Number(newVol.monthly_requests);
+    const prevMonthly = Number(prevVol.monthly_requests);
+    if (Number.isFinite(newMonthly) && newMonthly > 0 && newMonthly !== prevMonthly) {
+      const r = db.prepare(`UPDATE asdlc_workflow
+                            SET runs_per_period = ?, updated_at = datetime('now'), updated_by = ?
+                            WHERE use_case_id = ?`).run(newMonthly, uid, req.params.ucId);
+      propagatedWorkflows = r.changes;
+    }
+  } catch (err) {
+    console.error('[uc PUT] volume propagation failed:', err.message);
+  }
+
+  let cpResult = null;
+  if (diff.length > 0) {
+    cpResult = createAutoApprovedCP(req.params.id, 'use_case', req.params.ucId,
+      existing.title, diff, uid);
+  }
+
+  res.json({ ...parseRow(after), _cp: cpResult, _propagated_workflows: propagatedWorkflows });
+});
+
+// ──────────────────────────────────────────────
+// WORKFLOWS
+// ──────────────────────────────────────────────
+app.get('/api/v1/projects/:id/workflows', (req, res) => {
+  const rows = db.prepare(
+    "SELECT * FROM asdlc_workflow WHERE project_id = ? AND lifecycle_status != 'deleted' ORDER BY updated_at DESC"
+  ).all(req.params.id);
+  res.json(parseRows(rows));
+});
+
+app.get('/api/v1/projects/:id/workflows/:wfId', (req, res) => {
+  const wf = db.prepare(
+    'SELECT * FROM asdlc_workflow WHERE workflow_id = ? AND project_id = ?'
+  ).get(req.params.wfId, req.params.id);
+  if (!wf) return res.status(404).json({ error: 'Workflow not found' });
+  const steps = db.prepare(
+    'SELECT * FROM asdlc_workflow_step WHERE workflow_id = ? ORDER BY step_number'
+  ).all(req.params.wfId);
+  res.json({ ...parseRow(wf), steps: parseRows(steps) });
+});
+
+// PUT /api/v1/projects/:id/workflows/:wfId
+app.put('/api/v1/projects/:id/workflows/:wfId', (req, res) => {
+  const uid = userId(req);
+  const existing = db.prepare('SELECT * FROM asdlc_workflow WHERE workflow_id = ? AND project_id = ?')
+    .get(req.params.wfId, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Workflow not found' });
+
+  const ALLOWED = ['name', 'sla_hours', 'readiness', 'trigger_def',
+                   'handoffs', 'decisions', 'fallback_paths',
+                   // Phase 1 additions (Decisions #12, #17):
+                   'risk_tier', 'runs_per_period'];
+  const JSON_WF = ['trigger_def', 'handoffs', 'decisions', 'fallback_paths'];
+  const updates = {};
+  ALLOWED.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
+  JSON_WF.forEach(f => { if (updates[f] !== undefined && typeof updates[f] !== 'string') updates[f] = JSON.stringify(updates[f]); });
+
+  // Phase 1 enum validation
+  try {
+    if (updates.risk_tier !== undefined) validateEnum(updates.risk_tier, ENUMS.risk_tier, 'risk_tier');
+    // Validate trigger_def.type (app-level since SQLite can't CHECK inside JSON)
+    if (updates.trigger_def !== undefined) {
+      let triggerObj;
+      try { triggerObj = typeof updates.trigger_def === 'string' ? JSON.parse(updates.trigger_def) : updates.trigger_def; } catch { triggerObj = null; }
+      if (triggerObj && triggerObj.type) {
+        validateEnum(triggerObj.type, ENUMS.trigger_type_6val, 'trigger_def.type');
+      }
+    }
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+
+  if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No updatable fields provided' });
+
+  const diff = diffFields(existing, updates, JSON_WF);
+  const setClauses = Object.keys(updates).map(f => `${f} = ?`).join(', ');
+  db.prepare(`UPDATE asdlc_workflow SET ${setClauses}, updated_at = datetime('now'), updated_by = ?
+    WHERE workflow_id = ?`).run(...Object.values(updates), uid, req.params.wfId);
+
+  const after = db.prepare('SELECT * FROM asdlc_workflow WHERE workflow_id = ?').get(req.params.wfId);
+  auditLog('asdlc_workflow', req.params.wfId, 'UPDATE', existing, after, uid);
+
+  let cpResult = null;
+  if (diff.length > 0) {
+    cpResult = createAutoApprovedCP(req.params.id, 'workflow', req.params.wfId,
+      existing.name, diff, uid);
+  }
+
+  res.json({ ...parseRow(after), _cp: cpResult });
+});
+
+// PUT /api/v1/projects/:id/workflows/:wfId/steps/:stepId
+app.put('/api/v1/projects/:id/workflows/:wfId/steps/:stepId', (req, res) => {
+  const uid = userId(req);
+  const existing = db.prepare(
+    'SELECT * FROM asdlc_workflow_step WHERE workflow_step_id = ? AND workflow_id = ? AND project_id = ?'
+  ).get(req.params.stepId, req.params.wfId, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Workflow step not found' });
+
+  const ALLOWED = ['name', 'actor_role', 'sla_hours', 'decisions_list',
+                   // Phase 1 additions (Decision #12):
+                   'step_type', 'step_purpose', 'preconditions',
+                   'evidence_captured', 'is_end_step',
+                   // Phase 2 addition (Decision #12 FK):
+                   'owner_participant_id'];
+  const JSON_STEP = ['decisions_list'];
+  const updates = {};
+  ALLOWED.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
+
+  JSON_STEP.forEach(f => {
+    if (updates[f] !== undefined && typeof updates[f] !== 'string') updates[f] = JSON.stringify(updates[f]);
+  });
+
+  // Phase 1 enum validation
+  try {
+    if (updates.step_type !== undefined) validateEnum(updates.step_type, ENUMS.step_type, 'step_type');
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+
+  if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No updatable fields provided' });
+
+  const diff = diffFields(existing, updates, JSON_STEP);
+  const setClauses = Object.keys(updates).map(f => `${f} = ?`).join(', ');
+  db.prepare(
+    `UPDATE asdlc_workflow_step SET ${setClauses}, updated_at = datetime('now'), updated_by = ? WHERE workflow_step_id = ?`
+  ).run(...Object.values(updates), uid, req.params.stepId);
+
+  const updated = db.prepare('SELECT * FROM asdlc_workflow_step WHERE workflow_step_id = ?').get(req.params.stepId);
+
+  let cpResult = null;
+  if (diff.length > 0) {
+    cpResult = createAutoApprovedCP(req.params.id, 'workflow_step', req.params.stepId,
+      `Step "${existing.name}"`, diff, uid);
+  }
+
+  res.json({ ...updated, decisions: parseJson(updated.decisions_list) || [], _cp: cpResult });
+});
+
+// ──────────────────────────────────────────────
+// AGENT SPECS (CRUD)
+// ──────────────────────────────────────────────
+app.get('/api/v1/projects/:id/agent-specs', (req, res) => {
+  const rows = db.prepare(
+    "SELECT * FROM asdlc_agent_spec WHERE project_id = ? AND lifecycle_status != 'deleted' ORDER BY name"
+  ).all(req.params.id);
+  res.json(parseRows(rows));
+});
+
+app.get('/api/v1/projects/:id/agent-specs/:agentId', (req, res) => {
+  const row = db.prepare('SELECT * FROM asdlc_agent_spec WHERE agent_spec_id = ? AND project_id = ?')
+    .get(req.params.agentId, req.params.id);
+  if (!row) return res.status(404).json({ error: 'Agent spec not found' });
+  res.json(parseRow(row));
+});
+
+// PUT /api/v1/projects/:id/agent-specs/:agentId
+app.put('/api/v1/projects/:id/agent-specs/:agentId', (req, res) => {
+  const uid = userId(req);
+  const existing = db.prepare('SELECT * FROM asdlc_agent_spec WHERE agent_spec_id = ? AND project_id = ?')
+    .get(req.params.agentId, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Agent spec not found' });
+
+  const ALLOWED = ['name', 'scope', 'instructions', 'goals', 'done_criteria',
+                   'memory_strategy', 'design_risks', 'run_as_model',
+                   // Phase 1 additions (Decisions #2, #16, #17, #18):
+                   'supervision_model', 'maintenance_owner', 'orchestration_strategy',
+                   'latency_target', 'post_release_validation', 'cost_model'];
+  const JSON_AG = ['goals', 'done_criteria', 'design_risks', 'inputs', 'outputs', 'run_as_model'];
+  const updates = {};
+  ALLOWED.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
+  JSON_AG.forEach(f => { if (updates[f] !== undefined && typeof updates[f] !== 'string') updates[f] = JSON.stringify(updates[f]); });
+
+  // Phase 1 enum validation
+  try {
+    if (updates.supervision_model !== undefined)      validateEnum(updates.supervision_model, ENUMS.supervision_model_3val, 'supervision_model');
+    if (updates.orchestration_strategy !== undefined) validateEnum(updates.orchestration_strategy, ENUMS.orchestration_strategy, 'orchestration_strategy');
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+
+  if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No updatable fields provided' });
+
+  const diff = diffFields(existing, updates, JSON_AG);
+  const setClauses = Object.keys(updates).map(f => `${f} = ?`).join(', ');
+  db.prepare(`UPDATE asdlc_agent_spec SET ${setClauses}, updated_at = datetime('now'), updated_by = ?
+    WHERE agent_spec_id = ?`).run(...Object.values(updates), uid, req.params.agentId);
+
+  const after = db.prepare('SELECT * FROM asdlc_agent_spec WHERE agent_spec_id = ?').get(req.params.agentId);
+  auditLog('asdlc_agent_spec', req.params.agentId, 'UPDATE', existing, after, uid);
+
+  let cpResult = null;
+  if (diff.length > 0) {
+    cpResult = createAutoApprovedCP(req.params.id, 'agent_spec', req.params.agentId,
+      existing.name, diff, uid);
+  }
+
+  res.json({ ...parseRow(after), _cp: cpResult });
+});
+
+// POST /api/v1/projects/:id/agent-specs/:agentId/draft-prompt
+// Generate a starting system prompt for an Agent via Claude (or a templated stub
+// when ANTHROPIC_API_KEY is missing). Does NOT auto-save — caller decides whether
+// to PUT the returned draft into the agent's `instructions` field.
+app.post('/api/v1/projects/:id/agent-specs/:agentId/draft-prompt', async (req, res) => {
+  const agent = db.prepare(
+    'SELECT * FROM asdlc_agent_spec WHERE agent_spec_id = ? AND project_id = ?'
+  ).get(req.params.agentId, req.params.id);
+  if (!agent) return res.status(404).json({ error: 'Agent spec not found' });
+
+  // Pull linked workflow (direct FK)
+  const workflow = agent.workflow_id
+    ? db.prepare('SELECT workflow_id, name, slug FROM asdlc_workflow WHERE workflow_id = ?')
+        .get(agent.workflow_id)
+    : null;
+
+  // Pull linked use case via the Phase 3 M:N join (fall back to direct FK)
+  const useCaseRow = db.prepare(`
+    SELECT uc.use_case_id, uc.title, uc.summary, uc.business_objective
+    FROM asdlc_agent_use_case auc
+    JOIN asdlc_use_case uc ON uc.use_case_id = auc.use_case_id
+    WHERE auc.agent_spec_id = ?
+    ORDER BY auc.created_at
+    LIMIT 1
+  `).get(req.params.agentId)
+    || (agent.use_case_id ? db.prepare(
+        'SELECT use_case_id, title, summary, business_objective FROM asdlc_use_case WHERE use_case_id = ?'
+      ).get(agent.use_case_id) : null);
+
+  // Pull tools bound to this agent
+  const tools = db.prepare(`
+    SELECT t.name, at.purpose, at.tool_execution_mode
+    FROM asdlc_agent_tool at
+    JOIN asdlc_tool t ON t.tool_id = at.tool_id
+    WHERE at.agent_spec_id = ?
+    ORDER BY t.name
+  `).all(req.params.agentId);
+
+  const ctx = {
+    name:                   agent.name,
+    scope:                  agent.scope,
+    goals:                  parseJson(agent.goals)         || [],
+    done_criteria:          parseJson(agent.done_criteria) || [],
+    design_risks:           parseJson(agent.design_risks)  || [],
+    supervision_model:      agent.supervision_model,
+    orchestration_strategy: agent.orchestration_strategy,
+    latency_target:         agent.latency_target,
+    use_case_title:         useCaseRow?.title,
+    workflow_name:          workflow?.name,
+    tools,
+  };
+
+  try {
+    const { draftAgentSystemPrompt } = require('./agent/prompt-drafter');
+    const result = await draftAgentSystemPrompt(ctx);
+    res.json(result); // { draft, model, source, [error] }
+  } catch (err) {
+    console.error('[draft-prompt] failed:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ──────────────────────────────────────────────
+// PHASE 3 — AGENT ↔ USE CASE (M:N join)
+// ──────────────────────────────────────────────
+
+// POST /api/v1/projects/:id/agents/:agentId/use-cases  — link a UC to this agent
+app.post('/api/v1/projects/:id/agents/:agentId/use-cases', (req, res) => {
+  const uid = userId(req);
+  const { use_case_id, business_value, notes } = req.body || {};
+  if (!use_case_id) return res.status(400).json({ error: 'use_case_id is required' });
+
+  const agent = db.prepare('SELECT * FROM asdlc_agent_spec WHERE agent_spec_id = ? AND project_id = ?')
+    .get(req.params.agentId, req.params.id);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+
+  const uc = db.prepare('SELECT * FROM asdlc_use_case WHERE use_case_id = ? AND project_id = ?')
+    .get(use_case_id, req.params.id);
+  if (!uc) return res.status(404).json({ error: 'Use case not found in this project' });
+
+  const existing = db.prepare('SELECT * FROM asdlc_agent_use_case WHERE agent_spec_id = ? AND use_case_id = ?')
+    .get(req.params.agentId, use_case_id);
+  if (existing) return res.status(409).json({ error: 'Agent is already linked to this use case' });
+
+  const aucId = generateId();
+  db.prepare(`INSERT INTO asdlc_agent_use_case
+    (agent_use_case_id, agent_spec_id, use_case_id, project_id, business_value, notes, created_by, updated_by)
+    VALUES (?,?,?,?,?,?,?,?)`)
+    .run(aucId, req.params.agentId, use_case_id, req.params.id,
+         business_value || null, notes || null, uid, uid);
+
+  const row = db.prepare('SELECT * FROM asdlc_agent_use_case WHERE agent_use_case_id = ?').get(aucId);
+  auditLog('asdlc_agent_use_case', aucId, 'INSERT', null, row, uid);
+  res.status(201).json({ agent_use_case_id: aucId, agent_spec_id: req.params.agentId,
+    use_case_id, business_value: row.business_value, notes: row.notes });
+});
+
+// DELETE /api/v1/projects/:id/agents/:agentId/use-cases/:aucId
+app.delete('/api/v1/projects/:id/agents/:agentId/use-cases/:aucId', (req, res) => {
+  const uid = userId(req);
+  const row = db.prepare(
+    'SELECT * FROM asdlc_agent_use_case WHERE agent_use_case_id = ? AND agent_spec_id = ? AND project_id = ?'
+  ).get(req.params.aucId, req.params.agentId, req.params.id);
+  if (!row) return res.status(404).json({ error: 'Agent–use case link not found' });
+
+  db.prepare('DELETE FROM asdlc_agent_use_case WHERE agent_use_case_id = ?').run(req.params.aucId);
+  auditLog('asdlc_agent_use_case', req.params.aucId, 'DELETE', row, null, uid);
+  res.json({ deleted: true });
+});
+
+// ──────────────────────────────────────────────
+// PHASE 3 — AGENT ↔ TOOL bindings
+// ──────────────────────────────────────────────
+
+// POST /api/v1/projects/:id/agents/:agentId/tools  — add a tool binding
+app.post('/api/v1/projects/:id/agents/:agentId/tools', (req, res) => {
+  const uid = userId(req);
+  const { tool_id, purpose, fallback_behavior, binding_supervision_model,
+          tool_execution_mode, linked_user_story_refs, details } = req.body || {};
+  if (!tool_id) return res.status(400).json({ error: 'tool_id is required' });
+
+  const SUPERVISION_MODELS = ['Supervised', 'Autonomous'];
+  const EXECUTION_MODES    = ['Autonomous', 'Human-permission required'];
+  if (binding_supervision_model && !SUPERVISION_MODELS.includes(binding_supervision_model))
+    return res.status(400).json({ error: `binding_supervision_model must be one of: ${SUPERVISION_MODELS.join(', ')}` });
+  if (tool_execution_mode && !EXECUTION_MODES.includes(tool_execution_mode))
+    return res.status(400).json({ error: `tool_execution_mode must be one of: ${EXECUTION_MODES.join(', ')}` });
+
+  const agent = db.prepare('SELECT * FROM asdlc_agent_spec WHERE agent_spec_id = ? AND project_id = ?')
+    .get(req.params.agentId, req.params.id);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+
+  // Tool must belong to this project OR be a broader-scope tool accessible to the project
+  const tool = db.prepare(
+    "SELECT * FROM asdlc_tool WHERE tool_id = ? AND (project_id = ? OR visibility_scope IN ('GLOBAL','ORGANIZATION','PROGRAM')) AND lifecycle_status = 'active'"
+  ).get(tool_id, req.params.id);
+  if (!tool) return res.status(404).json({ error: 'Tool not found or not accessible to this project' });
+
+  const existing = db.prepare('SELECT * FROM asdlc_agent_tool WHERE agent_spec_id = ? AND tool_id = ?')
+    .get(req.params.agentId, tool_id);
+  if (existing) return res.status(409).json({ error: 'Tool is already bound to this agent' });
+
+  const atId = generateId();
+  db.prepare(`INSERT INTO asdlc_agent_tool
+    (agent_tool_id, agent_spec_id, tool_id, project_id, purpose, fallback_behavior,
+     binding_supervision_model, tool_execution_mode, linked_user_story_refs, details,
+     created_by, updated_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(atId, req.params.agentId, tool_id, req.params.id,
+         purpose || null, fallback_behavior || null,
+         binding_supervision_model || null, tool_execution_mode || null,
+         linked_user_story_refs || null, details || null, uid, uid);
+
+  const row = db.prepare('SELECT * FROM asdlc_agent_tool WHERE agent_tool_id = ?').get(atId);
+  auditLog('asdlc_agent_tool', atId, 'INSERT', null, row, uid);
+  res.status(201).json({ agent_tool_id: atId, tool_name: tool.name, tool_slug: tool.slug, ...row });
+});
+
+// PUT /api/v1/projects/:id/agents/:agentId/tools/:atId  — edit a binding
+app.put('/api/v1/projects/:id/agents/:agentId/tools/:atId', (req, res) => {
+  const uid = userId(req);
+  const existing = db.prepare(
+    'SELECT * FROM asdlc_agent_tool WHERE agent_tool_id = ? AND agent_spec_id = ? AND project_id = ?'
+  ).get(req.params.atId, req.params.agentId, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Tool binding not found' });
+
+  const ALLOWED = ['purpose', 'fallback_behavior', 'binding_supervision_model',
+                   'tool_execution_mode', 'linked_user_story_refs', 'details'];
+  const SUPERVISION_MODELS = ['Supervised', 'Autonomous'];
+  const EXECUTION_MODES    = ['Autonomous', 'Human-permission required'];
+
+  const updates = {};
+  for (const key of ALLOWED) {
+    if (Object.prototype.hasOwnProperty.call(req.body, key)) updates[key] = req.body[key];
+  }
+  if (!Object.keys(updates).length) return res.json({ changed: false, message: 'no changes detected' });
+  if (updates.binding_supervision_model && !SUPERVISION_MODELS.includes(updates.binding_supervision_model))
+    return res.status(400).json({ error: `binding_supervision_model must be one of: ${SUPERVISION_MODELS.join(', ')}` });
+  if (updates.tool_execution_mode && !EXECUTION_MODES.includes(updates.tool_execution_mode))
+    return res.status(400).json({ error: `tool_execution_mode must be one of: ${EXECUTION_MODES.join(', ')}` });
+
+  const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
+  db.prepare(`UPDATE asdlc_agent_tool SET ${setClauses}, updated_at = datetime('now'), updated_by = ?
+    WHERE agent_tool_id = ?`).run(...Object.values(updates), uid, req.params.atId);
+
+  const after = db.prepare('SELECT * FROM asdlc_agent_tool WHERE agent_tool_id = ?').get(req.params.atId);
+  auditLog('asdlc_agent_tool', req.params.atId, 'UPDATE', existing, after, uid);
+  res.json({ changed: true, agent_tool_id: req.params.atId });
+});
+
+// DELETE /api/v1/projects/:id/agents/:agentId/tools/:atId
+app.delete('/api/v1/projects/:id/agents/:agentId/tools/:atId', (req, res) => {
+  const uid = userId(req);
+  const row = db.prepare(
+    'SELECT * FROM asdlc_agent_tool WHERE agent_tool_id = ? AND agent_spec_id = ? AND project_id = ?'
+  ).get(req.params.atId, req.params.agentId, req.params.id);
+  if (!row) return res.status(404).json({ error: 'Tool binding not found' });
+
+  db.prepare('DELETE FROM asdlc_agent_tool WHERE agent_tool_id = ?').run(req.params.atId);
+  auditLog('asdlc_agent_tool', req.params.atId, 'DELETE', row, null, uid);
+  res.json({ deleted: true });
+});
+
+// ──────────────────────────────────────────────
+// PHASE 4: RATE CARD, COST ASSUMPTION, STEP COST BINDINGS, AI COST ESTIMATE
+// ──────────────────────────────────────────────
+
+// GET /api/v1/rate-card — list all Now Assist skills
+app.get('/api/v1/rate-card', (req, res) => {
+  const rows = db.prepare(
+    'SELECT * FROM asdlc_assist_rate_card ORDER BY category, skill_name'
+  ).all();
+  res.json(rows);
+});
+
+// PUT /api/v1/rate-card/:skillId — edit a skill's assists_per_unit or category
+app.put('/api/v1/rate-card/:skillId', (req, res) => {
+  const row = db.prepare('SELECT * FROM asdlc_assist_rate_card WHERE skill_id = ?').get(req.params.skillId);
+  if (!row) return res.status(404).json({ error: 'Skill not found' });
+
+  const ALLOWED = ['assists_per_unit', 'category', 'source_note'];
+  const updates = {};
+  for (const k of ALLOWED) {
+    if (req.body[k] !== undefined) updates[k] = req.body[k];
+  }
+  if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No valid fields to update' });
+
+  const cols = Object.keys(updates).map(k => `${k} = ?`).join(', ');
+  db.prepare(`UPDATE asdlc_assist_rate_card SET ${cols}, updated_at = datetime('now') WHERE skill_id = ?`)
+    .run(...Object.values(updates), req.params.skillId);
+
+  res.json(db.prepare('SELECT * FROM asdlc_assist_rate_card WHERE skill_id = ?').get(req.params.skillId));
+});
+
+// GET /api/v1/cost-assumption — DEPRECATED legacy singleton.
+// All pricing + planning + entitlement is now per-Application; use
+// GET /api/v1/projects/:id/cost-params instead. This endpoint still returns
+// the legacy global pricing row (if any) for older clients, but writes are
+// rejected to avoid silently divergent global vs per-app values.
+app.get('/api/v1/cost-assumption', (req, res) => {
+  let row = db.prepare('SELECT * FROM asdlc_cost_assumption').get();
+  if (!row) row = { cost_assumption_id: null, cost_per_assist: null, overage_rate: null };
+  res.json({
+    cost_assumption_id: row.cost_assumption_id,
+    cost_per_assist:    row.cost_per_assist,
+    overage_rate:       row.overage_rate,
+    updated_at:         row.updated_at,
+    updated_by:         row.updated_by,
+    _deprecated: 'Pricing is per-Application. Use GET /api/v1/projects/:id/cost-params.',
+  });
+});
+
+// PUT /api/v1/cost-assumption — DEPRECATED. Pricing is per-Application now.
+app.put('/api/v1/cost-assumption', (req, res) => {
+  res.status(410).json({
+    error: 'This endpoint is deprecated. Cost-per-assist, overage rate, and all ' +
+           'other cost params are now per-Application. Use PUT /api/v1/projects/:id/cost-params.',
+  });
+});
+
+// GET /api/v1/projects/:id/cost-params — per-Application planning + entitlement
+app.get('/api/v1/projects/:id/cost-params', (req, res) => {
+  const row = db.prepare(
+    `SELECT project_id, planning_period, periods_per_year,
+            entitlement_enabled, annual_included_assists,
+            cost_per_assist, overage_rate, cost_per_assist_expansion
+     FROM asdlc_project WHERE project_id = ?`
+  ).get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Project not found' });
+  res.json(row);
+});
+
+// PUT /api/v1/projects/:id/cost-params — update per-Application cost params
+app.put('/api/v1/projects/:id/cost-params', (req, res) => {
+  const uid = userId(req);
+  const existing = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Project not found' });
+
+  const ALLOWED = ['planning_period', 'periods_per_year',
+                   'entitlement_enabled', 'annual_included_assists',
+                   'cost_per_assist', 'overage_rate', 'cost_per_assist_expansion'];
+  const updates = {};
+  for (const k of ALLOWED) {
+    if (req.body[k] !== undefined) updates[k] = req.body[k];
+  }
+  if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No valid fields to update' });
+
+  // Validate planning_period enum
+  if (updates.planning_period !== undefined) {
+    const valid = ['Weekly', 'Monthly', 'Quarterly', 'Annual'];
+    if (!valid.includes(updates.planning_period)) {
+      return res.status(400).json({ error: `planning_period must be one of: ${valid.join(', ')}` });
+    }
+  }
+  // Validate non-negative numerics on the pricing fields
+  for (const k of ['cost_per_assist', 'overage_rate', 'cost_per_assist_expansion']) {
+    if (updates[k] !== undefined && updates[k] !== null) {
+      const n = Number(updates[k]);
+      if (!Number.isFinite(n) || n < 0) {
+        return res.status(400).json({ error: `${k} must be a non-negative number` });
+      }
+      updates[k] = n;
+    }
+  }
+
+  const cols = Object.keys(updates).map(k => `${k} = ?`).join(', ');
+  db.prepare(`UPDATE asdlc_project SET ${cols}, updated_at = datetime('now'), updated_by = ?
+              WHERE project_id = ?`)
+    .run(...Object.values(updates), uid || null, req.params.id);
+
+  // Snapshot the old vs new cost params for audit (covers all 7 fields)
+  const COST_PARAM_KEYS = ALLOWED;
+  const before = {};
+  const after  = {};
+  COST_PARAM_KEYS.forEach(k => { before[k] = existing[k]; after[k] = updates[k] ?? existing[k]; });
+  auditLog('asdlc_project', req.params.id, 'UPDATE',
+           { cost_params: before }, { cost_params: after }, uid);
+
+  const row = db.prepare(
+    `SELECT project_id, planning_period, periods_per_year,
+            entitlement_enabled, annual_included_assists,
+            cost_per_assist, overage_rate, cost_per_assist_expansion
+     FROM asdlc_project WHERE project_id = ?`
+  ).get(req.params.id);
+  res.json(row);
+});
+
+// GET /api/v1/projects/:id/steps/:stepId/cost-bindings
+app.get('/api/v1/projects/:id/steps/:stepId/cost-bindings', (req, res) => {
+  const rows = db.prepare(`
+    SELECT b.*, r.assists_per_unit, r.category
+    FROM asdlc_workflow_step_cost_binding b
+    JOIN asdlc_assist_rate_card r ON r.skill_name = b.skill_name
+    WHERE b.workflow_step_id = ? AND b.project_id = ?
+    ORDER BY b.created_at
+  `).all(req.params.stepId, req.params.id);
+  res.json(rows);
+});
+
+// POST /api/v1/projects/:id/steps/:stepId/cost-bindings — add a manual binding
+app.post('/api/v1/projects/:id/steps/:stepId/cost-bindings', (req, res) => {
+  const uid = userId(req);
+  const { skill_name, qty_per_run, branch_probability, notes } = req.body;
+  if (!skill_name) return res.status(400).json({ error: 'skill_name required' });
+  const skill = db.prepare('SELECT * FROM asdlc_assist_rate_card WHERE skill_name = ?').get(skill_name);
+  if (!skill) return res.status(400).json({ error: 'skill_name not in rate card' });
+
+  const bid = generateId();
+  db.prepare(`
+    INSERT INTO asdlc_workflow_step_cost_binding
+      (binding_id, workflow_step_id, project_id, skill_name, qty_per_run,
+       branch_probability, ai_generated, notes, created_by, created_at, updated_at)
+    VALUES (?,?,?,?,?,?,0,?,?,datetime('now'),datetime('now'))
+  `).run(bid, req.params.stepId, req.params.id, skill_name,
+         qty_per_run ?? 1.0, branch_probability ?? null, notes ?? null, uid || null);
+
+  auditLog('asdlc_workflow_step_cost_binding', bid, 'INSERT', null,
+    { workflow_step_id: req.params.stepId, skill_name }, uid);
+  res.status(201).json(db.prepare(
+    'SELECT b.*, r.assists_per_unit FROM asdlc_workflow_step_cost_binding b JOIN asdlc_assist_rate_card r ON r.skill_name = b.skill_name WHERE b.binding_id = ?'
+  ).get(bid));
+});
+
+// PUT /api/v1/projects/:id/steps/:stepId/cost-bindings/:bid — edit binding
+app.put('/api/v1/projects/:id/steps/:stepId/cost-bindings/:bid', (req, res) => {
+  const uid = userId(req);
+  const row = db.prepare(
+    'SELECT * FROM asdlc_workflow_step_cost_binding WHERE binding_id = ? AND project_id = ?'
+  ).get(req.params.bid, req.params.id);
+  if (!row) return res.status(404).json({ error: 'Binding not found' });
+
+  const ALLOWED = ['qty_per_run', 'branch_probability', 'notes'];
+  const updates = { ai_generated: 0 }; // any user edit marks as manual
+  for (const k of ALLOWED) {
+    if (req.body[k] !== undefined) updates[k] = req.body[k];
+  }
+  const cols = Object.keys(updates).map(k => `${k} = ?`).join(', ');
+  db.prepare(`UPDATE asdlc_workflow_step_cost_binding SET ${cols}, updated_at = datetime('now'), updated_by = ?
+    WHERE binding_id = ?`).run(...Object.values(updates), uid || null, req.params.bid);
+
+  auditLog('asdlc_workflow_step_cost_binding', req.params.bid, 'UPDATE', row, updates, uid);
+  res.json(db.prepare('SELECT * FROM asdlc_workflow_step_cost_binding WHERE binding_id = ?').get(req.params.bid));
+});
+
+// DELETE /api/v1/projects/:id/steps/:stepId/cost-bindings/:bid
+app.delete('/api/v1/projects/:id/steps/:stepId/cost-bindings/:bid', (req, res) => {
+  const uid = userId(req);
+  const row = db.prepare(
+    'SELECT * FROM asdlc_workflow_step_cost_binding WHERE binding_id = ? AND project_id = ?'
+  ).get(req.params.bid, req.params.id);
+  if (!row) return res.status(404).json({ error: 'Binding not found' });
+  db.prepare('DELETE FROM asdlc_workflow_step_cost_binding WHERE binding_id = ?').run(req.params.bid);
+  auditLog('asdlc_workflow_step_cost_binding', req.params.bid, 'DELETE', row, null, uid);
+  res.json({ deleted: true });
+});
+
+// POST /api/v1/projects/:id/cost-estimate — AI-driven cost estimation using Claude API
+app.post('/api/v1/projects/:id/cost-estimate', async (req, res) => {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey || apiKey === 'your_anthropic_api_key_here' || apiKey.trim() === '') {
+    return res.status(503).json({
+      status: 'unavailable',
+      message: 'ANTHROPIC_API_KEY is not configured. Set it in backend-node/.env to enable AI cost estimation.'
+    });
+  }
+
+  const projectId = req.params.id;
+
+  // Gather all project data needed for estimation.
+  // Cost params are merged from global pricing + per-app planning/entitlement.
+  const assumption = getEffectiveCostParams(projectId);
+
+  const rateCard = db.prepare(
+    'SELECT skill_name, category, assists_per_unit FROM asdlc_assist_rate_card ORDER BY category, skill_name'
+  ).all();
+
+  const workflows = db.prepare(
+    "SELECT * FROM asdlc_workflow WHERE project_id = ? AND lifecycle_status != 'deleted'"
+  ).all(projectId);
+
+  const allSteps = db.prepare(
+    "SELECT s.*, wp.participant_type, wp.agent_spec_id AS step_owner_agent_id FROM asdlc_workflow_step s LEFT JOIN asdlc_workflow_participant wp ON wp.workflow_participant_id = s.owner_participant_id WHERE s.project_id = ? ORDER BY s.workflow_id, s.step_number"
+  ).all(projectId);
+
+  const allAgents = db.prepare(
+    "SELECT agent_spec_id, name, scope, instructions, cost_model FROM asdlc_agent_spec WHERE project_id = ? AND lifecycle_status != 'deleted'"
+  ).all(projectId);
+
+  const allToolBindings = db.prepare(`
+    SELECT at.agent_spec_id, t.name AS tool_name, at.purpose, at.tool_execution_mode
+    FROM asdlc_agent_tool at
+    JOIN asdlc_tool t ON t.tool_id = at.tool_id
+    WHERE at.project_id = ?
+  `).all(projectId);
+
+  // Build compact prompt data
+  const toolsByAgent = {};
+  allToolBindings.forEach(tb => {
+    if (!toolsByAgent[tb.agent_spec_id]) toolsByAgent[tb.agent_spec_id] = [];
+    toolsByAgent[tb.agent_spec_id].push(`${tb.tool_name} (${tb.tool_execution_mode || 'Autonomous'})`);
+  });
+
+  const agentSummary = allAgents.map(a => ({
+    id: a.agent_spec_id,
+    name: a.name,
+    cost_model: a.cost_model,
+    tools: toolsByAgent[a.agent_spec_id] || [],
+    scope: a.scope ? a.scope.substring(0, 200) : ''
+  }));
+
+  const workflowSummary = workflows.map(wf => ({
+    workflow_id: wf.workflow_id,
+    name: wf.name,
+    runs_per_period: wf.runs_per_period || 100,
+    steps: allSteps.filter(s => s.workflow_id === wf.workflow_id).map(s => ({
+      workflow_step_id: s.workflow_step_id,
+      step_number: s.step_number,
+      name: s.name,
+      step_type: s.step_type || 'Activity',
+      purpose: s.step_purpose || '',
+      owner_type: s.participant_type || 'unknown',
+      inputs: s.inputs ? JSON.stringify(s.inputs).substring(0, 100) : '',
+      outputs: s.outputs ? JSON.stringify(s.outputs).substring(0, 100) : ''
+    }))
+  }));
+
+  // Only include agentic skills in the prompt (shorter, more relevant)
+  const agenticSkills = rateCard.filter(r =>
+    r.category === 'Agentic' || r.category === 'Integration' || r.category === 'Flow' ||
+    r.category === 'Knowledge' || r.category === 'Document'
+  );
+
+  const rateCardSummary = agenticSkills.map(r =>
+    `"${r.skill_name}" (${r.category}): ${r.assists_per_unit} assists`
+  ).join('\n');
+
+  const prompt = `You are a ServiceNow Now Assist cost estimator for agentic AI workflows.
+
+Analyze the following workflow design and determine which Now Assist skills are invoked at each workflow step, how many times per run, and at what probability.
+
+RATE CARD — use ONLY these exact skill names:
+${rateCardSummary}
+
+AGENTS IN PROJECT:
+${JSON.stringify(agentSummary, null, 1)}
+
+WORKFLOWS AND STEPS:
+${JSON.stringify(workflowSummary, null, 1)}
+
+RULES:
+- Only include agent-owned steps (owner_type includes "Agent" or "Orchestrator")
+- Skip pure human steps (owner_type = "Human Role" or "Human Coordinator")
+- For the main agentic processing step, use "Agentic workflow – small" (≤3 tools), "medium" (4-8 tools), or "large" (9-20 tools)
+- For each MCP tool call, add "MCP server call" × number of distinct tool calls
+- For knowledge lookups, add "Knowledge graph query"
+- branch_probability: 1.0 if always runs, lower if conditional (e.g. 0.4 for a branch path)
+- qty_per_run: how many times this skill fires in one workflow execution
+- Respond with a JSON array ONLY (no markdown, no extra text)
+
+OUTPUT FORMAT:
+[
+  {
+    "workflow_step_id": "<exact step UUID>",
+    "skill_name": "<exact name from rate card>",
+    "qty_per_run": 1,
+    "branch_probability": 1.0,
+    "reasoning": "one sentence"
+  }
+]`;
+
+  try {
+    const Anthropic = require('@anthropic-ai/sdk');
+    const client = new Anthropic({ apiKey });
+    const message = await client.messages.create({
+      model: 'claude-opus-4-5',
+      max_tokens: 4096,
+      messages: [{ role: 'user', content: prompt }]
+    });
+
+    const rawText = message.content[0]?.text || '[]';
+    // Strip markdown code fences if present
+    const jsonText = rawText.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+    let bindings;
+    try {
+      bindings = JSON.parse(jsonText);
+    } catch {
+      return res.status(500).json({ error: 'AI returned invalid JSON', raw: rawText.substring(0, 500) });
+    }
+
+    if (!Array.isArray(bindings)) {
+      return res.status(500).json({ error: 'AI response was not an array', raw: rawText.substring(0, 500) });
+    }
+
+    // Validate skill names against rate card
+    const validSkills = new Set(rateCard.map(r => r.skill_name));
+    const uid = userId(req);
+    let created = 0;
+    const skipped = [];
+
+    const upsertStmt = db.prepare(`
+      INSERT INTO asdlc_workflow_step_cost_binding
+        (binding_id, workflow_step_id, project_id, skill_name, qty_per_run,
+         branch_probability, ai_generated, ai_reasoning, created_by, created_at, updated_at)
+      VALUES (?,?,?,?,?,?,1,?,?,datetime('now'),datetime('now'))
+      ON CONFLICT(workflow_step_id, skill_name) DO UPDATE SET
+        qty_per_run = excluded.qty_per_run,
+        branch_probability = excluded.branch_probability,
+        ai_generated = 1,
+        ai_reasoning = excluded.ai_reasoning,
+        updated_at = datetime('now')
+    `);
+
+    // Valid step IDs for this project
+    const validStepIds = new Set(allSteps.map(s => s.workflow_step_id));
+
+    for (const b of bindings) {
+      if (!b.workflow_step_id || !b.skill_name) { skipped.push({ reason: 'missing fields', b }); continue; }
+      if (!validSkills.has(b.skill_name)) { skipped.push({ reason: 'unknown skill', skill: b.skill_name }); continue; }
+      if (!validStepIds.has(b.workflow_step_id)) { skipped.push({ reason: 'unknown step', step: b.workflow_step_id }); continue; }
+      try {
+        upsertStmt.run(
+          generateId(), b.workflow_step_id, projectId, b.skill_name,
+          b.qty_per_run ?? 1.0, b.branch_probability ?? null,
+          b.reasoning || null, uid || null
+        );
+        created++;
+      } catch (err) {
+        skipped.push({ reason: err.message, b });
+      }
+    }
+
+    res.json({ status: 'ok', bindings_created: created, skipped_count: skipped.length, skipped: skipped.slice(0, 5) });
+  } catch (err) {
+    console.error('[cost-estimate] Claude API error:', err.message);
+    res.status(500).json({ error: 'Claude API call failed', detail: err.message });
+  }
+});
+
+// ──────────────────────────────────────────────
+// KNOWLEDGE ARTICLES
+// ──────────────────────────────────────────────
+app.get('/api/v1/projects/:id/knowledge-articles', (req, res) => {
+  const rows = db.prepare(
+    "SELECT * FROM asdlc_knowledge_article WHERE project_id = ? AND lifecycle_status != 'deleted' ORDER BY updated_at DESC"
+  ).all(req.params.id);
+  res.json(rows);
+});
+
+// ──────────────────────────────────────────────
+// TOOLS
+// ──────────────────────────────────────────────
+app.get('/api/v1/projects/:id/tools', (req, res) => {
+  const rows = db.prepare(
+    "SELECT * FROM asdlc_tool WHERE project_id = ? AND lifecycle_status = 'active' ORDER BY name"
+  ).all(req.params.id);
+  res.json(parseRows(rows));
+});
+
+// PUT /api/v1/projects/:id/tools/:toolId
+app.put('/api/v1/projects/:id/tools/:toolId', (req, res) => {
+  const uid = userId(req);
+  const existing = db.prepare("SELECT * FROM asdlc_tool WHERE tool_id = ? AND project_id = ?")
+    .get(req.params.toolId, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Tool not found' });
+
+  const ALLOWED = ['name', 'execution_mode', 'cost_impact', 'access_requirements',
+                   'contract', 'boundaries',
+                   // Phase 1 additions (Decision #14):
+                   'dev_status'];
+  const JSON_TOOL = ['contract', 'inputs', 'outputs', 'errors', 'boundaries', 'access_requirements'];
+  const updates = {};
+  ALLOWED.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
+
+  // Phase 1 enum validation
+  try {
+    if (updates.dev_status !== undefined) validateEnum(updates.dev_status, ENUMS.dev_status, 'dev_status');
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+
+  // Special: contract_description merges into the existing contract JSON object
+  if (req.body.contract_description !== undefined) {
+    const existingContract = parseJson(existing.contract) || {};
+    if (typeof existingContract === 'object') {
+      updates.contract = JSON.stringify({ ...existingContract, description: req.body.contract_description });
+    } else {
+      updates.contract = JSON.stringify({ description: req.body.contract_description });
+    }
+  }
+
+  JSON_TOOL.forEach(f => { if (updates[f] !== undefined && typeof updates[f] !== 'string') updates[f] = JSON.stringify(updates[f]); });
+
+  if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No updatable fields provided' });
+
+  const diff = diffFields(existing, updates, JSON_TOOL);
+  const setClauses = Object.keys(updates).map(f => `${f} = ?`).join(', ');
+  db.prepare(`UPDATE asdlc_tool SET ${setClauses}, updated_at = datetime('now'), updated_by = ?
+    WHERE tool_id = ?`).run(...Object.values(updates), uid, req.params.toolId);
+
+  const after = db.prepare('SELECT * FROM asdlc_tool WHERE tool_id = ?').get(req.params.toolId);
+  auditLog('asdlc_tool', req.params.toolId, 'UPDATE', existing, after, uid);
+
+  let cpResult = null;
+  if (diff.length > 0) {
+    cpResult = createAutoApprovedCP(req.params.id, 'tool', req.params.toolId,
+      existing.name, diff, uid);
+  }
+
+  res.json({ ...parseRow(after), _cp: cpResult });
+});
+
+// ──────────────────────────────────────────────
+// HITL GATES
+// ──────────────────────────────────────────────
+app.get('/api/v1/projects/:id/hitl-gates', (req, res) => {
+  const rows = db.prepare(
+    "SELECT hg.*, wf.name AS workflow_name FROM asdlc_hitl_gate hg LEFT JOIN asdlc_workflow wf ON wf.workflow_id = hg.workflow_id WHERE hg.project_id = ? AND hg.lifecycle_status = 'active' ORDER BY hg.created_at"
+  ).all(req.params.id);
+  res.json(rows);
+});
+
+// ──────────────────────────────────────────────
+// WORKFLOW PARTICIPANTS  (Phase 2)
+// ──────────────────────────────────────────────
+
+app.get('/api/v1/projects/:id/workflows/:wfId/participants', (req, res) => {
+  const rows = db.prepare(
+    "SELECT * FROM asdlc_workflow_participant WHERE workflow_id = ? AND project_id = ? AND lifecycle_status != 'deleted' ORDER BY lane_order, created_at"
+  ).all(req.params.wfId, req.params.id);
+  res.json(rows);
+});
+
+app.post('/api/v1/projects/:id/workflows/:wfId/participants', (req, res) => {
+  const uid = userId(req);
+  const { participant_type, human_role_name, purpose_in_workflow, authority_level,
+          handoff_method, agent_spec_id, inputs_required, outputs_produced,
+          swimlane_display_name, lane_order, include_in_swimlane, include_in_rasic,
+          rasic_column_display_name, rasic_column_order, engagement_channel, notes } = req.body || {};
+  if (!participant_type) return res.status(400).json({ error: 'participant_type is required' });
+  try {
+    validateEnum(participant_type, ENUMS.participant_type, 'participant_type');
+    if (authority_level) validateEnum(authority_level, ENUMS.authority_level, 'authority_level');
+    if (handoff_method)  validateEnum(handoff_method,  ENUMS.handoff_method,  'handoff_method');
+  } catch (err) { return res.status(400).json({ error: err.message }); }
+
+  const id   = generateId();
+  const slug = nextSlug('asdlc_workflow_participant', 'P', req.params.id);
+  db.prepare(`
+    INSERT INTO asdlc_workflow_participant
+      (workflow_participant_id, workflow_id, project_id, slug, participant_type,
+       agent_spec_id, human_role_name, purpose_in_workflow, authority_level, handoff_method,
+       inputs_required, outputs_produced, swimlane_display_name, lane_order,
+       include_in_swimlane, include_in_rasic, rasic_column_display_name, rasic_column_order,
+       engagement_channel, notes, created_by, updated_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  `).run(id, req.params.wfId, req.params.id, slug, participant_type,
+         agent_spec_id || null, human_role_name || null, purpose_in_workflow || null,
+         authority_level || null, handoff_method || null,
+         inputs_required || null, outputs_produced || null,
+         swimlane_display_name || null, lane_order != null ? lane_order : null,
+         include_in_swimlane != null ? include_in_swimlane : 1,
+         include_in_rasic    != null ? include_in_rasic    : 1,
+         rasic_column_display_name || null, rasic_column_order != null ? rasic_column_order : null,
+         engagement_channel || null, notes || null, uid, uid);
+  const row = db.prepare('SELECT * FROM asdlc_workflow_participant WHERE workflow_participant_id = ?').get(id);
+  auditLog('asdlc_workflow_participant', id, 'INSERT', null, row, uid);
+  res.status(201).json(row);
+});
+
+app.put('/api/v1/projects/:id/workflows/:wfId/participants/:participantId', (req, res) => {
+  const uid = userId(req);
+  const existing = db.prepare(
+    'SELECT * FROM asdlc_workflow_participant WHERE workflow_participant_id = ? AND workflow_id = ? AND project_id = ?'
+  ).get(req.params.participantId, req.params.wfId, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Participant not found' });
+
+  const ALLOWED = ['participant_type', 'human_role_name', 'purpose_in_workflow', 'authority_level',
+                   'handoff_method', 'agent_spec_id', 'inputs_required', 'outputs_produced',
+                   'swimlane_display_name', 'lane_order', 'include_in_swimlane', 'include_in_rasic',
+                   'rasic_column_display_name', 'rasic_column_order', 'engagement_channel', 'notes'];
+  const updates = {};
+  ALLOWED.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
+  try {
+    if (updates.participant_type) validateEnum(updates.participant_type, ENUMS.participant_type, 'participant_type');
+    if (updates.authority_level)  validateEnum(updates.authority_level,  ENUMS.authority_level,  'authority_level');
+    if (updates.handoff_method)   validateEnum(updates.handoff_method,   ENUMS.handoff_method,   'handoff_method');
+  } catch (err) { return res.status(400).json({ error: err.message }); }
+  if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No updatable fields' });
+
+  const setClauses = Object.keys(updates).map(f => `${f} = ?`).join(', ');
+  db.prepare(`UPDATE asdlc_workflow_participant SET ${setClauses}, updated_at = datetime('now'), updated_by = ?
+    WHERE workflow_participant_id = ?`).run(...Object.values(updates), uid, req.params.participantId);
+  const after = db.prepare('SELECT * FROM asdlc_workflow_participant WHERE workflow_participant_id = ?').get(req.params.participantId);
+  auditLog('asdlc_workflow_participant', req.params.participantId, 'UPDATE', existing, after, uid);
+  res.json(after);
+});
+
+app.delete('/api/v1/projects/:id/workflows/:wfId/participants/:participantId', (req, res) => {
+  const uid = userId(req);
+  db.prepare(`UPDATE asdlc_workflow_participant SET lifecycle_status = 'deleted', updated_by = ?, updated_at = datetime('now')
+    WHERE workflow_participant_id = ? AND workflow_id = ? AND project_id = ?`
+  ).run(uid, req.params.participantId, req.params.wfId, req.params.id);
+  res.json({ deleted: true });
+});
+
+// ──────────────────────────────────────────────
+// WORKFLOW STEP RASIC  (Phase 2)
+// ──────────────────────────────────────────────
+
+app.get('/api/v1/projects/:id/workflows/:wfId/steps/:stepId/rasic', (req, res) => {
+  const rows = db.prepare(`
+    SELECT r.*, p.participant_type, p.human_role_name, p.swimlane_display_name,
+           p.slug AS participant_slug, a.name AS agent_name
+    FROM asdlc_workflow_step_rasic r
+    JOIN asdlc_workflow_participant p ON p.workflow_participant_id = r.workflow_participant_id
+    LEFT JOIN asdlc_agent_spec a ON a.agent_spec_id = p.agent_spec_id
+    WHERE r.workflow_step_id = ? AND r.project_id = ?
+    ORDER BY p.rasic_column_order, p.created_at, r.code
+  `).all(req.params.stepId, req.params.id);
+  res.json(rows);
+});
+
+app.post('/api/v1/projects/:id/workflows/:wfId/steps/:stepId/rasic', (req, res) => {
+  const uid = userId(req);
+  const { workflow_participant_id, code } = req.body || {};
+  if (!workflow_participant_id || !code) return res.status(400).json({ error: 'workflow_participant_id and code are required' });
+  try { validateEnum(code, ENUMS.rasic_code, 'code'); } catch (err) { return res.status(400).json({ error: err.message }); }
+
+  const id = generateId();
+  try {
+    db.prepare(`
+      INSERT INTO asdlc_workflow_step_rasic
+        (rasic_id, workflow_step_id, workflow_participant_id, project_id, code, created_by, updated_by)
+      VALUES (?,?,?,?,?,?,?)
+    `).run(id, req.params.stepId, workflow_participant_id, req.params.id, code, uid, uid);
+  } catch (err) {
+    if (err.message.includes('UNIQUE')) return res.status(409).json({ error: 'This code already exists for this step/participant combination' });
+    throw err;
+  }
+  const row = db.prepare('SELECT * FROM asdlc_workflow_step_rasic WHERE rasic_id = ?').get(id);
+  auditLog('asdlc_workflow_step_rasic', id, 'INSERT', null, row, uid);
+  res.status(201).json(row);
+});
+
+app.delete('/api/v1/projects/:id/workflows/:wfId/steps/:stepId/rasic/:rasicId', (req, res) => {
+  const uid = userId(req);
+  const row = db.prepare('SELECT * FROM asdlc_workflow_step_rasic WHERE rasic_id = ? AND workflow_step_id = ?')
+    .get(req.params.rasicId, req.params.stepId);
+  if (!row) return res.status(404).json({ error: 'RASIC entry not found' });
+  db.prepare('DELETE FROM asdlc_workflow_step_rasic WHERE rasic_id = ?').run(req.params.rasicId);
+  auditLog('asdlc_workflow_step_rasic', req.params.rasicId, 'DELETE', row, null, uid);
+  res.json({ deleted: true });
+});
+
+// ──────────────────────────────────────────────
+// WORKFLOW PATHS  (Phase 2)
+// ──────────────────────────────────────────────
+
+app.get('/api/v1/projects/:id/workflows/:wfId/paths', (req, res) => {
+  const rows = db.prepare(
+    'SELECT * FROM asdlc_workflow_path WHERE workflow_id = ? AND project_id = ? ORDER BY created_at'
+  ).all(req.params.wfId, req.params.id);
+  res.json(rows);
+});
+
+app.post('/api/v1/projects/:id/workflows/:wfId/paths', (req, res) => {
+  const uid = userId(req);
+  const { from_step_id, to_step_id, branch_label, branch_condition, is_default_path, notes } = req.body || {};
+  if (!from_step_id || !to_step_id) return res.status(400).json({ error: 'from_step_id and to_step_id are required' });
+
+  const id   = generateId();
+  const slug = nextSlug('asdlc_workflow_path', 'PATH', req.params.id);
+  db.prepare(`
+    INSERT INTO asdlc_workflow_path
+      (workflow_path_id, workflow_id, project_id, slug, from_step_id, to_step_id,
+       branch_label, branch_condition, is_default_path, notes, created_by, updated_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+  `).run(id, req.params.wfId, req.params.id, slug, from_step_id, to_step_id,
+         branch_label || null, branch_condition || null,
+         is_default_path ? 1 : 0, notes || null, uid, uid);
+  const row = db.prepare('SELECT * FROM asdlc_workflow_path WHERE workflow_path_id = ?').get(id);
+  auditLog('asdlc_workflow_path', id, 'INSERT', null, row, uid);
+  res.status(201).json(row);
+});
+
+app.put('/api/v1/projects/:id/workflows/:wfId/paths/:pathId', (req, res) => {
+  const uid = userId(req);
+  const existing = db.prepare(
+    'SELECT * FROM asdlc_workflow_path WHERE workflow_path_id = ? AND workflow_id = ? AND project_id = ?'
+  ).get(req.params.pathId, req.params.wfId, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Path not found' });
+
+  const ALLOWED = ['from_step_id', 'to_step_id', 'branch_label', 'branch_condition', 'is_default_path', 'notes'];
+  const updates = {};
+  ALLOWED.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
+  if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No updatable fields' });
+
+  const setClauses = Object.keys(updates).map(f => `${f} = ?`).join(', ');
+  db.prepare(`UPDATE asdlc_workflow_path SET ${setClauses}, updated_at = datetime('now'), updated_by = ?
+    WHERE workflow_path_id = ?`).run(...Object.values(updates), uid, req.params.pathId);
+  const after = db.prepare('SELECT * FROM asdlc_workflow_path WHERE workflow_path_id = ?').get(req.params.pathId);
+  auditLog('asdlc_workflow_path', req.params.pathId, 'UPDATE', existing, after, uid);
+  res.json(after);
+});
+
+app.delete('/api/v1/projects/:id/workflows/:wfId/paths/:pathId', (req, res) => {
+  const uid = userId(req);
+  const row = db.prepare('SELECT * FROM asdlc_workflow_path WHERE workflow_path_id = ? AND workflow_id = ?')
+    .get(req.params.pathId, req.params.wfId);
+  if (!row) return res.status(404).json({ error: 'Path not found' });
+  db.prepare('DELETE FROM asdlc_workflow_path WHERE workflow_path_id = ?').run(req.params.pathId);
+  auditLog('asdlc_workflow_path', req.params.pathId, 'DELETE', row, null, uid);
+  res.json({ deleted: true });
+});
+
+// ──────────────────────────────────────────────
+// SWIMLANE DIAGRAM (PlantUML → PNG/SVG via kroki.io)
+// ──────────────────────────────────────────────
+
+/**
+ * GET /api/v1/projects/:id/workflows/:wfId/swimlane
+ * Generates a swimlane diagram for the given workflow via kroki.io and
+ * returns a PNG (default) or SVG suitable for downloading.
+ *
+ * Query params:
+ *   ?format=png|svg   (default: png)
+ */
+const { buildSwimlaneSVG } = require('./swimlane');
+
+app.get('/api/v1/projects/:id/workflows/:wfId/swimlane', (req, res) => {
+  // ── load project ──────────────────────────────────────────────────────────
+  const project = db.prepare(
+    'SELECT project_name, project_code FROM asdlc_project WHERE project_id = ?'
+  ).get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  // ── load workflow ─────────────────────────────────────────────────────────
+  const wf = db.prepare(
+    "SELECT * FROM asdlc_workflow WHERE workflow_id = ? AND project_id = ? AND lifecycle_status != 'deleted'"
+  ).get(req.params.wfId, req.params.id);
+  if (!wf) return res.status(404).json({ error: 'Workflow not found' });
+
+  // ── load steps, participants, paths ───────────────────────────────────────
+  const steps = db.prepare(
+    'SELECT * FROM asdlc_workflow_step WHERE workflow_id = ? ORDER BY step_number'
+  ).all(req.params.wfId);
+
+  const participants = db.prepare(`
+    SELECT p.*, a.name AS agent_name
+    FROM asdlc_workflow_participant p
+    LEFT JOIN asdlc_agent_spec a ON a.agent_spec_id = p.agent_spec_id
+    WHERE p.workflow_id = ? AND p.lifecycle_status != 'deleted'
+    ORDER BY p.lane_order, p.created_at
+  `).all(req.params.wfId);
+
+  const paths = db.prepare(
+    'SELECT * FROM asdlc_workflow_path WHERE workflow_id = ? ORDER BY created_at'
+  ).all(req.params.wfId);
+
+  // HITL gates per step (boolean flag on steps so the renderer can badge them)
+  const hitlGates = db.prepare('SELECT * FROM asdlc_hitl_gate WHERE workflow_id = ?')
+    .all(req.params.wfId);
+  const hitlByStep = new Set();
+  hitlGates.forEach(h => { if (h.workflow_step_id) hitlByStep.add(h.workflow_step_id); });
+  // Also flag steps whose own hitl_gate_id is non-null
+  for (const s of steps) {
+    s.hitl_gate = s.hitl_gate_id || hitlByStep.has(s.workflow_step_id) || null;
+  }
+
+  // Parse workflow JSON columns for the renderer
+  let fallbackPaths = [];
+  try { fallbackPaths = wf.fallback_paths ? JSON.parse(wf.fallback_paths) : []; } catch (_) {}
+
+  // ── build SVG ─────────────────────────────────────────────────────────────
+  let svgText;
+  try {
+    svgText = buildSwimlaneSVG(
+      {
+        workflow_id:    wf.workflow_id,
+        slug:           wf.slug,
+        name:           wf.name,
+        steps,
+        participants,
+        paths,
+        fallback_paths: fallbackPaths,
+      },
+      project.project_name
+    );
+  } catch (err) {
+    return res.status(422).json({ error: `Swimlane build failed: ${err.message}` });
+  }
+
+  // ── stream as SVG download ────────────────────────────────────────────────
+  const slug     = (wf.slug || 'workflow').toLowerCase();
+  const filename = `swimlane-${slug}.svg`;
+  res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(svgText);
+});
+
+// ──────────────────────────────────────────────
+// ACCEPTANCE CRITERIA
+// ──────────────────────────────────────────────
+
+// List acceptance criteria for a project, optionally filtered by parent.
+// Query params: parent_type=use_case|user_story, parent_id=<id>
+app.get('/api/v1/projects/:id/acceptance-criteria', (req, res) => {
+  const where = ['project_id = ?', "lifecycle_status != 'deleted'"];
+  const args  = [req.params.id];
+  if (req.query.parent_type) { where.push('parent_type = ?'); args.push(req.query.parent_type); }
+  if (req.query.parent_id)   { where.push('parent_id = ?');   args.push(req.query.parent_id); }
+  const rows = db.prepare(
+    `SELECT * FROM asdlc_acceptance_criterion WHERE ${where.join(' AND ')} ORDER BY created_at`
+  ).all(...args);
+  res.json(rows);
+});
+
+// Create
+app.post('/api/v1/projects/:id/acceptance-criteria', (req, res) => {
+  const uid = userId(req);
+  const { parent_type, parent_id, text, source, status } = req.body || {};
+  if (!parent_type || !parent_id || !text) {
+    return res.status(400).json({ error: 'parent_type, parent_id, and text are required' });
+  }
+  if (!['use_case', 'user_story'].includes(parent_type)) {
+    return res.status(400).json({ error: "parent_type must be 'use_case' or 'user_story'" });
+  }
+  const id = generateId();
+  db.prepare(`
+    INSERT INTO asdlc_acceptance_criterion
+      (acceptance_criterion_id, project_id, parent_type, parent_id, text,
+       source, status, created_by, updated_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, req.params.id, parent_type, parent_id, text,
+         source || 'user_added', status || 'draft', uid, uid);
+  const row = db.prepare('SELECT * FROM asdlc_acceptance_criterion WHERE acceptance_criterion_id = ?').get(id);
+  auditLog('asdlc_acceptance_criterion', id, 'INSERT', null, row, uid);
+  res.status(201).json(row);
+});
+
+// Update — triggers auto-approved CP for every changed field
+app.put('/api/v1/projects/:id/acceptance-criteria/:acId', (req, res) => {
+  const uid = userId(req);
+  const existing = db.prepare(
+    'SELECT * FROM asdlc_acceptance_criterion WHERE acceptance_criterion_id = ? AND project_id = ?'
+  ).get(req.params.acId, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Acceptance criterion not found' });
+
+  const ALLOWED = ['text', 'status', 'source'];
+  const updates = {};
+  ALLOWED.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
+  // PO edits flip source to user_edited unless caller is the auto-generator.
+  if (updates.text !== undefined && existing.source === 'generated' && !req.body.source) {
+    updates.source = 'user_edited';
+  }
+  if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No updatable fields provided' });
+
+  const diff = diffFields(existing, updates, []);
+  const setClauses = Object.keys(updates).map(f => `${f} = ?`).join(', ');
+  db.prepare(`UPDATE asdlc_acceptance_criterion SET ${setClauses}, updated_at = datetime('now'), updated_by = ?
+    WHERE acceptance_criterion_id = ?`).run(...Object.values(updates), uid, req.params.acId);
+
+  const after = db.prepare('SELECT * FROM asdlc_acceptance_criterion WHERE acceptance_criterion_id = ?').get(req.params.acId);
+  auditLog('asdlc_acceptance_criterion', req.params.acId, 'UPDATE', existing, after, uid);
+
+  let cpResult = null;
+  if (diff.length > 0) {
+    const label = (existing.text || '').slice(0, 40) + (existing.text && existing.text.length > 40 ? '…' : '');
+    cpResult = createAutoApprovedCP(req.params.id, 'acceptance_criterion', req.params.acId,
+      label || 'Acceptance Criterion', diff, uid);
+  }
+  res.json({ ...after, _cp: cpResult });
+});
+
+// Soft-delete
+app.delete('/api/v1/projects/:id/acceptance-criteria/:acId', (req, res) => {
+  const uid = userId(req);
+  const existing = db.prepare(
+    'SELECT * FROM asdlc_acceptance_criterion WHERE acceptance_criterion_id = ? AND project_id = ?'
+  ).get(req.params.acId, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Acceptance criterion not found' });
+  db.prepare(`UPDATE asdlc_acceptance_criterion
+    SET lifecycle_status = 'deleted', updated_at = datetime('now'), updated_by = ?
+    WHERE acceptance_criterion_id = ?`).run(uid, req.params.acId);
+  auditLog('asdlc_acceptance_criterion', req.params.acId, 'DELETE', existing, null, uid);
+  res.status(204).end();
+});
+
+// ──────────────────────────────────────────────
+// TEST CASES
+// ──────────────────────────────────────────────
+
+// List test cases. Query params: scope=agent|workflow|tool|use_case, scope_entity_id=<id>
+app.get('/api/v1/projects/:id/test-cases', (req, res) => {
+  const where = ['project_id = ?', "lifecycle_status != 'deleted'"];
+  const args  = [req.params.id];
+  if (req.query.scope)           { where.push('scope = ?');           args.push(req.query.scope); }
+  if (req.query.scope_entity_id) { where.push('scope_entity_id = ?'); args.push(req.query.scope_entity_id); }
+  const rows = db.prepare(
+    `SELECT * FROM asdlc_test_case WHERE ${where.join(' AND ')} ORDER BY created_at`
+  ).all(...args);
+  res.json(rows);
+});
+
+app.post('/api/v1/projects/:id/test-cases', (req, res) => {
+  const uid = userId(req);
+  const { scope, scope_entity_id, title, test_action, test_input, expected_result,
+          case_type, source, status } = req.body || {};
+  if (!scope || !scope_entity_id || !title) {
+    return res.status(400).json({ error: 'scope, scope_entity_id, and title are required' });
+  }
+  if (!['agent', 'workflow', 'tool', 'use_case'].includes(scope)) {
+    return res.status(400).json({ error: "scope must be 'agent', 'workflow', 'tool', or 'use_case'" });
+  }
+  const id = generateId();
+  db.prepare(`
+    INSERT INTO asdlc_test_case
+      (test_case_id, project_id, scope, scope_entity_id, title, test_action,
+       test_input, expected_result, case_type, source, status, created_by, updated_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, req.params.id, scope, scope_entity_id, title,
+         test_action || '', test_input || '', expected_result || '',
+         case_type || 'happy_path', source || 'user_added', status || 'draft', uid, uid);
+  const row = db.prepare('SELECT * FROM asdlc_test_case WHERE test_case_id = ?').get(id);
+  auditLog('asdlc_test_case', id, 'INSERT', null, row, uid);
+  res.status(201).json(row);
+});
+
+app.put('/api/v1/projects/:id/test-cases/:tcId', (req, res) => {
+  const uid = userId(req);
+  const existing = db.prepare(
+    'SELECT * FROM asdlc_test_case WHERE test_case_id = ? AND project_id = ?'
+  ).get(req.params.tcId, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Test case not found' });
+
+  const ALLOWED = ['title', 'test_action', 'test_input', 'expected_result',
+                   'case_type', 'status', 'source'];
+  const updates = {};
+  ALLOWED.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
+  // User edits flip source to user_edited (unless caller explicitly sets source).
+  const userEditedFields = ['title', 'test_action', 'test_input', 'expected_result', 'case_type'];
+  if (userEditedFields.some(f => updates[f] !== undefined) && existing.source === 'generated' && !req.body.source) {
+    updates.source = 'user_edited';
+  }
+  if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No updatable fields provided' });
+
+  const diff = diffFields(existing, updates, []);
+  const setClauses = Object.keys(updates).map(f => `${f} = ?`).join(', ');
+  db.prepare(`UPDATE asdlc_test_case SET ${setClauses}, updated_at = datetime('now'), updated_by = ?
+    WHERE test_case_id = ?`).run(...Object.values(updates), uid, req.params.tcId);
+
+  const after = db.prepare('SELECT * FROM asdlc_test_case WHERE test_case_id = ?').get(req.params.tcId);
+  auditLog('asdlc_test_case', req.params.tcId, 'UPDATE', existing, after, uid);
+
+  let cpResult = null;
+  if (diff.length > 0) {
+    cpResult = createAutoApprovedCP(req.params.id, 'test_case', req.params.tcId,
+      existing.title || 'Test Case', diff, uid);
+  }
+  res.json({ ...after, _cp: cpResult });
+});
+
+app.delete('/api/v1/projects/:id/test-cases/:tcId', (req, res) => {
+  const uid = userId(req);
+  const existing = db.prepare(
+    'SELECT * FROM asdlc_test_case WHERE test_case_id = ? AND project_id = ?'
+  ).get(req.params.tcId, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Test case not found' });
+  db.prepare(`UPDATE asdlc_test_case
+    SET lifecycle_status = 'deleted', updated_at = datetime('now'), updated_by = ?
+    WHERE test_case_id = ?`).run(uid, req.params.tcId);
+  auditLog('asdlc_test_case', req.params.tcId, 'DELETE', existing, null, uid);
+  res.status(204).end();
+});
+
+// ──────────────────────────────────────────────
+// LIBRARY
+// ──────────────────────────────────────────────
+app.get('/api/v1/library', (req, res) => {
+  const { scope, type } = req.query;
+  const scopeFilter = scope ? `AND uc.visibility_scope = '${scope.replace(/'/g, "''")}'` : '';
+
+  const results = {};
+
+  if (!type || type === 'use_case') {
+    results.use_cases = db.prepare(
+      `SELECT 'use_case' AS record_type, uc.use_case_id AS id, uc.title AS name,
+              uc.visibility_scope, uc.lifecycle_status, uc.summary AS description,
+              uc.project_id, p.project_name, p.project_code, c.client_name,
+              uc.readiness, uc.business_objective, uc.expected_value,
+              uc.created_at, uc.updated_at
+       FROM asdlc_use_case uc
+       LEFT JOIN asdlc_project p ON p.project_id = uc.project_id
+       LEFT JOIN asdlc_client c ON c.client_id = p.client_id
+       WHERE uc.lifecycle_status != 'deleted' ${scopeFilter}`
+    ).all();
+  }
+  if (!type || type === 'workflow') {
+    const wfScope = scope ? `AND wf.visibility_scope = '${scope.replace(/'/g, "''")}'` : '';
+    results.workflows = db.prepare(
+      `SELECT 'workflow' AS record_type, wf.workflow_id AS id, wf.name,
+              wf.visibility_scope, wf.lifecycle_status, wf.readiness AS description,
+              wf.project_id, p.project_name, p.project_code, c.client_name,
+              wf.sla_hours, wf.created_at, wf.updated_at
+       FROM asdlc_workflow wf
+       LEFT JOIN asdlc_project p ON p.project_id = wf.project_id
+       LEFT JOIN asdlc_client c ON c.client_id = p.client_id
+       WHERE wf.lifecycle_status != 'deleted' ${wfScope}`
+    ).all();
+  }
+  if (!type || type === 'tool') {
+    const toolScope = scope ? `AND t.visibility_scope = '${scope.replace(/'/g, "''")}'` : '';
+    results.tools = db.prepare(
+      `SELECT 'tool' AS record_type, t.tool_id AS id, t.name,
+              t.visibility_scope, t.lifecycle_status, t.contract AS description,
+              t.project_id, p.project_name, p.project_code, c.client_name,
+              t.execution_mode, t.cost_impact, t.access_requirements,
+              t.created_at, t.updated_at
+       FROM asdlc_tool t
+       LEFT JOIN asdlc_project p ON p.project_id = t.project_id
+       LEFT JOIN asdlc_client c ON c.client_id = p.client_id
+       WHERE t.lifecycle_status = 'active' ${toolScope}`
+    ).all();
+  }
+  if (!type || type === 'knowledge_article') {
+    const kaScope = scope ? `AND ka.visibility_scope = '${scope.replace(/'/g, "''")}'` : '';
+    results.knowledge_articles = db.prepare(
+      `SELECT 'knowledge_article' AS record_type, ka.knowledge_article_id AS id, ka.title AS name,
+              ka.visibility_scope, ka.lifecycle_status, ka.body AS description,
+              ka.project_id, p.project_name, p.project_code, c.client_name,
+              ka.created_at, ka.updated_at
+       FROM asdlc_knowledge_article ka
+       LEFT JOIN asdlc_project p ON p.project_id = ka.project_id
+       LEFT JOIN asdlc_client c ON c.client_id = p.client_id
+       WHERE ka.lifecycle_status != 'deleted' ${kaScope}`
+    ).all();
+  }
+
+  res.json(results);
+});
+
+/**
+ * GET /api/v1/projects/:id/version-history
+ * Returns audit log entries where the project's version counter was incremented,
+ * along with the nearest approved Change Packet at that timestamp.
+ */
+app.get('/api/v1/projects/:id/version-history', (req, res) => {
+  const project = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  // Audit entries for this project where version changed
+  const auditRows = db.prepare(`
+    SELECT al.*, u.display_name AS changed_by_name
+    FROM asdlc_audit_log al
+    LEFT JOIN asdlc_user u ON u.user_id = al.changed_by
+    WHERE al.table_name = 'asdlc_project'
+      AND al.record_id  = ?
+      AND json_extract(al.new_data, '$.version') IS NOT NULL
+    ORDER BY al.changed_at DESC
+    LIMIT 100
+  `).all(req.params.id);
+
+  // Filter to rows where version actually changed
+  const versionEvents = auditRows
+    .map(r => {
+      const oldD = parseJson(r.old_data) || {};
+      const newD = parseJson(r.new_data) || {};
+      return {
+        ...r,
+        old_version:        oldD.version ?? null,
+        new_version:        newD.version ?? null,
+        old_version_string: oldD.version_string ?? null,
+        new_version_string: newD.version_string ?? null,
+      };
+    })
+    .filter(r => r.old_version !== r.new_version);
+
+  // For each event, find the nearest CP approval around that timestamp (±5 seconds)
+  const cpNear = db.prepare(`
+    SELECT change_packet_id, packet_code, summary, approval_timestamp
+    FROM asdlc_change_packet
+    WHERE project_id = ? AND status = 'approved'
+      AND abs(strftime('%s', approval_timestamp) - strftime('%s', ?)) < 10
+    ORDER BY abs(strftime('%s', approval_timestamp) - strftime('%s', ?))
+    LIMIT 1
+  `);
+
+  const events = versionEvents.map(ev => {
+    const cp = cpNear.get(req.params.id, ev.changed_at, ev.changed_at);
+    return {
+      audit_id:           ev.audit_id,
+      changed_at:         ev.changed_at,
+      old_version:        ev.old_version,
+      new_version:        ev.new_version,
+      old_version_string: ev.old_version_string,
+      new_version_string: ev.new_version_string,
+      changed_by:         ev.changed_by,
+      changed_by_name:    ev.changed_by_name || null,
+      triggered_by_cp:    cp ? { change_packet_id: cp.change_packet_id, packet_code: cp.packet_code, summary: cp.summary } : null,
+    };
+  });
+
+  res.json({
+    project_id:             project.project_id,
+    project_name:           project.project_name,
+    current_version:        project.version,
+    current_version_string: project.version_string || '1.0.0',
+    events,
+  });
+});
+
+// ──────────────────────────────────────────────
+// DESIGN REPORTS
+// ──────────────────────────────────────────────
+
+/**
+ * GET /api/v1/projects/:id/design-report/agents
+ * Returns all agent design content for a project in a single aggregated payload,
+ * ready for the Design Review module to render as a human-readable report.
+ */
+app.get('/api/v1/projects/:id/design-report/agents', (req, res) => {
+  const project = db.prepare(`
+    SELECT p.*, c.client_name, c.client_code
+    FROM asdlc_project p
+    LEFT JOIN asdlc_client c ON c.client_id = p.client_id
+    WHERE p.project_id = ?
+  `).get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  const agentRows = db.prepare(
+    "SELECT * FROM asdlc_agent_spec WHERE project_id = ? AND lifecycle_status != 'deleted' ORDER BY name"
+  ).all(req.params.id);
+
+  // Phase 4: cost params merged from global pricing + per-app planning/entitlement
+  const agentCostAssumption = getEffectiveCostParams(req.params.id);
+  const agentCostPerAssist = agentCostAssumption.cost_per_assist || 0.015;
+
+  // Ingest document for extraction rows (guardrails, data_sources)
+  const ingestDoc = db.prepare(
+    "SELECT ingest_id FROM asdlc_ingest_document WHERE project_id = ? ORDER BY created_at DESC LIMIT 1"
+  ).get(req.params.id);
+
+  const extractionsByType = {};
+  if (ingestDoc) {
+    ['guardrail', 'data_source'].forEach(etype => {
+      extractionsByType[etype] = db.prepare(
+        'SELECT entity_data FROM asdlc_ingest_extraction WHERE ingest_id = ? AND entity_type = ? ORDER BY rowid'
+      ).all(ingestDoc.ingest_id, etype).map(r => parseJson(r.entity_data) || {});
+    });
+  }
+
+  const tools = db.prepare(
+    "SELECT * FROM asdlc_tool WHERE project_id = ? AND lifecycle_status = 'active' ORDER BY name"
+  ).all(req.params.id).map(t => ({
+    tool_id: t.tool_id,
+    slug: t.slug,                                                // Phase 1
+    name: t.name,
+    contract: parseJson(t.contract) || {},
+    inputs: parseJson(t.inputs) || {},
+    outputs: parseJson(t.outputs) || {},
+    errors: parseJson(t.errors) || [],
+    access_requirements: parseJson(t.access_requirements) || t.access_requirements,
+    execution_mode: t.execution_mode,
+    cost_impact: t.cost_impact,
+    dev_status: t.dev_status || null,                            // Phase 1
+    visibility_scope: t.visibility_scope || 'PROJECT',           // Phase 1: surfaces scope
+    boundaries: parseJson(t.boundaries) || []
+  }));
+
+  const agents = agentRows.map(agent => {
+    // Phase 3: fetch linked UCs via join table (M:N)
+    const ucLinks = db.prepare(`
+      SELECT auc.agent_use_case_id, auc.business_value, auc.notes,
+             uc.use_case_id, uc.slug, uc.title, uc.summary, uc.business_objective,
+             uc.success_criteria, uc.constraints_list
+      FROM asdlc_agent_use_case auc
+      JOIN asdlc_use_case uc ON uc.use_case_id = auc.use_case_id
+      WHERE auc.agent_spec_id = ?
+      ORDER BY auc.created_at
+    `).all(agent.agent_spec_id).map(r => ({
+      agent_use_case_id:  r.agent_use_case_id,
+      use_case_id:        r.use_case_id,
+      slug:               r.slug,
+      title:              r.title,
+      summary:            r.summary,
+      business_objective: r.business_objective,
+      success_criteria:   parseJson(r.success_criteria) || [],
+      constraints:        parseJson(r.constraints_list) || [],
+      business_value:     r.business_value,
+      notes:              r.notes
+    }));
+
+    // Phase 3: fetch tool bindings
+    const toolBindings = db.prepare(`
+      SELECT at.agent_tool_id, at.tool_id, at.purpose, at.fallback_behavior,
+             at.binding_supervision_model, at.tool_execution_mode,
+             at.linked_user_story_refs, at.details,
+             t.name AS tool_name, t.slug AS tool_slug, t.dev_status, t.execution_mode
+      FROM asdlc_agent_tool at
+      JOIN asdlc_tool t ON t.tool_id = at.tool_id
+      WHERE at.agent_spec_id = ?
+      ORDER BY t.name
+    `).all(agent.agent_spec_id);
+
+    const workflow = agent.workflow_id
+      ? db.prepare('SELECT * FROM asdlc_workflow WHERE workflow_id = ?').get(agent.workflow_id)
+      : null;
+
+    const steps = workflow
+      ? db.prepare('SELECT * FROM asdlc_workflow_step WHERE workflow_id = ? ORDER BY step_number').all(workflow.workflow_id)
+          .map(s => ({
+            workflow_step_id: s.workflow_step_id,
+            workflow_id:  s.workflow_id,
+            step_number:  s.step_number,
+            name:         s.name,
+            actor_role:   s.actor_role,
+            inputs:       parseJson(s.inputs) || {},
+            outputs:      parseJson(s.outputs) || {},
+            decisions:    parseJson(s.decisions_list) || [],
+            sla_hours:    s.sla_hours,
+            hitl_gate_id: s.hitl_gate_id
+          }))
+      : [];
+
+    const hitlGates = workflow
+      ? db.prepare('SELECT * FROM asdlc_hitl_gate WHERE workflow_id = ?').all(workflow.workflow_id)
+          .map(h => ({
+            hitl_gate_id: h.hitl_gate_id,
+            gate_type: h.gate_type,
+            criteria: h.criteria,
+            owner_role: h.owner_role,
+            sla: h.sla,
+            handoff_mechanism: h.handoff_mechanism
+          }))
+      : [];
+
+    return {
+      agent_spec_id: agent.agent_spec_id,
+      project_id: agent.project_id,                             // Phase 3: needed by frontend for API calls
+      slug: agent.slug,                                          // Phase 1
+      name: agent.name,
+      lifecycle_status: agent.lifecycle_status,
+      scope: agent.scope,
+      instructions: agent.instructions,
+      goals: parseJson(agent.goals) || [],
+      done_criteria: parseJson(agent.done_criteria) || [],
+      inputs: parseJson(agent.inputs) || {},
+      outputs: parseJson(agent.outputs) || {},
+      run_as_model: parseJson(agent.run_as_model) || {},
+      memory_strategy: agent.memory_strategy,
+      design_risks: parseJson(agent.design_risks) || [],
+      // ── Phase 1 additions ─────────────────────────────────────
+      supervision_model:       agent.supervision_model || null,
+      maintenance_owner:       agent.maintenance_owner || null,
+      orchestration_strategy:  agent.orchestration_strategy || null,
+      latency_target:          agent.latency_target || null,
+      post_release_validation: agent.post_release_validation || null,
+      cost_model:              agent.cost_model || 'none',
+      // ── Phase 3: M:N use cases + tool bindings ────────────────
+      use_cases: ucLinks,               // array of linked UCs (replaces single use_case)
+      tool_bindings: toolBindings,      // array of agent↔tool bindings
+      // ── Phase 4: agent cost = sum of owned step costs ──────────
+      agent_cost_per_period: (() => {
+        // Find all steps owned by this agent's participants, across all workflows
+        const ownedStepCosts = db.prepare(`
+          SELECT b.qty_per_run, b.branch_probability, r.assists_per_unit,
+                 wf.runs_per_period
+          FROM asdlc_workflow_step_cost_binding b
+          JOIN asdlc_assist_rate_card r ON r.skill_name = b.skill_name
+          JOIN asdlc_workflow_step s ON s.workflow_step_id = b.workflow_step_id
+          JOIN asdlc_workflow wf ON wf.workflow_id = s.workflow_id
+          JOIN asdlc_workflow_participant p ON p.workflow_participant_id = s.owner_participant_id
+          WHERE p.agent_spec_id = ? AND wf.project_id = ?
+        `).all(agent.agent_spec_id, agent.project_id);
+        return ownedStepCosts.reduce((sum, c) => {
+          const rpp = c.runs_per_period || 0;
+          return sum + c.qty_per_run * (c.branch_probability ?? 1.0) * c.assists_per_unit * rpp * agentCostPerAssist;
+        }, 0);
+      })(),
+      workflow: workflow ? {
+        workflow_id: workflow.workflow_id,
+        slug: workflow.slug,                                     // Phase 1
+        name: workflow.name,
+        trigger: parseJson(workflow.trigger_def) || {},
+        sla_hours: workflow.sla_hours,
+        handoffs: parseJson(workflow.handoffs) || [],
+        steps,
+        hitl_gates: hitlGates
+      } : null,
+      tools,
+      guardrails: extractionsByType['guardrail'] || [],
+      data_sources: extractionsByType['data_source'] || []
+    };
+  });
+
+  res.json({
+    project: {
+      project_id: project.project_id,
+      project_name: project.project_name,
+      project_code: project.project_code,
+      client_name: project.client_name,
+      stage: project.stage
+    },
+    generated_at: new Date().toISOString(),
+    agents
+  });
+});
+
+/**
+ * GET /api/v1/projects/:id/design-report/workflows
+ * All workflows for a project with steps, HITL gates, handoffs, test scenarios, and user stories.
+ */
+app.get('/api/v1/projects/:id/design-report/workflows', (req, res) => {
+  const project = db.prepare(`
+    SELECT p.*, c.client_name FROM asdlc_project p
+    LEFT JOIN asdlc_client c ON c.client_id = p.client_id
+    WHERE p.project_id = ?
+  `).get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  const workflowRows = db.prepare(
+    "SELECT * FROM asdlc_workflow WHERE project_id = ? AND lifecycle_status != 'deleted' ORDER BY name"
+  ).all(req.params.id);
+
+  // Phase 4: cost params merged from global pricing + per-app planning/entitlement
+  const costAssumption = getEffectiveCostParams(req.params.id);
+  const costPerAssist = costAssumption.cost_per_assist || 0.015;
+
+  // Extraction rows: test_scenario + user_story (scoped to project's ingest doc)
+  const ingestDoc = db.prepare(
+    'SELECT ingest_id FROM asdlc_ingest_document WHERE project_id = ? ORDER BY created_at DESC LIMIT 1'
+  ).get(req.params.id);
+  const extractionsByType = {};
+  if (ingestDoc) {
+    ['test_scenario', 'user_story'].forEach(etype => {
+      extractionsByType[etype] = db.prepare(
+        'SELECT entity_data FROM asdlc_ingest_extraction WHERE ingest_id = ? AND entity_type = ? ORDER BY rowid'
+      ).all(ingestDoc.ingest_id, etype).map(r => parseJson(r.entity_data) || {});
+    });
+  }
+
+  const workflows = workflowRows.map(wf => {
+    const steps = db.prepare(
+      'SELECT * FROM asdlc_workflow_step WHERE workflow_id = ? ORDER BY step_number'
+    ).all(wf.workflow_id);
+
+    const hitlGates = db.prepare(
+      'SELECT * FROM asdlc_hitl_gate WHERE workflow_id = ?'
+    ).all(wf.workflow_id);
+    const hitlById = {};
+    hitlGates.forEach(h => { hitlById[h.hitl_gate_id] = h; });
+
+    // Use case: try workflow.use_case_id first, then via agent_spec FK
+    let useCase = wf.use_case_id
+      ? db.prepare('SELECT use_case_id, title, summary, business_objective FROM asdlc_use_case WHERE use_case_id = ?').get(wf.use_case_id)
+      : db.prepare(`
+          SELECT uc.use_case_id, uc.title, uc.summary, uc.business_objective
+          FROM asdlc_use_case uc
+          JOIN asdlc_agent_spec asp ON asp.use_case_id = uc.use_case_id
+          WHERE asp.workflow_id = ? LIMIT 1
+        `).get(wf.workflow_id);
+
+    const linkedAgents = db.prepare(
+      "SELECT name, lifecycle_status FROM asdlc_agent_spec WHERE workflow_id = ? AND lifecycle_status != 'deleted'"
+    ).all(wf.workflow_id);
+
+    // Phase 2: participants, RASIC matrix, paths
+    const participants = db.prepare(`
+      SELECT p.*, a.name AS agent_name, a.slug AS agent_slug
+      FROM asdlc_workflow_participant p
+      LEFT JOIN asdlc_agent_spec a ON a.agent_spec_id = p.agent_spec_id
+      WHERE p.workflow_id = ? AND p.lifecycle_status != 'deleted'
+      ORDER BY p.lane_order, p.created_at
+    `).all(wf.workflow_id);
+
+    // Build RASIC matrix: {step_id: {participant_id: [{code, rasic_id}]}}
+    const rasicRows = db.prepare(`
+      SELECT r.rasic_id, r.workflow_step_id, r.workflow_participant_id, r.code
+      FROM asdlc_workflow_step_rasic r
+      JOIN asdlc_workflow_step s ON s.workflow_step_id = r.workflow_step_id
+      WHERE s.workflow_id = ?
+      ORDER BY s.step_number, r.code
+    `).all(wf.workflow_id);
+    const rasicByStep = {};
+    rasicRows.forEach(r => {
+      if (!rasicByStep[r.workflow_step_id]) rasicByStep[r.workflow_step_id] = {};
+      if (!rasicByStep[r.workflow_step_id][r.workflow_participant_id]) rasicByStep[r.workflow_step_id][r.workflow_participant_id] = [];
+      rasicByStep[r.workflow_step_id][r.workflow_participant_id].push({ code: r.code, rasic_id: r.rasic_id });
+    });
+
+    const paths = db.prepare(`
+      SELECT p.*,
+             fs.step_number AS from_step_number, fs.name AS from_step_name,
+             ts.step_number AS to_step_number,   ts.name AS to_step_name
+      FROM asdlc_workflow_path p
+      JOIN asdlc_workflow_step fs ON fs.workflow_step_id = p.from_step_id
+      JOIN asdlc_workflow_step ts ON ts.workflow_step_id = p.to_step_id
+      WHERE p.workflow_id = ?
+      ORDER BY fs.step_number, p.is_default_path DESC, p.created_at
+    `).all(wf.workflow_id);
+
+    const result = {
+      workflow_id: wf.workflow_id,
+      slug:        wf.slug,                                       // Phase 1
+      name: wf.name,
+      lifecycle_status: wf.lifecycle_status,
+      readiness: wf.readiness,
+      trigger:        parseJson(wf.trigger_def)     || {},
+      sla_hours:      wf.sla_hours,
+      handoffs:       parseJson(wf.handoffs)         || [],
+      decisions:      parseJson(wf.decisions)        || [],
+      fallback_paths: parseJson(wf.fallback_paths)   || [],
+      // ── Phase 1 additions ───────────────────────────────────────
+      risk_tier:       wf.risk_tier || null,
+      runs_per_period: wf.runs_per_period != null ? wf.runs_per_period : null,
+      // ── Phase 2 additions ───────────────────────────────────────
+      participants,
+      rasic_by_step: rasicByStep,   // {step_id: {participant_id: ['R','A',...]}}
+      paths,
+      steps: steps.map(s => {
+        // Phase 4: fetch cost bindings for this step
+        const costBindings = db.prepare(`
+          SELECT b.binding_id, b.skill_name, b.qty_per_run, b.branch_probability,
+                 b.ai_generated, b.ai_reasoning, b.notes, r.assists_per_unit, r.category
+          FROM asdlc_workflow_step_cost_binding b
+          JOIN asdlc_assist_rate_card r ON r.skill_name = b.skill_name
+          WHERE b.workflow_step_id = ?
+          ORDER BY b.created_at
+        `).all(s.workflow_step_id);
+        const runsPerPeriod = wf.runs_per_period || 0;
+        const stepCostPerPeriod = runsPerPeriod > 0 ? costBindings.reduce((sum, b) => {
+          return sum + b.qty_per_run * (b.branch_probability ?? 1.0) * b.assists_per_unit * runsPerPeriod * costPerAssist;
+        }, 0) : 0;
+        return {
+          workflow_step_id: s.workflow_step_id,
+          workflow_id:  s.workflow_id,
+          slug:         s.slug,                                     // Phase 1
+          step_number:  s.step_number,
+          name:         s.name,
+          actor_role:   s.actor_role,
+          inputs:       parseJson(s.inputs)        || {},
+          outputs:      parseJson(s.outputs)       || {},
+          decisions:    parseJson(s.decisions_list) || [],
+          sla_hours:    s.sla_hours,
+          hitl_gate:    s.hitl_gate_id ? (hitlById[s.hitl_gate_id] || null) : null,
+          // ── Phase 1 step additions ──────────────────────────────
+          step_type:         s.step_type || null,
+          step_purpose:      s.step_purpose || null,
+          preconditions:     s.preconditions || null,
+          evidence_captured: s.evidence_captured || null,
+          is_end_step:       s.is_end_step ? true : false,
+          // ── Phase 2 ─────────────────────────────────────────────
+          owner_participant_id: s.owner_participant_id || null,
+          // ── Phase 4: cost ───────────────────────────────────────
+          cost_bindings:       costBindings,
+          step_cost_per_period: stepCostPerPeriod,
+        };
+      }),
+      hitl_gates: hitlGates.map(h => ({
+        gate_type:         h.gate_type,
+        criteria:          h.criteria,
+        owner_role:        h.owner_role,
+        sla:               h.sla,
+        handoff_mechanism: h.handoff_mechanism,
+      })),
+      use_case:      useCase || null,
+      linked_agents: linkedAgents,
+      test_scenarios: extractionsByType['test_scenario'] || [],
+      user_stories:   extractionsByType['user_story']    || [],
+    };
+    // Phase 4: workflow total cost = sum of step costs (steps already built above)
+    result.workflow_cost_per_period = result.steps.reduce((s, step) => s + (step.step_cost_per_period || 0), 0);
+    return result;
+  });
+
+  res.json({
+    project: {
+      project_id: project.project_id, project_name: project.project_name,
+      project_code: project.project_code, client_name: project.client_name, stage: project.stage,
+    },
+    generated_at: new Date().toISOString(),
+    workflows,
+  });
+});
+
+/**
+ * GET /api/v1/projects/:id/design-report/tools
+ * All tools for a project with full contract, inputs, outputs, errors, and integration details.
+ */
+app.get('/api/v1/projects/:id/design-report/tools', (req, res) => {
+  const project = db.prepare(`
+    SELECT p.*, c.client_name FROM asdlc_project p
+    LEFT JOIN asdlc_client c ON c.client_id = p.client_id
+    WHERE p.project_id = ?
+  `).get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  const toolRows = db.prepare(
+    "SELECT * FROM asdlc_tool WHERE project_id = ? AND lifecycle_status = 'active' ORDER BY name"
+  ).all(req.params.id);
+
+  // All agents in this project act as the "used by" reference
+  // (asdlc_agent_tool join table is not populated in MVP 1)
+  const agentsInProject = db.prepare(
+    "SELECT agent_spec_id, name, lifecycle_status FROM asdlc_agent_spec WHERE project_id = ? AND lifecycle_status != 'deleted'"
+  ).all(req.params.id);
+
+  const tools = toolRows.map(t => ({
+    tool_id:              t.tool_id,
+    slug:                 t.slug,                                 // Phase 1
+    name:                 t.name,
+    lifecycle_status:     t.lifecycle_status,
+    contract:             parseJson(t.contract)    || {},
+    inputs:               parseJson(t.inputs)      || {},
+    outputs:              parseJson(t.outputs)     || {},
+    errors:               parseJson(t.errors)      || [],
+    access_requirements:  parseJson(t.access_requirements) || t.access_requirements,
+    execution_mode:       t.execution_mode,
+    cost_impact:          t.cost_impact,
+    boundaries:           parseJson(t.boundaries)  || [],
+    dev_status:           t.dev_status || null,                   // Phase 1
+    visibility_scope:     t.visibility_scope || 'PROJECT',        // Phase 1
+    used_by_agents:       agentsInProject,
+  }));
+
+  res.json({
+    project: {
+      project_id: project.project_id, project_name: project.project_name,
+      project_code: project.project_code, client_name: project.client_name, stage: project.stage,
+    },
+    generated_at: new Date().toISOString(),
+    tools,
+  });
+});
+
+// ─── Extraction-based report factory ──────────────────────────────────────────
+function extractionReport(entityType, responseKey) {
+  return (req, res) => {
+    const project = db.prepare(`
+      SELECT p.*, c.client_name FROM asdlc_project p
+      LEFT JOIN asdlc_client c ON c.client_id = p.client_id
+      WHERE p.project_id = ?
+    `).get(req.params.id);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+
+    const ingestDoc = db.prepare(
+      'SELECT * FROM asdlc_ingest_document WHERE project_id = ? ORDER BY created_at DESC LIMIT 1'
+    ).get(req.params.id);
+
+    const items = ingestDoc
+      ? db.prepare(
+          'SELECT entity_data FROM asdlc_ingest_extraction WHERE ingest_id = ? AND entity_type = ? ORDER BY rowid'
+        ).all(ingestDoc.ingest_id, entityType).map(r => parseJson(r.entity_data) || {})
+      : [];
+
+    res.json({
+      project: {
+        project_id: project.project_id, project_name: project.project_name,
+        project_code: project.project_code, client_name: project.client_name, stage: project.stage,
+      },
+      generated_at: new Date().toISOString(),
+      [responseKey]: items,
+      ingest_document: ingestDoc
+        ? { ingest_id: ingestDoc.ingest_id, document_title: ingestDoc.document_title || ingestDoc.title || ingestDoc.file_name }
+        : null,
+    });
+  };
+}
+
+app.get('/api/v1/projects/:id/design-report/guardrails',     extractionReport('guardrail',          'guardrails'));
+app.get('/api/v1/projects/:id/design-report/data-sources',   extractionReport('data_source',        'data_sources'));
+app.get('/api/v1/projects/:id/design-report/test-scenarios', extractionReport('test_scenario',      'test_scenarios'));
+app.get('/api/v1/projects/:id/design-report/user-stories',   extractionReport('user_story',         'user_stories'));
+app.get('/api/v1/projects/:id/design-report/governance',     extractionReport('governance_control', 'governance_controls'));
+
+/**
+ * GET /api/v1/projects/:id/slug-map
+ * Phase 5: lightweight project-wide slug → {scope, entity_id, label} index.
+ * Used by the frontend slug-autolinker so a UC-### / WF-### / AG-### reference
+ * inside any free-text field becomes a clickable drill-down link regardless
+ * of which design-report scope is currently open.
+ */
+app.get('/api/v1/projects/:id/slug-map', (req, res) => {
+  const pid = req.params.id;
+  const map = {};
+  const addRows = (rows, scope, idCol, labelCol) => {
+    for (const r of rows) {
+      if (r.slug) map[r.slug] = { scope, entity_id: r[idCol], label: r[labelCol] || r.slug };
+    }
+  };
+  try {
+    addRows(db.prepare("SELECT use_case_id, slug, title FROM asdlc_use_case WHERE project_id = ? AND slug IS NOT NULL").all(pid),
+            'use-cases', 'use_case_id', 'title');
+    addRows(db.prepare("SELECT workflow_id, slug, name FROM asdlc_workflow WHERE project_id = ? AND slug IS NOT NULL").all(pid),
+            'workflows', 'workflow_id', 'name');
+    addRows(db.prepare("SELECT workflow_step_id, slug, name FROM asdlc_workflow_step WHERE project_id = ? AND slug IS NOT NULL").all(pid),
+            'workflows', 'workflow_step_id', 'name');
+    addRows(db.prepare("SELECT agent_spec_id, slug, name FROM asdlc_agent_spec WHERE project_id = ? AND slug IS NOT NULL").all(pid),
+            'agents', 'agent_spec_id', 'name');
+    addRows(db.prepare(`SELECT tool_id, slug, name FROM asdlc_tool
+                        WHERE slug IS NOT NULL AND (project_id = ? OR visibility_scope IN ('GLOBAL','ORGANIZATION','PROGRAM'))`).all(pid),
+            'tools', 'tool_id', 'name');
+    // ACs: drill to the parent UC/US card (where ACs render inline), not the AC's own UUID.
+    const acRows = db.prepare(`SELECT slug, text, parent_type, parent_id
+                               FROM asdlc_acceptance_criterion
+                               WHERE project_id = ? AND slug IS NOT NULL`).all(pid);
+    for (const r of acRows) {
+      if (!r.slug) continue;
+      const scope = r.parent_type === 'user_story' ? 'user-stories' : 'use-cases';
+      map[r.slug] = {
+        scope,
+        entity_id: r.parent_id,
+        label: (r.text || '').substring(0, 80),
+      };
+    }
+    // TCs: drill to the parent entity (scope_entity_id) on the scope-matching tab.
+    const tcScopeMap = { use_case: 'use-cases', workflow: 'workflows', agent: 'agents', tool: 'tools' };
+    const tcRows = db.prepare(`SELECT slug, title, scope, scope_entity_id
+                               FROM asdlc_test_case
+                               WHERE project_id = ? AND slug IS NOT NULL`).all(pid);
+    for (const r of tcRows) {
+      if (!r.slug) continue;
+      const scope = tcScopeMap[r.scope] || 'agents';
+      map[r.slug] = {
+        scope,
+        entity_id: r.scope_entity_id,
+        label: r.title || r.slug,
+      };
+    }
+    res.json(map);
+  } catch (err) {
+    console.error('[slug-map]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/v1/projects/:id/design-report/use-cases
+ * All use cases for a project with structured metadata, workflow count, and agent count.
+ */
+app.get('/api/v1/projects/:id/design-report/use-cases', (req, res) => {
+  const project = db.prepare(`
+    SELECT p.*, c.client_name FROM asdlc_project p
+    LEFT JOIN asdlc_client c ON c.client_id = p.client_id
+    WHERE p.project_id = ?
+  `).get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  const rows = db.prepare(
+    "SELECT * FROM asdlc_use_case WHERE project_id = ? AND lifecycle_status != 'deleted' ORDER BY title"
+  ).all(req.params.id);
+
+  const wfCountStmt  = db.prepare('SELECT COUNT(*) AS cnt FROM asdlc_workflow WHERE use_case_id = ?');
+  // Phase 3: count via M:N join table (was: asdlc_agent_spec.use_case_id direct FK)
+  const agCountStmt  = db.prepare('SELECT COUNT(*) AS cnt FROM asdlc_agent_use_case WHERE use_case_id = ?');
+
+  // Phase 4: cost params merged from global pricing + per-app planning/entitlement
+  const ucCostAssumption = getEffectiveCostParams(req.params.id);
+  const ucCostPerAssist = ucCostAssumption.cost_per_assist || 0.015;
+
+  // Statement to get total step cost across all workflows for a UC
+  const ucStepCostStmt = db.prepare(`
+    SELECT b.qty_per_run, b.branch_probability, r.assists_per_unit, wf.runs_per_period
+    FROM asdlc_workflow_step_cost_binding b
+    JOIN asdlc_assist_rate_card r ON r.skill_name = b.skill_name
+    JOIN asdlc_workflow_step s ON s.workflow_step_id = b.workflow_step_id
+    JOIN asdlc_workflow wf ON wf.workflow_id = s.workflow_id
+    WHERE wf.use_case_id = ? AND wf.project_id = ?
+  `);
+
+  const use_cases = rows.map(uc => ({
+    use_case_id:       uc.use_case_id,
+    slug:              uc.slug,                                   // Phase 1
+    title:             uc.title,
+    summary:           uc.summary,
+    business_objective: uc.business_objective,
+    expected_value:    uc.expected_value,
+    readiness:         uc.readiness,
+    lifecycle_status:  uc.lifecycle_status,
+    success_criteria:  parseJson(uc.success_criteria) || [],
+    constraints_list:  parseJson(uc.constraints_list) || [],
+    volume_assumptions: parseJson(uc.volume_assumptions) || {},
+    supervision_model: uc.supervision_model || null,
+    // ── Phase 1 additions ───────────────────────────────────────────
+    risk_tier:                uc.risk_tier || null,
+    owner:                    uc.owner || null,
+    primary_success_metric:   uc.primary_success_metric || null,
+    epic_or_feature_id:       uc.epic_or_feature_id || null,
+    baseline_cost_annual_usd: uc.baseline_cost_annual_usd != null ? uc.baseline_cost_annual_usd : null,
+    workflow_count:    (wfCountStmt.get(uc.use_case_id) || {}).cnt || 0,
+    agent_count:       (agCountStmt.get(uc.use_case_id) || {}).cnt || 0,
+    // Phase 4: UC cost projection
+    uc_cost_per_period: (() => {
+      const rows2 = ucStepCostStmt.all(uc.use_case_id, req.params.id);
+      return rows2.reduce((sum, c) => {
+        const rpp = c.runs_per_period || 0;
+        return sum + c.qty_per_run * (c.branch_probability ?? 1.0) * c.assists_per_unit * rpp * ucCostPerAssist;
+      }, 0);
+    })(),
+    roi_ratio: uc.baseline_cost_annual_usd != null ? (() => {
+      const rows2 = ucStepCostStmt.all(uc.use_case_id, req.params.id);
+      const costPerPeriod = rows2.reduce((sum, c) => {
+        const rpp = c.runs_per_period || 0;
+        return sum + c.qty_per_run * (c.branch_probability ?? 1.0) * c.assists_per_unit * rpp * ucCostPerAssist;
+      }, 0);
+      const annualCost = costPerPeriod * (ucCostAssumption.periods_per_year || 12);
+      return annualCost > 0 ? uc.baseline_cost_annual_usd / annualCost : null;
+    })() : null,
+  }));
+
+  res.json({
+    project: {
+      project_id: project.project_id, project_name: project.project_name,
+      project_code: project.project_code, client_name: project.client_name, stage: project.stage,
+    },
+    generated_at: new Date().toISOString(),
+    use_cases,
+  });
+});
+
+/**
+ * GET /api/v1/projects/:id/design-report/relationships
+ * Hierarchical map: use_cases → workflows → agents + HITL roles; plus project tools.
+ */
+app.get('/api/v1/projects/:id/design-report/relationships', (req, res) => {
+  const project = db.prepare(`
+    SELECT p.*, c.client_name FROM asdlc_project p
+    LEFT JOIN asdlc_client c ON c.client_id = p.client_id
+    WHERE p.project_id = ?
+  `).get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  const ucRows = db.prepare(
+    "SELECT use_case_id, title, readiness FROM asdlc_use_case WHERE project_id = ? AND lifecycle_status != 'deleted' ORDER BY title"
+  ).all(req.params.id);
+
+  const wfByUC    = db.prepare("SELECT * FROM asdlc_workflow WHERE use_case_id = ? AND lifecycle_status != 'deleted' ORDER BY name");
+  const agByWF    = db.prepare("SELECT agent_spec_id, name FROM asdlc_agent_spec WHERE workflow_id = ? AND lifecycle_status != 'deleted'");
+  const hitlByWF  = db.prepare("SELECT owner_role, gate_type, sla FROM asdlc_hitl_gate WHERE workflow_id = ?");
+  const stepCount = db.prepare('SELECT COUNT(*) AS cnt FROM asdlc_workflow_step WHERE workflow_id = ?');
+
+  // Project-wide tools — used as fallback per agent since the asdlc_agent_tool
+  // join table is not populated yet (MVP 1).
+  const project_tools = db.prepare(
+    "SELECT tool_id, name, execution_mode FROM asdlc_tool WHERE project_id = ? AND lifecycle_status = 'active' ORDER BY name"
+  ).all(req.params.id);
+
+  const use_cases = ucRows.map(uc => {
+    const workflows = wfByUC.all(uc.use_case_id).map(wf => ({
+      workflow_id: wf.workflow_id,
+      name:        wf.name,
+      step_count:  (stepCount.get(wf.workflow_id) || {}).cnt || 0,
+      agents:      agByWF.all(wf.workflow_id).map(a => ({
+        agent_spec_id: a.agent_spec_id,
+        name:          a.name,
+        tools:         project_tools,   // fallback; switch to per-agent join when populated
+      })),
+      hitl_roles:  hitlByWF.all(wf.workflow_id).map(h => ({
+        owner_role: h.owner_role,
+        gate_type:  h.gate_type,
+        sla:        h.sla,
+      })),
+    }));
+    return { use_case_id: uc.use_case_id, title: uc.title, readiness: uc.readiness, workflows };
+  });
+
+  const frs = db.prepare(`
+    SELECT fr.*, uc.slug AS use_case_slug, uc.title AS use_case_title
+    FROM asdlc_functional_req fr
+    LEFT JOIN asdlc_use_case uc ON fr.use_case_id = uc.use_case_id
+    WHERE fr.project_id = ? AND fr.status != 'deleted'
+    ORDER BY fr.slug ASC
+  `).all(req.params.id).map(parseReqRow);
+
+  const nfrs = db.prepare(`
+    SELECT nfr.*, uc.slug AS use_case_slug, uc.title AS use_case_title
+    FROM asdlc_nonfunctional_req nfr
+    LEFT JOIN asdlc_use_case uc ON nfr.use_case_id = uc.use_case_id
+    WHERE nfr.project_id = ? AND nfr.status != 'deleted'
+    ORDER BY nfr.slug ASC
+  `).all(req.params.id).map(parseReqRow);
+
+  const use_case_map = {};
+  ucRows.forEach(uc => { use_case_map[uc.use_case_id] = { slug: uc.slug, title: uc.title }; });
+
+  res.json({
+    project: {
+      project_id: project.project_id, project_name: project.project_name,
+      project_code: project.project_code, client_name: project.client_name, stage: project.stage,
+    },
+    generated_at: new Date().toISOString(),
+    relationships: {
+      use_cases,
+      project_tools,
+      tools_are_project_wide: true,
+    },
+    functional_reqs: frs,
+    nonfunctional_reqs: nfrs,
+    use_case_map,
+  });
+});
+
+/**
+ * GET /api/v1/projects/:id/build-export
+ * Export a complete application build specification as Markdown.
+ * Query params:
+ *   baseline_id  (optional) — UUID of a locked baseline; stamps the header only
+ *   sections     (optional, default 'all') — comma-separated list:
+ *                use_cases, workflows, agents, tools, guardrails, data_sources,
+ *                test_scenarios, user_stories, governance, relationships
+ */
+app.get('/api/v1/projects/:id/build-export', (req, res) => {
+  const project = db.prepare(`
+    SELECT p.*, c.client_name, c.client_code
+    FROM asdlc_project p
+    LEFT JOIN asdlc_client c ON c.client_id = p.client_id
+    WHERE p.project_id = ?
+  `).get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  const allSections = ['use_cases','workflows','agents','tools','guardrails','data_sources','test_scenarios','user_stories','governance','relationships','cost_summary'];
+  const sectionsParam = req.query.sections || 'all';
+  const sections = sectionsParam === 'all' ? allSections : sectionsParam.split(',').map(s => s.trim()).filter(s => allSections.includes(s));
+
+  // Baseline — only for header stamping, never filters SQL queries
+  let baseline = null;
+  if (req.query.baseline_id) {
+    baseline = db.prepare('SELECT * FROM asdlc_baseline WHERE baseline_id = ?').get(req.query.baseline_id);
+  }
+
+  // Shared ingest document (most recent for this project)
+  const ingestDoc = db.prepare(
+    'SELECT * FROM asdlc_ingest_document WHERE project_id = ? ORDER BY created_at DESC LIMIT 1'
+  ).get(req.params.id);
+
+  const data = {};
+
+  // ── Use Cases ──────────────────────────────────────────────────────────────
+  if (sections.includes('use_cases')) {
+    const ucRows = db.prepare(
+      "SELECT * FROM asdlc_use_case WHERE project_id = ? AND lifecycle_status != 'deleted' ORDER BY title"
+    ).all(req.params.id);
+    const wfCnt  = db.prepare('SELECT COUNT(*) AS cnt FROM asdlc_workflow        WHERE use_case_id = ?');
+    const agCnt  = db.prepare('SELECT COUNT(*) AS cnt FROM asdlc_agent_use_case WHERE use_case_id = ?');
+    // Phase 4: projected cost per UC (sum of child workflow step costs).
+    // cost_per_assist is now per-Application — JOIN against asdlc_project
+    // (with a final fallback to the legacy global row for safety).
+    const ucCostStmt = db.prepare(`
+      SELECT COALESCE(SUM(
+        b.qty_per_run * COALESCE(b.branch_probability, 1.0)
+        * r.assists_per_unit * COALESCE(wf.runs_per_period, 0)
+        * COALESCE(ap.cost_per_assist, ca.cost_per_assist, 0.015)
+      ), 0) AS projected_per_period
+      FROM asdlc_workflow_step_cost_binding b
+      JOIN asdlc_assist_rate_card r ON r.skill_name = b.skill_name
+      JOIN asdlc_workflow_step s ON s.workflow_step_id = b.workflow_step_id
+      JOIN asdlc_workflow wf ON wf.workflow_id = s.workflow_id
+      LEFT JOIN asdlc_project ap ON ap.project_id = wf.project_id
+      LEFT JOIN asdlc_cost_assumption ca ON ca.cost_assumption_id = 'cost-assumption-global'
+      WHERE wf.use_case_id = ?
+    `);
+    // Phase 4: periods_per_year is per-application (split from global assumption).
+    const periodsPerYear = getEffectiveCostParams(req.params.id).periods_per_year || 12;
+    data.use_cases = ucRows.map(uc => {
+      const projected = (ucCostStmt.get(uc.use_case_id) || {}).projected_per_period || 0;
+      const baseline  = uc.baseline_cost_annual_usd || 0;
+      const roi = (projected > 0 && baseline > 0)
+        ? (baseline / (projected * periodsPerYear)).toFixed(1)
+        : null;
+      return {
+        ...uc,
+        success_criteria:        parseJson(uc.success_criteria)   || [],
+        constraints_list:        parseJson(uc.constraints_list)   || [],
+        volume_assumptions:      parseJson(uc.volume_assumptions)  || [],
+        workflow_count:          (wfCnt.get(uc.use_case_id) || {}).cnt || 0,
+        agent_count:             (agCnt.get(uc.use_case_id) || {}).cnt || 0,
+        projected_cost_per_period: projected,
+        roi_ratio:               roi,
+      };
+    });
+  }
+
+  // ── Workflows ──────────────────────────────────────────────────────────────
+  if (sections.includes('workflows')) {
+    const wfRows = db.prepare(
+      "SELECT * FROM asdlc_workflow WHERE project_id = ? AND lifecycle_status != 'deleted' ORDER BY name"
+    ).all(req.params.id);
+    // Prepared statements reused across all workflow rows
+    const stepsStmt        = db.prepare('SELECT * FROM asdlc_workflow_step WHERE workflow_id = ? ORDER BY step_number');
+    const hitlStmt         = db.prepare('SELECT * FROM asdlc_hitl_gate WHERE workflow_id = ?');
+    const participantStmt  = db.prepare("SELECT * FROM asdlc_workflow_participant WHERE workflow_id = ? AND lifecycle_status != 'deleted' ORDER BY lane_order");
+    const pathStmt         = db.prepare(`
+      SELECT p.*, sf.name AS from_step_name, sf.step_number AS from_step_num,
+             st.name AS to_step_name
+      FROM asdlc_workflow_path p
+      LEFT JOIN asdlc_workflow_step sf ON sf.workflow_step_id = p.from_step_id
+      LEFT JOIN asdlc_workflow_step st ON st.workflow_step_id = p.to_step_id
+      WHERE p.workflow_id = ? ORDER BY sf.step_number, p.is_default_path DESC
+    `);
+    const rasicStmt        = db.prepare(`
+      SELECT r.code, r.workflow_step_id, r.workflow_participant_id,
+             wp.swimlane_display_name AS participant_name, wp.rasic_column_order,
+             wp.include_in_rasic,
+             s.step_number, s.name AS step_name
+      FROM asdlc_workflow_step_rasic r
+      JOIN asdlc_workflow_participant wp ON wp.workflow_participant_id = r.workflow_participant_id
+      JOIN asdlc_workflow_step s ON s.workflow_step_id = r.workflow_step_id
+      WHERE s.workflow_id = ? ORDER BY s.step_number, wp.rasic_column_order
+    `);
+    const stepCostStmt     = db.prepare(`
+      SELECT b.workflow_step_id, b.skill_name, b.qty_per_run,
+             b.branch_probability, r.assists_per_unit,
+             b.qty_per_run * COALESCE(b.branch_probability, 1.0) * r.assists_per_unit AS assists_per_run
+      FROM asdlc_workflow_step_cost_binding b
+      JOIN asdlc_assist_rate_card r ON r.skill_name = b.skill_name
+      WHERE b.workflow_step_id IN (
+        SELECT workflow_step_id FROM asdlc_workflow_step WHERE workflow_id = ?
+      )
+    `);
+    data.workflows = wfRows.map(wf => {
+      const steps        = stepsStmt.all(wf.workflow_id);
+      const hitlGates    = hitlStmt.all(wf.workflow_id);
+      const participants = participantStmt.all(wf.workflow_id);
+      const paths        = pathStmt.all(wf.workflow_id);
+      const rasicRows    = rasicStmt.all(wf.workflow_id);
+      const costBindings = stepCostStmt.all(wf.workflow_id);
+      // Build participant lookup for resolving owner names on steps
+      const participantById = {};
+      for (const p of participants) participantById[p.workflow_participant_id] = p;
+      // Group cost bindings by step
+      const costByStep = {};
+      for (const cb of costBindings) {
+        (costByStep[cb.workflow_step_id] = costByStep[cb.workflow_step_id] || []).push(cb);
+      }
+      return {
+        ...wf,
+        trigger:      parseJson(wf.trigger_def) || {},
+        handoffs:     parseJson(wf.handoffs)    || [],
+        decisions:    parseJson(wf.decisions)   || [],
+        participants,
+        paths,
+        rasic_rows:   rasicRows,
+        steps: steps.map(s => ({
+          ...s,
+          inputs:               parseJson(s.inputs)         || {},
+          outputs:              parseJson(s.outputs)        || {},
+          decisions:            parseJson(s.decisions_list) || [],
+          owner_participant_name: s.owner_participant_id
+            ? (participantById[s.owner_participant_id]?.swimlane_display_name || s.actor_role || '')
+            : (s.actor_role || ''),
+          cost_bindings: costByStep[s.workflow_step_id] || [],
+        })),
+        hitl_gates: hitlGates.map(h => ({ ...h })),
+      };
+    });
+  }
+
+  // ── Agents ─────────────────────────────────────────────────────────────────
+  if (sections.includes('agents')) {
+    const agRows = db.prepare(
+      "SELECT * FROM asdlc_agent_spec WHERE project_id = ? AND lifecycle_status != 'deleted' ORDER BY name"
+    ).all(req.params.id);
+    // Prepared statements for Phase 3 M:N joins
+    const agUCStmt   = db.prepare(`
+      SELECT auc.business_value, auc.notes, uc.title, uc.slug
+      FROM asdlc_agent_use_case auc
+      JOIN asdlc_use_case uc ON uc.use_case_id = auc.use_case_id
+      WHERE auc.agent_spec_id = ? ORDER BY uc.title
+    `);
+    const agToolStmt = db.prepare(`
+      SELECT at.purpose, at.fallback_behavior, at.binding_supervision_model,
+             at.tool_execution_mode, at.linked_user_story_refs,
+             t.name AS tool_name, t.slug AS tool_slug, t.dev_status
+      FROM asdlc_agent_tool at
+      JOIN asdlc_tool t ON t.tool_id = at.tool_id
+      WHERE at.agent_spec_id = ? ORDER BY t.name
+    `);
+    data.agents = agRows.map(agent => ({
+      ...agent,
+      goals:             parseJson(agent.goals)             || [],
+      done_criteria:     parseJson(agent.done_criteria)     || [],
+      inputs:            parseJson(agent.inputs)            || {},
+      outputs:           parseJson(agent.outputs)           || {},
+      run_as_model:      parseJson(agent.run_as_model)      || {},
+      design_risks:      parseJson(agent.design_risks)      || [],
+      escalation_policy: parseJson(agent.escalation_policy) || {},
+      use_cases:         agUCStmt.all(agent.agent_spec_id),
+      tool_bindings:     agToolStmt.all(agent.agent_spec_id),
+    }));
+  }
+
+  // ── Tools ──────────────────────────────────────────────────────────────────
+  if (sections.includes('tools')) {
+    const toolRows = db.prepare(
+      "SELECT * FROM asdlc_tool WHERE project_id = ? AND lifecycle_status = 'active' ORDER BY name"
+    ).all(req.params.id);
+    data.tools = toolRows.map(t => ({
+      ...t,
+      inputs:     parseJson(t.inputs)     || {},
+      outputs:    parseJson(t.outputs)    || {},
+      errors:     parseJson(t.errors)     || [],
+      boundaries: parseJson(t.boundaries) || [],
+    }));
+  }
+
+  // ── Extraction-based sections ──────────────────────────────────────────────
+  const EXTRACTION_TYPES = {
+    guardrails:     'guardrail',
+    data_sources:   'data_source',
+    test_scenarios: 'test_scenario',
+    user_stories:   'user_story',
+    governance:     'governance_control',
+  };
+  for (const [sectionKey, entityType] of Object.entries(EXTRACTION_TYPES)) {
+    if (sections.includes(sectionKey)) {
+      data[sectionKey] = ingestDoc
+        ? db.prepare('SELECT entity_data FROM asdlc_ingest_extraction WHERE ingest_id = ? AND entity_type = ? ORDER BY rowid')
+            .all(ingestDoc.ingest_id, entityType).map(r => parseJson(r.entity_data) || {})
+        : [];
+    }
+  }
+
+  // ── Relationships ──────────────────────────────────────────────────────────
+  if (sections.includes('relationships')) {
+    const ucRows = db.prepare(
+      "SELECT use_case_id, title, readiness FROM asdlc_use_case WHERE project_id = ? AND lifecycle_status != 'deleted' ORDER BY title"
+    ).all(req.params.id);
+    const wfByUC         = db.prepare("SELECT workflow_id, name, slug FROM asdlc_workflow WHERE use_case_id = ? AND lifecycle_status != 'deleted' ORDER BY name");
+    // Phase 3: agents via M:N join on use_case, not workflow FK
+    const agByUC         = db.prepare(`
+      SELECT ag.name, ag.slug, ag.supervision_model
+      FROM asdlc_agent_use_case auc
+      JOIN asdlc_agent_spec ag ON ag.agent_spec_id = auc.agent_spec_id
+      WHERE auc.use_case_id = ? AND ag.lifecycle_status != 'deleted'
+      ORDER BY ag.name
+    `);
+    const hitlByWF       = db.prepare('SELECT owner_role, gate_type, sla FROM asdlc_hitl_gate WHERE workflow_id = ?');
+    const stpCnt         = db.prepare('SELECT COUNT(*) AS cnt FROM asdlc_workflow_step WHERE workflow_id = ?');
+    // Phase 2: participants per workflow
+    const participantsByWF = db.prepare("SELECT swimlane_display_name, participant_type FROM asdlc_workflow_participant WHERE workflow_id = ? AND lifecycle_status != 'deleted' ORDER BY lane_order");
+    data.relationships = {
+      use_cases: ucRows.map(uc => ({
+        ...uc,
+        agents: agByUC.all(uc.use_case_id),
+        workflows: wfByUC.all(uc.use_case_id).map(wf => ({
+          workflow_id:  wf.workflow_id,
+          name:         wf.name,
+          slug:         wf.slug,
+          step_count:   (stpCnt.get(wf.workflow_id) || {}).cnt || 0,
+          hitl_roles:   hitlByWF.all(wf.workflow_id),
+          participants: participantsByWF.all(wf.workflow_id),
+        })),
+      })),
+      project_tools: db.prepare(
+        "SELECT tool_id, name, slug, execution_mode, dev_status FROM asdlc_tool WHERE project_id = ? AND lifecycle_status = 'active' ORDER BY name"
+      ).all(req.params.id),
+    };
+  }
+
+  // ── Cost Summary ──────────────────────────────────────────────────────────
+  if (sections.includes('cost_summary')) {
+    // All cost params are now per-Application.
+    const assumption = getEffectiveCostParams(req.params.id);
+    // cost_per_assist comes from asdlc_project (with the legacy global row as a
+    // safety fallback for projects that haven't been backfilled).
+    const ucCosts = db.prepare(`
+      SELECT uc.title, uc.slug, uc.baseline_cost_annual_usd,
+        COALESCE(SUM(
+          b.qty_per_run * COALESCE(b.branch_probability, 1.0)
+          * r.assists_per_unit * COALESCE(wf.runs_per_period, 0)
+          * COALESCE(ap.cost_per_assist, ca.cost_per_assist, 0.015)
+        ), 0) AS projected_per_period
+      FROM asdlc_use_case uc
+      LEFT JOIN asdlc_workflow wf
+        ON wf.use_case_id = uc.use_case_id AND wf.lifecycle_status != 'deleted'
+      LEFT JOIN asdlc_workflow_step s ON s.workflow_id = wf.workflow_id
+      LEFT JOIN asdlc_workflow_step_cost_binding b ON b.workflow_step_id = s.workflow_step_id
+      LEFT JOIN asdlc_assist_rate_card r ON r.skill_name = b.skill_name
+      LEFT JOIN asdlc_project ap ON ap.project_id = uc.project_id
+      LEFT JOIN asdlc_cost_assumption ca ON ca.cost_assumption_id = 'cost-assumption-global'
+      WHERE uc.project_id = ? AND uc.lifecycle_status != 'deleted'
+      GROUP BY uc.use_case_id ORDER BY uc.title
+    `).all(req.params.id);
+    data.cost_summary = { assumption, use_cases: ucCosts };
+  }
+
+  // Build and stream markdown
+  const md       = buildExportMarkdown(project, baseline, sections, data);
+  const dateStr  = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const code     = (project.project_code || project.project_name || 'project').replace(/\s+/g, '-');
+  const fileName = `${code}-build-spec-${dateStr}.md`;
+
+  res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+  res.send(md);
+});
+
+// ─── Build export markdown assembler ──────────────────────────────────────────
+
+// Safely coerce any value to a plain string suitable for a Markdown table cell.
+// Arrays are joined with '; ', objects are JSON-stringified, nulls become ''.
+function mdCell(val) {
+  if (val == null) return '';
+  if (Array.isArray(val)) return val.map(v => mdCell(v)).join('; ');
+  if (typeof val === 'object') return JSON.stringify(val);
+  return String(val).replace(/\|/g, '\\|').replace(/\n/g, ' ').trim();
+}
+
+function buildExportMarkdown(project, baseline, sections, data) {
+  const lines  = [];
+  const ts     = new Date().toISOString();
+  const prefix = project.client_name ? `${project.client_name} — ` : '';
+
+  // Helper: format a cost value as $X,XXX
+  function fmtCost(n) {
+    if (!n || n === 0) return '$0';
+    if (n < 100)  return `$${n.toFixed(2)}`;
+    return `$${Math.round(n).toLocaleString('en-US')}`;
+  }
+
+  // ── Header ─────────────────────────────────────────────────────────────────
+  lines.push(`# ${prefix}${project.project_name}`);
+  lines.push(`## Agentic Application Build Specification for ServiceNow`);
+  lines.push('');
+  lines.push('> **Purpose:** Use this document to build ServiceNow artifacts (agents, workflows, etc.)');
+  lines.push('');
+  lines.push('| Field | Value |');
+  lines.push('|---|---|');
+  lines.push(`| Project | ${project.project_name}${project.project_code ? ` (${project.project_code})` : ''} |`);
+  if (project.client_name) lines.push(`| Client | ${project.client_name} |`);
+  if (project.stage)       lines.push(`| Stage | ${project.stage} |`);
+  if (baseline && baseline.locked_at) {
+    lines.push(`| Version | ${baseline.baseline_name} — locked ${baseline.locked_at.slice(0, 10)} |`);
+  } else {
+    lines.push(`| Version | Current live design |`);
+  }
+  lines.push(`| Exported | ${ts} |`);
+  lines.push('');
+
+  // ── ServiceNow SDK Quick Reference ─────────────────────────────────────────
+  // Always emitted — gives Claude Code the SDK conventions it needs to generate
+  // valid TypeScript artifact files without leaving the document.
+  lines.push('---'); lines.push('');
+  lines.push('## 📖 ServiceNow SDK Quick Reference');
+  lines.push('');
+  lines.push(`> **Source:** https://servicenow.github.io/sdk/guides/building-ai-agents-guide`);
+  lines.push(`> *SDK conventions embedded at export time (${ts.slice(0,10)}). Check URL for latest updates.*`);
+  lines.push('');
+
+  lines.push('### Agent vs Workflow — When to Use Which');
+  lines.push('');
+  lines.push('| Use case | Choose |');
+  lines.push('|---|---|');
+  lines.push('| Multiple tools on same table / same capability type | **AI Agent** (`AiAgent`) |');
+  lines.push('| Sequential specialization across different capability types | **AI Agentic Workflow** (`AiAgenticWorkflow`) |');
+  lines.push('');
+
+  lines.push('### Required Fields');
+  lines.push('');
+  lines.push('| Artifact | Required Fields |');
+  lines.push('|---|---|');
+  lines.push('| AI Agent | `$id`, `name`, `description`, `agentRole`, `securityAcl`, `versionDetails` (array) |');
+  lines.push('| AI Agentic Workflow | `$id`, `name`, `description`, `securityAcl`, `team.$id`, `versions` (array) |');
+  lines.push('| All tools | `name`, `type` |');
+  lines.push('| All versions | `name`, `number`, `state`, `instructions` |');
+  lines.push('');
+  lines.push('> ⚠ **`securityAcl` is mandatory on both `AiAgent` and `AiAgenticWorkflow`.**');
+  lines.push('');
+
+  lines.push('### Deployment Sequence');
+  lines.push('');
+  lines.push('1. Define `securityAcl` first (with `$id` and `type`)');
+  lines.push('2. Configure tools — priority order: OOB → reference-based → CRUD → script (last resort)');
+  lines.push('3. Author `instructions` referencing tool names explicitly; include failure contingencies');
+  lines.push('4. Define `versionDetails`/`versions` (1+ required, `state: "published"`)');
+  lines.push('5. For workflows: deploy agents first, then reference their `sys_id`s in `team.members`');
+  lines.push('6. Configure `triggerConfig` — agents use `"nap"` or `"nap_and_va"`; workflows use `"Now Assist Panel"`');
+  lines.push('7. Validate: query `sn_aia_agent` (agents) or `sn_aia_usecase` (workflows) to verify deployment');
+  lines.push('');
+
+  lines.push('### Tool Selection Priority (highest → lowest)');
+  lines.push('');
+  lines.push('1. **OOB tools** — `web_search`, `rag`, `knowledge_graph`');
+  lines.push('2. **Reference-based** — `action`, `subflow`, `capability`');
+  lines.push('3. **CRUD tools** — `create`, `lookup`, `update`, `delete`');
+  lines.push('4. **Script tools** — last resort only (no alternative fits)');
+  lines.push('');
+
+  lines.push('### Key SDK Patterns');
+  lines.push('');
+  lines.push('```typescript');
+  lines.push('import { AiAgent } from "@servicenow/sdk/core";            // single agent');
+  lines.push('import { AiAgenticWorkflow } from "@servicenow/sdk/core";  // orchestrated workflow');
+  lines.push('');
+  lines.push('// Record identity pattern');
+  lines.push('$id: Now.ID["unique_identifier"]');
+  lines.push('');
+  lines.push('// Agents use versionDetails; workflows use versions (different names!)');
+  lines.push('versionDetails: [{ name: "V1", number: 1, state: "published", instructions: `...` }]');
+  lines.push('versions:       [{ name: "V1", number: 1, state: "published", instructions: `...` }]');
+  lines.push('');
+  lines.push('// CRUD queryCondition syntax');
+  lines.push('queryCondition: "column_name=={{input_field_name}}"');
+  lines.push('');
+  lines.push('// Script tools: inputs are strings at runtime');
+  lines.push('const id = parseInt(inputs.record_id);  // must parse manually');
+  lines.push('// Always use GlideRecordSecure (NOT GlideRecord) in script tools');
+  lines.push('```');
+  lines.push('');
+
+  lines.push('### Common Mistakes to Avoid');
+  lines.push('');
+  lines.push('- [ ] Using `versionDetails` on workflows (use `versions` — different field name)');
+  lines.push('- [ ] Using `runAs` on agents (use `runAsUser`)');
+  lines.push('- [ ] Omitting `securityAcl` or `dataAccess` when `runAsUser`/`runAs` absent');
+  lines.push('- [ ] Missing `$id` on `team` object in workflows');
+  lines.push('- [ ] Setting `team.description` manually (auto-populated — do not set)');
+  lines.push('- [ ] Referencing "triggering record" in instructions — use "from the task" or "from the context"');
+  lines.push('- [ ] Using `GlideRecord` in script tools — always use `GlideRecordSecure`');
+  lines.push('- [ ] Script tool inputs defined as object (must be **array**); omit `inputSchema` (auto-generated)');
+  lines.push('');
+
+  // ── ServiceNow Pre-flight Checklist ────────────────────────────────────────
+  lines.push('---'); lines.push('');
+  lines.push('## ⚠ ServiceNow Pre-flight Checklist');
+  lines.push('');
+  lines.push('Complete **all** items below before running `npx now-sdk install`.');
+  lines.push('');
+
+  // Service accounts
+  lines.push('### 1. Service Accounts');
+  lines.push('');
+  lines.push('Create a dedicated service account on the target instance and record its `sys_id`.');
+  lines.push('');
+  lines.push('| Placeholder in SDK files | Purpose | Minimum Roles Required |');
+  lines.push('|---|---|---|');
+  const agentsForPreflight = (data.agents || []);
+  if (agentsForPreflight.length) {
+    for (const a of agentsForPreflight) {
+      const roles = a.access_requirements || 'See agent specification';
+      lines.push(`| \`REPLACE_WITH_AGENT_SERVICE_ACCOUNT_SYS_ID\` | Runtime identity for **${a.name}** | ${mdCell(roles)} |`);
+    }
+  } else {
+    lines.push('| `REPLACE_WITH_AGENT_SERVICE_ACCOUNT_SYS_ID` | Agent runtime service account | Verify with architect |');
+  }
+  lines.push('');
+
+  // REST Message records
+  const restTools = (data.tools || []).filter(t => {
+    const m = (t.execution_mode || '').toLowerCase();
+    return m.includes('rest') || m.includes('http') || m.includes('api') || m.includes('spoke');
+  });
+  lines.push('### 2. REST Message Records');
+  lines.push('');
+  if (restTools.length) {
+    lines.push('Create the following records at **System Web Services › Outbound › REST Message**:');
+    lines.push('');
+    lines.push('| REST Message Name | Execution Mode | Access / Auth Notes |');
+    lines.push('|---|---|---|');
+    for (const t of restTools) {
+      lines.push(`| **${t.name}** | ${mdCell(t.execution_mode)} | ${mdCell(t.access_requirements)} |`);
+    }
+    lines.push('');
+    lines.push('For each record above, also create the HTTP Method child record and test the connection before proceeding.');
+  } else {
+    lines.push('*No REST-mode tools detected. Verify tool execution modes in Section 4.*');
+  }
+  lines.push('');
+
+  // IntegrationHub actions
+  const ihTools = (data.tools || []).filter(t => {
+    const m = (t.execution_mode || '').toLowerCase();
+    return m.includes('integration') || m.includes('hub') || m.includes('flow') || m.includes('action');
+  });
+  lines.push('### 3. IntegrationHub Actions');
+  lines.push('');
+  if (ihTools.length) {
+    lines.push('Create or verify the following IntegrationHub actions (Scope shown in tool name prefix):');
+    lines.push('');
+    lines.push('| Action Name | Scope | Input Fields | Output Fields |');
+    lines.push('|---|---|---|---|');
+    for (const t of ihTools) {
+      const inputKeys  = t.inputs  ? Object.keys(t.inputs).join(', ')  : '—';
+      const outputKeys = t.outputs ? Object.keys(t.outputs).join(', ') : '—';
+      const scope = t.name.includes('.') ? t.name.split('.')[0] : 'global';
+      lines.push(`| \`${t.name}\` | ${scope} | ${inputKeys} | ${outputKeys} |`);
+    }
+  } else {
+    lines.push('*No IntegrationHub-mode tools detected. Verify tool execution modes in Section 4.*');
+  }
+  lines.push('');
+
+  // Trigger condition verification
+  lines.push('### 4. Trigger Condition Verification');
+  lines.push('');
+  lines.push('Verify the agent trigger matches your instance\'s record classification before deploying:');
+  lines.push('');
+  const wfsForTrigger = (data.workflows || []);
+  if (wfsForTrigger.length) {
+    for (const wf of wfsForTrigger) {
+      const trig = wf.trigger || {};
+      lines.push(`**Workflow: ${wf.name}${wf.slug ? ` (${wf.slug})` : ''}**`);
+      lines.push('');
+      lines.push('| Trigger Field | Value to verify on instance |');
+      lines.push('|---|---|');
+      if (trig.type  || trig.event)      lines.push(`| Trigger Type | \`${trig.type || trig.event}\` |`);
+      if (trig.table)                    lines.push(`| Table | \`${trig.table}\` |`);
+      if (trig.condition || trig.filter) lines.push(`| Filter Condition | \`${trig.condition || trig.filter}\` |`);
+      if (trig.category)                 lines.push(`| Category | \`${trig.category}\` — confirm this value exists on the instance |`);
+      if (trig.channel)                  lines.push(`| Channel | \`${trig.channel}\` |`);
+      const knownKeys = new Set(['type','event','table','condition','filter','category','channel']);
+      const extraKeys = Object.keys(trig).filter(k => !knownKeys.has(k));
+      for (const k of extraKeys) lines.push(`| ${k} | \`${mdCell(trig[k])}\` |`);
+      if (!Object.keys(trig).length) lines.push('| — | See workflow trigger definition |');
+      lines.push('');
+    }
+  } else {
+    lines.push('*No workflow data included in this export. Re-export with Workflows section enabled.*');
+    lines.push('');
+  }
+
+  // sys_id placeholder summary
+  lines.push('### 5. sys_id Placeholders Summary');
+  lines.push('');
+  lines.push('Search the generated SDK files for these strings and replace before install:');
+  lines.push('');
+  lines.push('| Placeholder | What to substitute |');
+  lines.push('|---|---|');
+  lines.push('| `REPLACE_WITH_AGENT_SERVICE_ACCOUNT_SYS_ID` | `sys_id` of the service account created in step 1 |');
+  lines.push('| `REPLACE_WITH_INSTANCE_URL` | Your ServiceNow instance URL (e.g. `https://myinstance.service-now.com`) |');
+  lines.push('');
+
+  // Cost model verification (only if any agent uses SN Now Assist)
+  const nowAssistAgents = agentsForPreflight.filter(a => a.cost_model === 'servicenow_now_assist');
+  if (nowAssistAgents.length) {
+    lines.push('### 6. Cost Model Verification (Now Assist)');
+    lines.push('');
+    lines.push('The following agents are configured for ServiceNow Now Assist cost tracking:');
+    lines.push('');
+    for (const a of nowAssistAgents) {
+      lines.push(`- **${a.name}**${a.slug ? ` (${a.slug})` : ''}`);
+    }
+    lines.push('');
+    lines.push('Before go-live, verify the Now Assist entitlement settings and cost-per-assist value');
+    lines.push('in the **Cost Management** admin page within the workbench.');
+    lines.push('');
+  }
+
+  // ── 1. Application Overview ─────────────────────────────────────────────────
+  if (sections.includes('use_cases') && data.use_cases) {
+    lines.push('---'); lines.push('');
+    lines.push('## 1. Application Overview'); lines.push('');
+    if (!data.use_cases.length) {
+      lines.push('*No use cases defined.*'); lines.push('');
+    } else {
+      for (const uc of data.use_cases) {
+        const ucHead = [uc.title || '(untitled)', uc.slug].filter(Boolean).join(' — ');
+        lines.push(`### Use Case: ${ucHead}`); lines.push('');
+        if (uc.owner)                  lines.push(`**Business Owner:** ${uc.owner}`);
+        if (uc.risk_tier)              lines.push(`**Risk Tier:** ${uc.risk_tier}`);
+        if (uc.business_objective)     lines.push(`**Objective:** ${uc.business_objective}`);
+        if (uc.summary)                lines.push(`**Summary:** ${uc.summary}`);
+        if (uc.expected_value)         lines.push(`**Expected Value:** ${uc.expected_value}`);
+        if (uc.primary_success_metric) lines.push(`**Primary Success Metric:** ${uc.primary_success_metric}`);
+        if (uc.readiness)              lines.push(`**Readiness:** ${uc.readiness}`);
+        if (uc.supervision_model)      lines.push(`**Supervision Model:** ${uc.supervision_model}`);
+        if (uc.trigger_event)          lines.push(`**Trigger Event:** ${uc.trigger_event}`);
+        if (uc.sla_target)             lines.push(`**SLA Target:** ${uc.sla_target}`);
+        lines.push('');
+        if (uc.success_criteria.length) {
+          lines.push('#### Success Criteria');
+          uc.success_criteria.forEach((c, i) => lines.push(`${i + 1}. ${c}`));
+          lines.push('');
+        }
+        if (uc.constraints_list.length) {
+          lines.push('#### Constraints');
+          uc.constraints_list.forEach(c => lines.push(`- ${c}`));
+          lines.push('');
+        }
+        if (uc.volume_assumptions && (Array.isArray(uc.volume_assumptions) ? uc.volume_assumptions.length : Object.keys(uc.volume_assumptions).length)) {
+          lines.push('#### Volume Assumptions');
+          if (Array.isArray(uc.volume_assumptions)) {
+            uc.volume_assumptions.forEach(v => lines.push(`- ${v}`));
+          } else {
+            Object.entries(uc.volume_assumptions).forEach(([k, v]) => lines.push(`- **${k}:** ${v}`));
+          }
+          lines.push('');
+        }
+        // Projected cost (Phase 4)
+        if (uc.projected_cost_per_period > 0 || uc.baseline_cost_annual_usd > 0) {
+          lines.push('#### Projected Cost');
+          if (uc.projected_cost_per_period > 0)
+            lines.push(`- **Projected:** ${fmtCost(uc.projected_cost_per_period)}/period`);
+          if (uc.baseline_cost_annual_usd > 0)
+            lines.push(`- **Baseline (status quo):** ${fmtCost(uc.baseline_cost_annual_usd)}/yr`);
+          if (uc.roi_ratio)
+            lines.push(`- **Estimated ROI:** ${uc.roi_ratio}x`);
+          lines.push('');
+        }
+        lines.push(`*Linked: ${uc.workflow_count} workflow(s), ${uc.agent_count} agent(s)*`); lines.push('');
+      }
+    }
+  }
+
+  // ── 2. Workflows ─────────────────────────────────────────────────────────────
+  if (sections.includes('workflows') && data.workflows) {
+    lines.push('---'); lines.push('');
+    lines.push('## 2. Workflows'); lines.push('');
+    if (!data.workflows.length) {
+      lines.push('*No workflows defined.*'); lines.push('');
+    } else {
+      for (const wf of data.workflows) {
+        const wfHead = [wf.name || '(untitled)', wf.slug].filter(Boolean).join(' — ');
+        lines.push(`### Workflow: ${wfHead}`); lines.push('');
+        if (wf.lifecycle_status)    lines.push(`**Status:** ${wf.lifecycle_status}`);
+        if (wf.risk_tier)           lines.push(`**Risk Tier:** ${wf.risk_tier}`);
+        if (wf.sla_hours != null)   lines.push(`**SLA:** ${wf.sla_hours}h`);
+        if (wf.readiness)           lines.push(`**Readiness:** ${wf.readiness}`);
+        if (wf.runs_per_period != null) lines.push(`**Volume:** ${wf.runs_per_period} runs/period`);
+        lines.push('');
+
+        // Trigger configuration
+        const trig = wf.trigger || {};
+        const trigKeys = Object.keys(trig);
+        if (trigKeys.length) {
+          lines.push('#### ServiceNow Trigger Configuration');
+          lines.push('');
+          lines.push('| Field | Value |');
+          lines.push('|---|---|');
+          for (const k of trigKeys) lines.push(`| ${k} | \`${mdCell(trig[k])}\` |`);
+          lines.push('');
+        } else if (typeof wf.trigger === 'string' && wf.trigger) {
+          lines.push(`**Trigger:** ${wf.trigger}`); lines.push('');
+        }
+
+        // Steps table — enhanced with Phase 1 + Phase 2 fields
+        if (wf.steps && wf.steps.length) {
+          lines.push('#### Steps'); lines.push('');
+          lines.push('| # | Slug | Type | Step | Owner | SLA (h) | Purpose | Decision Points |');
+          lines.push('|---|---|---|---|---|---|---|---|');
+          for (const s of wf.steps) {
+            const dec = Array.isArray(s.decisions) ? s.decisions.join('; ') : (s.decisions || '');
+            lines.push(`| ${s.step_number || ''} | ${s.slug || ''} | ${s.step_type || ''} | ${mdCell(s.name)} | ${mdCell(s.owner_participant_name)} | ${s.sla_hours != null ? s.sla_hours : ''} | ${mdCell(s.step_purpose)} | ${mdCell(dec)} |`);
+          }
+          lines.push('');
+          // Per-step preconditions / evidence captured (Phase 1 — show only if any step has them)
+          const stepsWithMeta = wf.steps.filter(s => s.preconditions || s.evidence_captured);
+          if (stepsWithMeta.length) {
+            lines.push('##### Step Detail (Preconditions & Evidence)');
+            lines.push('');
+            lines.push('| # | Slug | Preconditions | Evidence Captured |');
+            lines.push('|---|---|---|---|');
+            for (const s of stepsWithMeta) {
+              lines.push(`| ${s.step_number || ''} | ${s.slug || ''} | ${mdCell(s.preconditions)} | ${mdCell(s.evidence_captured)} |`);
+            }
+            lines.push('');
+          }
+        }
+
+        // HITL Gates
+        if (wf.hitl_gates && wf.hitl_gates.length) {
+          lines.push('#### HITL Gates'); lines.push('');
+          lines.push('| Role | Gate Type | SLA | Criteria |');
+          lines.push('|---|---|---|---|');
+          for (const h of wf.hitl_gates) {
+            lines.push(`| ${mdCell(h.owner_role)} | ${mdCell(h.gate_type)} | ${mdCell(h.sla)} | ${mdCell(h.criteria)} |`);
+          }
+          lines.push('');
+        }
+
+        // Phase 2: Participant Register
+        if (wf.participants && wf.participants.length) {
+          lines.push('#### Participant Register'); lines.push('');
+          lines.push('| Slug | Name | Type | Authority | Handoff Method | Purpose |');
+          lines.push('|---|---|---|---|---|---|');
+          for (const p of wf.participants) {
+            lines.push(`| ${p.slug || ''} | ${mdCell(p.swimlane_display_name || p.human_role_name)} | ${mdCell(p.participant_type)} | ${mdCell(p.authority_level)} | ${mdCell(p.handoff_method)} | ${mdCell(p.purpose_in_workflow)} |`);
+          }
+          lines.push('');
+        }
+
+        // Phase 2: Routing / Paths
+        if (wf.paths && wf.paths.length) {
+          lines.push('#### Routing / Paths'); lines.push('');
+          lines.push('| Slug | From Step | Condition | Label | To Step | Default |');
+          lines.push('|---|---|---|---|---|---|');
+          for (const p of wf.paths) {
+            const from = p.from_step_name ? `S-${String(p.from_step_num || '').padStart(3,'0')}: ${p.from_step_name}` : (p.from_step_id || '—');
+            const to   = p.to_step_name || p.to_step_id || 'END';
+            lines.push(`| ${p.slug || ''} | ${mdCell(from)} | ${mdCell(p.branch_condition)} | ${mdCell(p.branch_label)} | ${mdCell(to)} | ${p.is_default_path ? '✓' : ''} |`);
+          }
+          lines.push('');
+        }
+
+        // Phase 2: RASIC Matrix
+        if (wf.rasic_rows && wf.rasic_rows.length) {
+          // Build cross-tab: rows=steps, cols=participants (include_in_rasic)
+          const rasicParticipants = [];
+          const rasicPartSeen = new Set();
+          for (const r of wf.rasic_rows) {
+            if (r.include_in_rasic !== 0 && !rasicPartSeen.has(r.workflow_participant_id)) {
+              rasicPartSeen.add(r.workflow_participant_id);
+              rasicParticipants.push({ id: r.workflow_participant_id, name: r.participant_name, order: r.rasic_column_order });
+            }
+          }
+          rasicParticipants.sort((a, b) => (a.order || 0) - (b.order || 0));
+          if (rasicParticipants.length) {
+            // Build lookup: stepId+participantId → concatenated codes
+            const rasicMap = {};
+            for (const r of wf.rasic_rows) {
+              const key = `${r.workflow_step_id}|${r.workflow_participant_id}`;
+              rasicMap[key] = (rasicMap[key] || '') + r.code;
+            }
+            // Collect unique steps in order
+            const rasicSteps = [];
+            const rasicStepSeen = new Set();
+            for (const r of wf.rasic_rows) {
+              if (!rasicStepSeen.has(r.workflow_step_id)) {
+                rasicStepSeen.add(r.workflow_step_id);
+                rasicSteps.push({ id: r.workflow_step_id, name: r.step_name, num: r.step_number });
+              }
+            }
+            rasicSteps.sort((a, b) => (a.num || 0) - (b.num || 0));
+            lines.push('#### RASIC Matrix'); lines.push('');
+            const header = ['| Step', ...rasicParticipants.map(p => mdCell(p.name)), '|'].join(' | ');
+            const sep    = ['|---',   ...rasicParticipants.map(() => '---'),          '|'].join('|');
+            lines.push(header);
+            lines.push(sep);
+            for (const st of rasicSteps) {
+              const stepLabel = `${st.num ? `S-${String(st.num).padStart(3,'0')}: ` : ''}${st.name || ''}`;
+              const cells = rasicParticipants.map(p => rasicMap[`${st.id}|${p.id}`] || '');
+              lines.push(`| ${mdCell(stepLabel)} | ${cells.join(' | ')} |`);
+            }
+            lines.push('');
+          }
+        }
+
+        // Handoffs (legacy JSON field — keep for backward compatibility)
+        if (wf.handoffs && wf.handoffs.length) {
+          lines.push('#### Handoffs');
+          wf.handoffs.forEach(h => lines.push(`- ${typeof h === 'string' ? h : JSON.stringify(h)}`));
+          lines.push('');
+        }
+      }
+    }
+  }
+
+  // ── 3. Agent Specifications ───────────────────────────────────────────────────
+  if (sections.includes('agents') && data.agents) {
+    lines.push('---'); lines.push('');
+    lines.push('## 3. Agent Specifications'); lines.push('');
+    if (!data.agents.length) {
+      lines.push('*No agents defined.*'); lines.push('');
+    } else {
+      for (const agent of data.agents) {
+        const agHead = [agent.name || '(untitled)', agent.slug].filter(Boolean).join(' — ');
+        lines.push(`### Agent: ${agHead}`); lines.push('');
+        const model = agent.run_as_model?.model || agent.run_as_model?.name || '';
+        if (model)                           lines.push(`**Model:** ${model}`);
+        if (agent.supervision_model)         lines.push(`**Supervision Model:** ${agent.supervision_model}`);
+        if (agent.orchestration_strategy)    lines.push(`**Orchestration Strategy:** ${agent.orchestration_strategy}`);
+        if (agent.scope)                     lines.push(`**Scope:** ${agent.scope}`);
+        if (agent.lifecycle_status)          lines.push(`**Status:** ${agent.lifecycle_status}`);
+        if (agent.memory_strategy)           lines.push(`**Memory Strategy:** ${agent.memory_strategy}`);
+        if (agent.maintenance_owner)         lines.push(`**Maintenance Owner:** ${agent.maintenance_owner}`);
+        if (agent.latency_target)            lines.push(`**Latency Target:** ${agent.latency_target}`);
+        lines.push('');
+
+        if (agent.instructions) {
+          lines.push('**Instructions:**'); lines.push('');
+          lines.push(agent.instructions); lines.push('');
+        }
+        if (agent.goals.length) {
+          lines.push('**Goals:**');
+          agent.goals.forEach(g => lines.push(`- ${g}`));
+          lines.push('');
+        }
+        if (agent.done_criteria.length) {
+          lines.push('**Done Criteria:**');
+          agent.done_criteria.forEach(d => lines.push(`- ${d}`));
+          lines.push('');
+        }
+        if (agent.inputs && Object.keys(agent.inputs).length) {
+          lines.push('**Input Schema:**'); lines.push('');
+          lines.push('```json'); lines.push(JSON.stringify(agent.inputs, null, 2)); lines.push('```'); lines.push('');
+        }
+        if (agent.outputs && Object.keys(agent.outputs).length) {
+          lines.push('**Output Schema:**'); lines.push('');
+          lines.push('```json'); lines.push(JSON.stringify(agent.outputs, null, 2)); lines.push('```'); lines.push('');
+        }
+
+        // Phase 3: Use Cases Served (M:N)
+        if (agent.use_cases && agent.use_cases.length) {
+          lines.push('#### Use Cases Served'); lines.push('');
+          lines.push('| UC | Title | Business Value |');
+          lines.push('|---|---|---|');
+          for (const uc of agent.use_cases) {
+            lines.push(`| ${uc.slug || '—'} | ${mdCell(uc.title)} | ${mdCell(uc.business_value)} |`);
+          }
+          lines.push('');
+        }
+
+        // Phase 3: Tool Bindings (M:N)
+        if (agent.tool_bindings && agent.tool_bindings.length) {
+          lines.push('#### Tool Bindings'); lines.push('');
+          lines.push('| Tool | Slug | Dev Status | Purpose | Execution Mode | Supervision | Fallback |');
+          lines.push('|---|---|---|---|---|---|---|');
+          for (const tb of agent.tool_bindings) {
+            const devBadge = tb.dev_status === 'To be built' ? '🔨 To be built' : (tb.dev_status ? '✅ Existing' : '');
+            lines.push(`| ${mdCell(tb.tool_name)} | ${tb.tool_slug || ''} | ${devBadge} | ${mdCell(tb.purpose)} | ${mdCell(tb.tool_execution_mode)} | ${mdCell(tb.binding_supervision_model)} | ${mdCell(tb.fallback_behavior)} |`);
+          }
+          lines.push('');
+        }
+
+        if (agent.design_risks.length) {
+          lines.push('**Design Risks:**');
+          agent.design_risks.forEach(r => lines.push(`- ${typeof r === 'string' ? r : JSON.stringify(r)}`));
+          lines.push('');
+        }
+
+        // Phase 1: Post-release validation notes
+        if (agent.post_release_validation) {
+          lines.push('**Post-Release Validation:**'); lines.push('');
+          lines.push('```');
+          lines.push(agent.post_release_validation);
+          lines.push('```');
+          lines.push('');
+        }
+      }
+    }
+  }
+
+  // ── 4. Tools & Integrations ───────────────────────────────────────────────────
+  if (sections.includes('tools') && data.tools) {
+    lines.push('---'); lines.push('');
+    lines.push('## 4. Tools & Integrations'); lines.push('');
+    if (!data.tools.length) {
+      lines.push('*No tools defined.*'); lines.push('');
+    } else {
+      for (const t of data.tools) {
+        const toolHead = [t.name || '(untitled)', t.slug].filter(Boolean).join(' — ');
+        lines.push(`### \`${toolHead}\``); lines.push('');
+        const mode = (t.execution_mode || '').toLowerCase();
+        let snArtifact = '';
+        if (mode.includes('rest') || mode.includes('http'))            snArtifact = 'REST Message (System Web Services › Outbound › REST Message)';
+        else if (mode.includes('integration') || mode.includes('hub')) snArtifact = 'IntegrationHub Action (Flow Designer › Action Designer)';
+        else if (mode.includes('flow') || mode.includes('subflow'))    snArtifact = 'Subflow (Flow Designer)';
+        else if (mode.includes('script') || mode.includes('sync'))     snArtifact = 'Script Include';
+        else if (t.execution_mode)                                     snArtifact = t.execution_mode;
+        if (snArtifact) lines.push(`> **ServiceNow Artifact to create:** ${snArtifact}`);
+        lines.push('');
+        if (t.dev_status)           lines.push(`**Dev Status:** ${t.dev_status === 'To be built' ? '🔨 To be built' : '✅ Existing'}`);
+        if (t.contract)             lines.push(`**Contract:** ${t.contract}`);
+        if (t.execution_mode)       lines.push(`**Execution Mode:** ${t.execution_mode}`);
+        if (t.cost_impact)          lines.push(`**Cost Impact:** ${t.cost_impact}`);
+        if (t.access_requirements)  lines.push(`**Access Requirements:** ${t.access_requirements}`);
+        lines.push('');
+        if (t.inputs && Object.keys(t.inputs).length) {
+          lines.push('**Input Parameters:**'); lines.push('');
+          lines.push('```json'); lines.push(JSON.stringify(t.inputs, null, 2)); lines.push('```'); lines.push('');
+        }
+        if (t.outputs && Object.keys(t.outputs).length) {
+          lines.push('**Output Fields:**'); lines.push('');
+          lines.push('```json'); lines.push(JSON.stringify(t.outputs, null, 2)); lines.push('```'); lines.push('');
+        }
+        if (t.boundaries.length) {
+          lines.push('**Boundaries:**');
+          t.boundaries.forEach(b => lines.push(`- ${typeof b === 'string' ? b : JSON.stringify(b)}`));
+          lines.push('');
+        }
+        if (t.errors.length) {
+          lines.push('**Error Conditions:**');
+          t.errors.forEach(e => lines.push(`- ${typeof e === 'string' ? e : JSON.stringify(e)}`));
+          lines.push('');
+        }
+      }
+    }
+  }
+
+  // ── 5. Guardrails ─────────────────────────────────────────────────────────────
+  if (sections.includes('guardrails') && data.guardrails) {
+    lines.push('---'); lines.push('');
+    lines.push('## 5. Guardrails'); lines.push('');
+    if (!data.guardrails.length) {
+      lines.push('*No guardrails defined.*'); lines.push('');
+    } else {
+      lines.push('| ID | Name | Enforcement | Description |');
+      lines.push('|---|---|---|---|');
+      for (const g of data.guardrails) {
+        const id   = g.guardrail_id_ref || g.guardrail_id || '';
+        const name = g.name || g.guardrail_name || '';
+        const enf  = mdCell(g.enforcement_level || g.enforcement);
+        const desc = mdCell(g.description || g.guardrail_description);
+        lines.push(`| ${mdCell(id)} | ${mdCell(name)} | ${enf} | ${desc} |`);
+      }
+      lines.push('');
+    }
+  }
+
+  // ── 6. Data Sources ───────────────────────────────────────────────────────────
+  if (sections.includes('data_sources') && data.data_sources) {
+    lines.push('---'); lines.push('');
+    lines.push('## 6. Data Sources'); lines.push('');
+    if (!data.data_sources.length) {
+      lines.push('*No data sources defined.*'); lines.push('');
+    } else {
+      lines.push('| System | Access Type | Sensitivity | Owner | Key Fields |');
+      lines.push('|---|---|---|---|---|');
+      for (const ds of data.data_sources) {
+        const system = mdCell(ds.source_system  || ds.system_name || ds.name);
+        const access = mdCell(ds.access_method  || ds.access_type);
+        const sens   = mdCell(ds.data_sensitivity || ds.sensitivity);
+        const owner  = mdCell(ds.data_owner     || ds.owner);
+        const fields = mdCell(ds.key_fields || ds.table_or_document);
+        lines.push(`| ${system} | ${access} | ${sens} | ${owner} | ${fields} |`);
+      }
+      lines.push('');
+    }
+  }
+
+  // ── 7. Test Scenarios ─────────────────────────────────────────────────────────
+  if (sections.includes('test_scenarios') && data.test_scenarios) {
+    lines.push('---'); lines.push('');
+    lines.push('## 7. Test Scenarios'); lines.push('');
+    if (!data.test_scenarios.length) {
+      lines.push('*No test scenarios defined.*'); lines.push('');
+    } else {
+      lines.push('| ID | Type | Description | Expected Output |');
+      lines.push('|---|---|---|---|');
+      for (const ts of data.test_scenarios) {
+        const id   = ts.scenario_id_ref || ts.test_id || ts.id || '';
+        const type = mdCell(ts.scenario_type || ts.type);
+        const desc = mdCell(ts.description  || ts.scenario_description);
+        const exp  = mdCell(ts.expected_output || ts.expected_result);
+        lines.push(`| ${mdCell(id)} | ${type} | ${desc} | ${exp} |`);
+      }
+      lines.push('');
+    }
+  }
+
+  // ── 8. User Stories ───────────────────────────────────────────────────────────
+  if (sections.includes('user_stories') && data.user_stories) {
+    lines.push('---'); lines.push('');
+    lines.push('## 8. User Stories'); lines.push('');
+    if (!data.user_stories.length) {
+      lines.push('*No user stories defined.*'); lines.push('');
+    } else {
+      const bySprint = {};
+      for (const us of data.user_stories) {
+        const sprint = us.sprint || us.sprint_number || 'Backlog';
+        (bySprint[sprint] = bySprint[sprint] || []).push(us);
+      }
+      for (const [sprint, stories] of Object.entries(bySprint)) {
+        lines.push(`### Sprint ${sprint}`); lines.push('');
+        lines.push('| ID | Type | Title | Description | Acceptance Criteria |');
+        lines.push('|---|---|---|---|---|');
+        for (const us of stories) {
+          const id    = us.story_id_ref || us.user_story_id || us.id || '';
+          const type  = us.story_type   || us.type          || '';
+          const title = mdCell(us.title || us.story_title);
+          const desc  = mdCell(us.description || us.story_description);
+          const ac    = mdCell(us.acceptance_criteria);
+          lines.push(`| ${mdCell(id)} | ${mdCell(type)} | ${title} | ${desc} | ${ac} |`);
+        }
+        lines.push('');
+      }
+    }
+  }
+
+  // ── 9. Governance Controls ────────────────────────────────────────────────────
+  if (sections.includes('governance') && data.governance) {
+    lines.push('---'); lines.push('');
+    lines.push('## 9. Governance Controls'); lines.push('');
+    if (!data.governance.length) {
+      lines.push('*No governance controls defined.*'); lines.push('');
+    } else {
+      lines.push('| ID | Control | Risk | Framework | Owner | Approvals |');
+      lines.push('|---|---|---|---|---|---|');
+      for (const gc of data.governance) {
+        const id    = gc.governance_id_ref || gc.id || '';
+        const ctrl  = mdCell(gc.control_description || gc.name);
+        const risk  = gc.risk_classification  || gc.risk  || '';
+        const fw    = gc.framework || gc.compliance_framework || '';
+        const owner = gc.control_owner || gc.owner || '';
+        const appr  = gc.approvals_required || gc.approvals || '';
+        lines.push(`| ${id} | ${ctrl} | ${risk} | ${fw} | ${owner} | ${appr} |`);
+      }
+      lines.push('');
+    }
+  }
+
+  // ── 10. Entity Relationships ──────────────────────────────────────────────────
+  if (sections.includes('relationships') && data.relationships) {
+    lines.push('---'); lines.push('');
+    lines.push('## 10. Entity Relationships'); lines.push('');
+    const { use_cases = [], project_tools = [] } = data.relationships;
+    if (!use_cases.length && !project_tools.length) {
+      lines.push('*No relationship data available.*'); lines.push('');
+    } else {
+      for (const uc of use_cases) {
+        lines.push(`- **Use Case:** ${uc.title}${uc.readiness ? ` *(${uc.readiness})*` : ''}`);
+        // Phase 3: agents listed per UC (M:N join), not per workflow
+        for (const ag of (uc.agents || [])) {
+          const supLabel = ag.supervision_model ? ` — ${ag.supervision_model}` : '';
+          lines.push(`  - 🤖 Agent: ${ag.name}${ag.slug ? ` (${ag.slug})` : ''}${supLabel}`);
+        }
+        for (const wf of (uc.workflows || [])) {
+          const wfLabel = wf.slug ? `${wf.name} (${wf.slug})` : wf.name;
+          lines.push(`  - **Workflow:** ${wfLabel} *(${wf.step_count} step${wf.step_count !== 1 ? 's' : ''})*`);
+          // Phase 2: participants
+          if (wf.participants && wf.participants.length) {
+            const pNames = wf.participants.map(p => p.swimlane_display_name).filter(Boolean).join(', ');
+            if (pNames) lines.push(`    - 👥 Participants: ${pNames}`);
+          }
+          for (const hitl of (wf.hitl_roles || []))
+            lines.push(`    - 👤 HITL: ${hitl.owner_role} — ${hitl.gate_type}${hitl.sla ? ` (SLA: ${hitl.sla})` : ''}`);
+        }
+      }
+      lines.push('');
+      if (project_tools.length) {
+        lines.push('**Project Tools:**');
+        for (const t of project_tools) {
+          const devBadge = t.dev_status === 'To be built' ? ' 🔨' : '';
+          lines.push(`- \`${t.name}\`${t.slug ? ` (${t.slug})` : ''}${t.execution_mode ? ` — ${t.execution_mode}` : ''}${devBadge}`);
+        }
+        lines.push('');
+      }
+    }
+  }
+
+  // ── 11. Cost Projections ──────────────────────────────────────────────────────
+  if (sections.includes('cost_summary') && data.cost_summary) {
+    lines.push('---'); lines.push('');
+    lines.push('## 11. Cost Projections (Now Assist)'); lines.push('');
+    const { assumption, use_cases: costUCs = [] } = data.cost_summary;
+    if (assumption) {
+      lines.push(`> **Cost model:** ServiceNow Now Assist · **$${assumption.cost_per_assist}/assist** · ${assumption.planning_period} planning period`);
+      lines.push('');
+    }
+    const hasAnyBindings = costUCs.some(u => u.projected_per_period > 0);
+    if (!hasAnyBindings) {
+      lines.push('*No cost bindings defined. Use the **Estimate Costs** button on a Use Case in Design Review to generate AI-powered projections.*');
+      lines.push('');
+    } else {
+      const periodsPerYear = assumption?.periods_per_year || 12;
+      lines.push('| Use Case | Slug | Projected/Period | Projected/Year | Baseline/Year | Est. ROI |');
+      lines.push('|---|---|---|---|---|---|');
+      for (const uc of costUCs) {
+        const perPeriod = uc.projected_per_period || 0;
+        const perYear   = perPeriod * periodsPerYear;
+        const baseline  = uc.baseline_cost_annual_usd || 0;
+        const roi       = (perYear > 0 && baseline > 0) ? `${(baseline / perYear).toFixed(1)}x` : '—';
+        lines.push(`| ${mdCell(uc.title)} | ${uc.slug || ''} | ${fmtCost(perPeriod)} | ${fmtCost(perYear)} | ${baseline > 0 ? fmtCost(baseline) : '—'} | ${roi} |`);
+      }
+      lines.push('');
+      lines.push('*Cost estimates are derived from AI-generated step skill bindings. Verify against actual usage post-deployment.*');
+      lines.push('');
+    }
+  }
+
+  // ── Footer ─────────────────────────────────────────────────────────────────
+  lines.push('---'); lines.push('');
+  lines.push(`*Generated by Agentic SDLC Workbench — ${ts}*`); lines.push('');
+
+  return lines.join('\n');
+}
+
+// ──────────────────────────────────────────────
+// AGENT INGESTION — process / extractions / clarifications / promote
+// ──────────────────────────────────────────────
+
+// Trigger agent processing for one document
+app.post('/api/v1/ingest-documents/:id/process', async (req, res) => {
+  try {
+    const doc = db.prepare('SELECT * FROM asdlc_ingest_document WHERE ingest_id = ?').get(req.params.id);
+    if (!doc) return res.status(404).json({ error: 'Ingest document not found' });
+
+    // If a file was uploaded and raw_text hasn't been extracted yet, do it now
+    if (doc.file_path && !doc.raw_text) {
+      console.log(`[process] Extracting text from file: ${doc.file_path}`);
+      try {
+        const { extractText } = require('./agent/document-reader');
+        const rawText = await extractText(doc.file_path, doc.file_type);
+        db.prepare("UPDATE asdlc_ingest_document SET raw_text = ?, updated_at = datetime('now') WHERE ingest_id = ?")
+          .run(rawText, req.params.id);
+        console.log(`[process] Text extracted — ${rawText.length} chars stored for ingest ${req.params.id}`);
+      } catch (extractErr) {
+        console.error('[process] Text extraction failed:', extractErr.message);
+        // Mark as failed so the user sees the error rather than silently running stub on empty text
+        db.prepare("UPDATE asdlc_ingest_document SET ingest_status = 'failed', processing_notes = ?, updated_at = datetime('now') WHERE ingest_id = ?")
+          .run(`Text extraction failed: ${extractErr.message}`, req.params.id);
+        return res.status(422).json({ error: `Text extraction failed: ${extractErr.message}` });
+      }
+    }
+
+    const { processDocument } = require('./agent/processor');
+    const result = await processDocument(req.params.id);
+    res.json(result);
+  } catch (err) {
+    console.error('[process]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get staged extractions
+app.get('/api/v1/ingest-documents/:id/extractions', (req, res) => {
+  const rows = db.prepare(
+    'SELECT * FROM asdlc_ingest_extraction WHERE ingest_id=? ORDER BY round, entity_type, created_at'
+  ).all(req.params.id);
+  res.json(rows.map(r => ({ ...r, entity_data: parseJson(r.entity_data) })));
+});
+
+// Update a single extraction (e.g. reject it)
+app.put('/api/v1/ingest-documents/:id/extractions/:eid', (req, res) => {
+  const { status } = req.body;
+  if (!status) return res.status(400).json({ error: 'status is required' });
+  db.prepare("UPDATE asdlc_ingest_extraction SET status=? WHERE extraction_id=? AND ingest_id=?")
+    .run(status, req.params.eid, req.params.id);
+  const row = db.prepare('SELECT * FROM asdlc_ingest_extraction WHERE extraction_id=?').get(req.params.eid);
+  res.json({ ...row, entity_data: parseJson(row.entity_data) });
+});
+
+// Get clarification questions (all rounds)
+app.get('/api/v1/ingest-documents/:id/clarifications', (req, res) => {
+  const rows = db.prepare(
+    'SELECT * FROM asdlc_ingest_clarification WHERE ingest_id=? ORDER BY round, created_at'
+  ).all(req.params.id);
+  res.json(rows);
+});
+
+// Submit answers for the current open round, then re-run extraction
+app.post('/api/v1/ingest-documents/:id/clarifications/answer', async (req, res) => {
+  const uid = userId(req);
+  const { answers } = req.body; // { clarification_id: "answer text", ... }
+  if (!answers || typeof answers !== 'object') {
+    return res.status(400).json({ error: 'answers object is required' });
+  }
+  for (const [clarId, answerText] of Object.entries(answers)) {
+    if (answerText && String(answerText).trim()) {
+      db.prepare(`
+        UPDATE asdlc_ingest_clarification
+        SET answer_text=?, answered_at=datetime('now'), answered_by=?
+        WHERE clarification_id=? AND ingest_id=?
+      `).run(String(answerText).trim(), uid, clarId, req.params.id);
+    }
+  }
+  try {
+    const { processDocument } = require('./agent/processor');
+    const result = await processDocument(req.params.id);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Promote staged extractions → Change Packets
+app.post('/api/v1/ingest-documents/:id/promote', (req, res) => {
+  const uid = userId(req);
+  const doc = db.prepare('SELECT * FROM asdlc_ingest_document WHERE ingest_id=?').get(req.params.id);
+  if (!doc) return res.status(404).json({ error: 'Ingest document not found' });
+
+  const extractions = db.prepare(
+    "SELECT * FROM asdlc_ingest_extraction WHERE ingest_id=? AND status='staged' ORDER BY entity_type"
+  ).all(req.params.id).map(r => ({ ...r, entity_data: parseJson(r.entity_data) }));
+
+  if (extractions.length === 0) return res.status(400).json({ error: 'No staged extractions to promote' });
+
+  // Feature #9: ONE CP per ingest iteration listing all affected entities,
+  // regardless of entity type. Each extraction becomes a change_packet_item.
+  const cpId    = generateId();
+  const cpCode  = `CP-${now().replace(/\D/g, '').slice(4, 10)}`;
+  const summary = `Ingest promotion — ${extractions.length} entities from "${doc.document_title}"`;
+
+  db.prepare(`
+    INSERT INTO asdlc_change_packet
+      (change_packet_id, project_id, packet_code, status, summary,
+       source_timestamp, conflict_classification, risk_level, recommended_action,
+       visibility_scope, created_by, created_at, updated_at)
+    VALUES (?,?,?,'pending_review',?,datetime('now'),'net_new','low','review','PROJECT',?,datetime('now'),datetime('now'))
+  `).run(cpId, doc.project_id, cpCode, summary, uid);
+
+  const insertItem = db.prepare(`
+    INSERT INTO asdlc_change_packet_item
+      (change_packet_item_id, change_packet_id, entity_type, entity_id,
+       field_path, new_value, rationale, created_at, updated_at)
+    VALUES (?,?,?,?,?,?,?,datetime('now'),datetime('now'))
+  `);
+  const markPromoted = db.prepare("UPDATE asdlc_ingest_extraction SET status='promoted' WHERE extraction_id=?");
+
+  // Per-type counts purely for the response (UX context)
+  const byType = {};
+  for (const ex of extractions) {
+    insertItem.run(
+      generateId(), cpId, ex.entity_type, ex.extraction_id,
+      `${ex.entity_type}.new_record`,
+      JSON.stringify(ex.entity_data),
+      `Extracted from "${doc.document_title}" (confidence ${Math.round(ex.confidence * 100)}%)`
+    );
+    markPromoted.run(ex.extraction_id);
+    byType[ex.entity_type] = (byType[ex.entity_type] || 0) + 1;
+  }
+
+  auditLog('asdlc_change_packet', cpId, 'INSERT', null,
+    { packet_code: cpCode, source: 'agent_ingest', ingest_id: req.params.id, by_type: byType }, uid);
+
+  db.prepare(`
+    UPDATE asdlc_ingest_document
+    SET ingest_status='promoted', change_packets_generated=1, updated_at=datetime('now')
+    WHERE ingest_id=?
+  `).run(req.params.id);
+
+  res.json({
+    change_packets: [{
+      change_packet_id: cpId,
+      packet_code: cpCode,
+      summary,
+      item_count: extractions.length,
+      by_type: byType,
+    }],
+  });
+});
+
+/** Extract a human-readable label from entity_data based on entity_type */
+function getEntityLabel(type, data) {
+  if (!data) return type;
+  return data.use_case_name || data.workflow_name || data.step_name ||
+         data.rule_name || data.want || data.segment_name ||
+         data.source_name || data.agent_name || data.gate_name ||
+         data.control_name || data.story_title || type;
+}
+
+// ──────────────────────────────────────────────
+// INGEST DOCUMENTS
+// ──────────────────────────────────────────────
+app.get('/api/v1/ingest-documents', (req, res) => {
+  const { project_id, status } = req.query;
+  let sql = `
+    SELECT d.*, u.display_name AS uploaded_by_name, p.project_name
+    FROM asdlc_ingest_document d
+    LEFT JOIN asdlc_user u ON d.uploaded_by = u.user_id
+    LEFT JOIN asdlc_project p ON d.project_id = p.project_id
+    WHERE 1=1
+  `;
+  const params = [];
+  if (project_id) { sql += ' AND d.project_id = ?'; params.push(project_id); }
+  if (status)     { sql += ' AND d.ingest_status = ?'; params.push(status); }
+  sql += ' ORDER BY d.uploaded_at DESC';
+  const rows = db.prepare(sql).all(...params);
+  res.json(rows);
+});
+
+app.get('/api/v1/ingest-documents/:id', (req, res) => {
+  const row = db.prepare(`
+    SELECT d.*, u.display_name AS uploaded_by_name, p.project_name
+    FROM asdlc_ingest_document d
+    LEFT JOIN asdlc_user u ON d.uploaded_by = u.user_id
+    LEFT JOIN asdlc_project p ON d.project_id = p.project_id
+    WHERE d.ingest_id = ?
+  `).get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  res.json(row);
+});
+
+/**
+ * GET /api/v1/ingest-documents/:id/content
+ * Returns the raw text of an ingested document for the source viewer.
+ * Reads from raw_text column if populated; otherwise reads from file_path and caches it.
+ */
+app.get('/api/v1/ingest-documents/:id/content', (req, res) => {
+  const doc = db.prepare('SELECT * FROM asdlc_ingest_document WHERE ingest_id = ?').get(req.params.id);
+  if (!doc) return res.status(404).json({ error: 'Not found' });
+
+  // Use cached raw_text if available
+  if (doc.raw_text) {
+    return res.json({
+      ingest_id:      doc.ingest_id,
+      document_title: doc.document_title || doc.file_name,
+      file_name:      doc.file_name,
+      file_type:      doc.file_type,
+      content:        doc.raw_text,
+    });
+  }
+
+  // Fall back to reading file_path
+  if (!doc.file_path) {
+    return res.status(404).json({ error: 'No content available — document was not stored with a file path' });
+  }
+
+  let content;
+  try {
+    content = fs.readFileSync(doc.file_path, 'utf8');
+  } catch (e) {
+    return res.status(404).json({ error: `File not readable: ${e.message}` });
+  }
+
+  // Cache in raw_text for subsequent requests
+  try {
+    db.prepare('UPDATE asdlc_ingest_document SET raw_text = ? WHERE ingest_id = ?')
+      .run(content, doc.ingest_id);
+  } catch { /* non-fatal — serve from file each time if caching fails */ }
+
+  res.json({
+    ingest_id:      doc.ingest_id,
+    document_title: doc.document_title || doc.file_name,
+    file_name:      doc.file_name,
+    file_type:      doc.file_type,
+    content,
+  });
+});
+
+// POST supports both JSON (metadata only) and multipart/form-data (with file).
+// The frontend sends multipart when a file is attached.
+app.post('/api/v1/ingest-documents', upload.single('file'), (req, res) => {
+  const uid = userId(req);
+
+  // Field values come from req.body regardless of content-type
+  const project_id     = req.body.project_id;
+  const document_title = req.body.document_title;
+  const file_type      = req.body.file_type || (req.file ? path.extname(req.file.originalname).slice(1).toLowerCase() : null);
+  const file_name      = req.body.file_name  || (req.file ? req.file.originalname : null);
+  const document_type  = req.body.document_type  || 'other';
+  const description    = req.body.description    || null;
+  const file_path      = req.file ? req.file.path : null;
+  // raw_text may be supplied directly (requirements update panel — no file attachment)
+  const raw_text       = req.body.raw_text || null;
+
+  if (!project_id || !document_title) {
+    if (req.file) require('fs').unlinkSync(req.file.path);   // clean up orphan
+    return res.status(400).json({ error: 'project_id and document_title are required' });
+  }
+
+  const id = generateId();
+  db.prepare(`
+    INSERT INTO asdlc_ingest_document
+      (ingest_id, project_id, document_title, file_name, file_type, document_type,
+       description, ingest_status, uploaded_by, file_path, raw_text,
+       uploaded_at, created_at, updated_at)
+    VALUES (?,?,?,?,?,?,?,'pending',?,?,?,datetime('now'),datetime('now'),datetime('now'))
+  `).run(id, project_id, document_title, file_name, file_type,
+         document_type, description, uid, file_path, raw_text);
+
+  auditLog('asdlc_ingest_document', id, 'INSERT', null,
+    { project_id, document_title, file_name, document_type }, uid);
+
+  const created = db.prepare(`
+    SELECT d.*, u.display_name AS uploaded_by_name, p.project_name
+    FROM asdlc_ingest_document d
+    LEFT JOIN asdlc_user u ON d.uploaded_by = u.user_id
+    LEFT JOIN asdlc_project p ON d.project_id = p.project_id
+    WHERE d.ingest_id = ?
+  `).get(id);
+  res.status(201).json(created);
+});
+
+app.put('/api/v1/ingest-documents/:id', (req, res) => {
+  const uid = userId(req);
+  const row = db.prepare('SELECT * FROM asdlc_ingest_document WHERE ingest_id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  const { ingest_status, processing_notes, change_packets_generated } = req.body;
+  const updates = {};
+  if (ingest_status !== undefined) updates.ingest_status = ingest_status;
+  if (processing_notes !== undefined) updates.processing_notes = processing_notes;
+  if (change_packets_generated !== undefined) updates.change_packets_generated = change_packets_generated;
+  if (Object.keys(updates).length === 0) return res.json(row);
+  const sets = Object.keys(updates).map(k => `${k} = ?`).join(', ');
+  db.prepare(`UPDATE asdlc_ingest_document SET ${sets}, updated_at = datetime('now') WHERE ingest_id = ?`)
+    .run(...Object.values(updates), req.params.id);
+  auditLog('asdlc_ingest_document', req.params.id, 'UPDATE', row, updates, uid);
+  res.json(db.prepare('SELECT * FROM asdlc_ingest_document WHERE ingest_id = ?').get(req.params.id));
+});
+
+// ──────────────────────────────────────────────
+// REQUIREMENTS (Functional & Non-Functional)
+// ──────────────────────────────────────────────
+
+const FR_JSON_FIELDS  = ['actors', 'acceptance_criteria', 'dependencies'];
+const NFR_JSON_FIELDS = ['dependencies'];
+const REQ_STATUS_VALS = ['draft', 'approved', 'implemented', 'verified', 'deleted'];
+const REQ_PRIORITY_VALS = ['must_have', 'should_have', 'could_have', 'wont_have'];
+
+function parseReqRow(row) {
+  if (!row) return row;
+  const out = { ...row, is_orphan: row.use_case_id == null };
+  const jsonFields = row.fr_id ? FR_JSON_FIELDS : NFR_JSON_FIELDS;
+  for (const f of jsonFields) {
+    if (out[f] && typeof out[f] === 'string') {
+      try { out[f] = JSON.parse(out[f]); } catch { /* leave as string */ }
+    }
+  }
+  return out;
+}
+
+function insertReqChangeLog(reqType, reqId, projectId, action, note, changedBy) {
+  const logId = generateId();
+  db.prepare(`INSERT INTO asdlc_requirement_change_log
+    (log_id, req_type, req_id, project_id, action, note, changed_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?)`)
+    .run(logId, reqType, reqId, projectId, action, note || '', changedBy || 'system');
+}
+
+// ── Functional Requirements ──────────────────────────────────────
+
+app.get('/api/v1/projects/:id/functional-reqs', (req, res) => {
+  const includeDeleted = req.query.include_deleted === '1';
+  const whereClause = includeDeleted
+    ? 'WHERE fr.project_id = ?'
+    : "WHERE fr.project_id = ? AND fr.status != 'deleted'";
+  const rows = db.prepare(`
+    SELECT fr.*, uc.slug AS use_case_slug, uc.title AS use_case_title
+    FROM asdlc_functional_req fr
+    LEFT JOIN asdlc_use_case uc ON fr.use_case_id = uc.use_case_id
+    ${whereClause}
+    ORDER BY fr.slug ASC, fr.created_at ASC
+  `).all(req.params.id);
+  res.json(rows.map(parseReqRow));
+});
+
+app.get('/api/v1/projects/:id/functional-reqs/:frId', (req, res) => {
+  const row = db.prepare(`
+    SELECT fr.*, uc.slug AS use_case_slug, uc.title AS use_case_title
+    FROM asdlc_functional_req fr
+    LEFT JOIN asdlc_use_case uc ON fr.use_case_id = uc.use_case_id
+    WHERE fr.fr_id = ? AND fr.project_id = ?
+  `).get(req.params.frId, req.params.id);
+  if (!row) return res.status(404).json({ error: 'Functional requirement not found' });
+  const changeLog = db.prepare(
+    "SELECT * FROM asdlc_requirement_change_log WHERE req_type='functional' AND req_id=? ORDER BY created_at ASC"
+  ).all(req.params.frId);
+  res.json({ ...parseReqRow(row), change_log: changeLog });
+});
+
+function createFunctionalReq(projectId, body, uid) {
+  const { title, description, actors, preconditions, postconditions, priority,
+          acceptance_criteria, dependencies, source, status, use_case_id, ingest_id } = body;
+  if (!title) throw new Error('title is required');
+  if (priority && !REQ_PRIORITY_VALS.includes(priority))
+    throw new Error(`priority must be one of: ${REQ_PRIORITY_VALS.join(', ')}`);
+  if (status && !REQ_STATUS_VALS.includes(status))
+    throw new Error(`status must be one of: ${REQ_STATUS_VALS.join(', ')}`);
+  const id   = generateId();
+  const slug = nextSlug('asdlc_functional_req', 'FR', projectId);
+  db.prepare(`INSERT INTO asdlc_functional_req
+    (fr_id, project_id, use_case_id, ingest_id, slug, title, description, actors,
+     preconditions, postconditions, priority, acceptance_criteria, dependencies,
+     source, status, created_by, updated_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(
+      id, projectId, use_case_id || null, ingest_id || null, slug,
+      title, description || '', JSON.stringify(actors || []),
+      preconditions || '', postconditions || '',
+      priority || 'must_have',
+      JSON.stringify(acceptance_criteria || []),
+      JSON.stringify(dependencies || []),
+      source || '', status || 'draft', uid, uid
+    );
+  const created = db.prepare('SELECT * FROM asdlc_functional_req WHERE fr_id = ?').get(id);
+  auditLog('asdlc_functional_req', id, 'INSERT', null, created, uid);
+  insertReqChangeLog('functional', id, projectId, 'Added', `Created: ${title}`, uid);
+  return parseReqRow(created);
+}
+
+app.post('/api/v1/projects/:id/functional-reqs', (req, res) => {
+  const uid = userId(req);
+  try {
+    const created = createFunctionalReq(req.params.id, req.body, uid);
+    res.status(201).json(created);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/v1/projects/:id/functional-reqs/bulk', (req, res) => {
+  const uid = userId(req);
+  const items = Array.isArray(req.body) ? req.body : req.body.items;
+  if (!Array.isArray(items) || items.length === 0)
+    return res.status(400).json({ error: 'Body must be an array or { items: [...] }' });
+  const results = [], errors = [];
+  for (let i = 0; i < items.length; i++) {
+    try {
+      results.push(createFunctionalReq(req.params.id, items[i], uid));
+    } catch (err) {
+      errors.push({ index: i, error: err.message });
+    }
+  }
+  res.status(errors.length && results.length === 0 ? 400 : 207)
+     .json({ created: results, errors });
+});
+
+app.put('/api/v1/projects/:id/functional-reqs/:frId', (req, res) => {
+  const uid = userId(req);
+  const existing = db.prepare('SELECT * FROM asdlc_functional_req WHERE fr_id = ? AND project_id = ?')
+    .get(req.params.frId, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Functional requirement not found' });
+  if (existing.status === 'deleted')
+    return res.status(400).json({ error: 'Cannot modify a deleted requirement' });
+
+  const ALLOWED = ['title','description','actors','preconditions','postconditions',
+                   'priority','acceptance_criteria','dependencies','source','status','use_case_id','ingest_id'];
+  const updates = {};
+  for (const f of ALLOWED) { if (req.body[f] !== undefined) updates[f] = req.body[f]; }
+
+  if (updates.priority && !REQ_PRIORITY_VALS.includes(updates.priority))
+    return res.status(400).json({ error: `priority must be one of: ${REQ_PRIORITY_VALS.join(', ')}` });
+  if (updates.status && !REQ_STATUS_VALS.includes(updates.status))
+    return res.status(400).json({ error: `status must be one of: ${REQ_STATUS_VALS.join(', ')}` });
+
+  for (const f of FR_JSON_FIELDS) {
+    if (updates[f] !== undefined && typeof updates[f] !== 'string')
+      updates[f] = JSON.stringify(updates[f]);
+  }
+
+  const isDeleting = updates.status === 'deleted' && existing.status !== 'deleted';
+  if (isDeleting) updates.deleted_at = "datetime('now')";
+
+  if (Object.keys(updates).length === 0) return res.json(parseReqRow(existing));
+
+  // Build SET clause — deleted_at needs to call datetime('now') as SQL, not a bind param
+  const regularUpdates = { ...updates };
+  delete regularUpdates.deleted_at;
+  const setClauses = Object.keys(regularUpdates).map(f => `${f} = ?`).join(', ');
+  const deletedAtClause = isDeleting ? ", deleted_at = datetime('now')" : '';
+  db.prepare(`UPDATE asdlc_functional_req SET ${setClauses}${deletedAtClause},
+    updated_at = datetime('now'), updated_by = ?, version = version + 1
+    WHERE fr_id = ?`)
+    .run(...Object.values(regularUpdates), uid, req.params.frId);
+
+  const after = db.prepare('SELECT * FROM asdlc_functional_req WHERE fr_id = ?').get(req.params.frId);
+  auditLog('asdlc_functional_req', req.params.frId, 'UPDATE', existing, after, uid);
+
+  const logAction = isDeleting ? 'Deleted' : 'Modified';
+  const logNote   = req.body.change_note || (isDeleting ? `Marked deleted` : `Updated fields: ${Object.keys(regularUpdates).join(', ')}`);
+  insertReqChangeLog('functional', req.params.frId, req.params.id, logAction, logNote, uid);
+
+  const changeLog = db.prepare(
+    "SELECT * FROM asdlc_requirement_change_log WHERE req_type='functional' AND req_id=? ORDER BY created_at ASC"
+  ).all(req.params.frId);
+  res.json({ ...parseReqRow(after), change_log: changeLog });
+});
+
+// ── Non-Functional Requirements ──────────────────────────────────
+
+app.get('/api/v1/projects/:id/nonfunctional-reqs', (req, res) => {
+  const includeDeleted = req.query.include_deleted === '1';
+  const whereClause = includeDeleted
+    ? 'WHERE nfr.project_id = ?'
+    : "WHERE nfr.project_id = ? AND nfr.status != 'deleted'";
+  const rows = db.prepare(`
+    SELECT nfr.*, uc.slug AS use_case_slug, uc.title AS use_case_title
+    FROM asdlc_nonfunctional_req nfr
+    LEFT JOIN asdlc_use_case uc ON nfr.use_case_id = uc.use_case_id
+    ${whereClause}
+    ORDER BY nfr.slug ASC, nfr.created_at ASC
+  `).all(req.params.id);
+  res.json(rows.map(parseReqRow));
+});
+
+app.get('/api/v1/projects/:id/nonfunctional-reqs/:nfrId', (req, res) => {
+  const row = db.prepare(`
+    SELECT nfr.*, uc.slug AS use_case_slug, uc.title AS use_case_title
+    FROM asdlc_nonfunctional_req nfr
+    LEFT JOIN asdlc_use_case uc ON nfr.use_case_id = uc.use_case_id
+    WHERE nfr.nfr_id = ? AND nfr.project_id = ?
+  `).get(req.params.nfrId, req.params.id);
+  if (!row) return res.status(404).json({ error: 'Non-functional requirement not found' });
+  const changeLog = db.prepare(
+    "SELECT * FROM asdlc_requirement_change_log WHERE req_type='nonfunctional' AND req_id=? ORDER BY created_at ASC"
+  ).all(req.params.nfrId);
+  res.json({ ...parseReqRow(row), change_log: changeLog });
+});
+
+function createNonfunctionalReq(projectId, body, uid) {
+  const { title, category, description, measurable_target, verification_method,
+          priority, dependencies, source, status, use_case_id, ingest_id } = body;
+  if (!title) throw new Error('title is required');
+  if (priority && !REQ_PRIORITY_VALS.includes(priority))
+    throw new Error(`priority must be one of: ${REQ_PRIORITY_VALS.join(', ')}`);
+  if (status && !REQ_STATUS_VALS.includes(status))
+    throw new Error(`status must be one of: ${REQ_STATUS_VALS.join(', ')}`);
+  const id   = generateId();
+  const slug = nextSlug('asdlc_nonfunctional_req', 'NFR', projectId);
+  db.prepare(`INSERT INTO asdlc_nonfunctional_req
+    (nfr_id, project_id, use_case_id, ingest_id, slug, title, category, description,
+     measurable_target, verification_method, priority, dependencies,
+     source, status, created_by, updated_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(
+      id, projectId, use_case_id || null, ingest_id || null, slug,
+      title, category || '', description || '',
+      measurable_target || '', verification_method || '',
+      priority || 'must_have',
+      JSON.stringify(dependencies || []),
+      source || '', status || 'draft', uid, uid
+    );
+  const created = db.prepare('SELECT * FROM asdlc_nonfunctional_req WHERE nfr_id = ?').get(id);
+  auditLog('asdlc_nonfunctional_req', id, 'INSERT', null, created, uid);
+  insertReqChangeLog('nonfunctional', id, projectId, 'Added', `Created: ${title}`, uid);
+  return parseReqRow(created);
+}
+
+app.post('/api/v1/projects/:id/nonfunctional-reqs', (req, res) => {
+  const uid = userId(req);
+  try {
+    const created = createNonfunctionalReq(req.params.id, req.body, uid);
+    res.status(201).json(created);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/v1/projects/:id/nonfunctional-reqs/bulk', (req, res) => {
+  const uid = userId(req);
+  const items = Array.isArray(req.body) ? req.body : req.body.items;
+  if (!Array.isArray(items) || items.length === 0)
+    return res.status(400).json({ error: 'Body must be an array or { items: [...] }' });
+  const results = [], errors = [];
+  for (let i = 0; i < items.length; i++) {
+    try {
+      results.push(createNonfunctionalReq(req.params.id, items[i], uid));
+    } catch (err) {
+      errors.push({ index: i, error: err.message });
+    }
+  }
+  res.status(errors.length && results.length === 0 ? 400 : 207)
+     .json({ created: results, errors });
+});
+
+app.put('/api/v1/projects/:id/nonfunctional-reqs/:nfrId', (req, res) => {
+  const uid = userId(req);
+  const existing = db.prepare('SELECT * FROM asdlc_nonfunctional_req WHERE nfr_id = ? AND project_id = ?')
+    .get(req.params.nfrId, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Non-functional requirement not found' });
+  if (existing.status === 'deleted')
+    return res.status(400).json({ error: 'Cannot modify a deleted requirement' });
+
+  const ALLOWED = ['title','category','description','measurable_target','verification_method',
+                   'priority','dependencies','source','status','use_case_id','ingest_id'];
+  const updates = {};
+  for (const f of ALLOWED) { if (req.body[f] !== undefined) updates[f] = req.body[f]; }
+
+  if (updates.priority && !REQ_PRIORITY_VALS.includes(updates.priority))
+    return res.status(400).json({ error: `priority must be one of: ${REQ_PRIORITY_VALS.join(', ')}` });
+  if (updates.status && !REQ_STATUS_VALS.includes(updates.status))
+    return res.status(400).json({ error: `status must be one of: ${REQ_STATUS_VALS.join(', ')}` });
+
+  for (const f of NFR_JSON_FIELDS) {
+    if (updates[f] !== undefined && typeof updates[f] !== 'string')
+      updates[f] = JSON.stringify(updates[f]);
+  }
+
+  const isDeleting = updates.status === 'deleted' && existing.status !== 'deleted';
+
+  if (Object.keys(updates).length === 0) return res.json(parseReqRow(existing));
+
+  const regularUpdates = { ...updates };
+  delete regularUpdates.deleted_at;
+  const setClauses = Object.keys(regularUpdates).map(f => `${f} = ?`).join(', ');
+  const deletedAtClause = isDeleting ? ", deleted_at = datetime('now')" : '';
+  db.prepare(`UPDATE asdlc_nonfunctional_req SET ${setClauses}${deletedAtClause},
+    updated_at = datetime('now'), updated_by = ?, version = version + 1
+    WHERE nfr_id = ?`)
+    .run(...Object.values(regularUpdates), uid, req.params.nfrId);
+
+  const after = db.prepare('SELECT * FROM asdlc_nonfunctional_req WHERE nfr_id = ?').get(req.params.nfrId);
+  auditLog('asdlc_nonfunctional_req', req.params.nfrId, 'UPDATE', existing, after, uid);
+
+  const logAction = isDeleting ? 'Deleted' : 'Modified';
+  const logNote   = req.body.change_note || (isDeleting ? `Marked deleted` : `Updated fields: ${Object.keys(regularUpdates).join(', ')}`);
+  insertReqChangeLog('nonfunctional', req.params.nfrId, req.params.id, logAction, logNote, uid);
+
+  const changeLog = db.prepare(
+    "SELECT * FROM asdlc_requirement_change_log WHERE req_type='nonfunctional' AND req_id=? ORDER BY created_at ASC"
+  ).all(req.params.nfrId);
+  res.json({ ...parseReqRow(after), change_log: changeLog });
+});
+
+// ── Requirements design-report ───────────────────────────────────
+
+app.get('/api/v1/projects/:id/design-report/requirements', (req, res) => {
+  const project = db.prepare('SELECT p.*, c.client_name FROM asdlc_project p LEFT JOIN asdlc_client c ON p.client_id = c.client_id WHERE p.project_id = ?').get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  const frs = db.prepare(`
+    SELECT fr.*, uc.slug AS use_case_slug, uc.title AS use_case_title
+    FROM asdlc_functional_req fr
+    LEFT JOIN asdlc_use_case uc ON fr.use_case_id = uc.use_case_id
+    WHERE fr.project_id = ? AND fr.status != 'deleted'
+    ORDER BY fr.slug ASC
+  `).all(req.params.id).map(parseReqRow);
+
+  const nfrs = db.prepare(`
+    SELECT nfr.*, uc.slug AS use_case_slug, uc.title AS use_case_title
+    FROM asdlc_nonfunctional_req nfr
+    LEFT JOIN asdlc_use_case uc ON nfr.use_case_id = uc.use_case_id
+    WHERE nfr.project_id = ? AND nfr.status != 'deleted'
+    ORDER BY nfr.slug ASC
+  `).all(req.params.id).map(parseReqRow);
+
+  const ucRows = db.prepare("SELECT use_case_id, slug, title FROM asdlc_use_case WHERE project_id = ? AND lifecycle_status != 'deleted'").all(req.params.id);
+  const use_case_map = {};
+  ucRows.forEach(uc => { use_case_map[uc.use_case_id] = { slug: uc.slug, title: uc.title }; });
+
+  res.json({
+    project,
+    generated_at: new Date().toISOString(),
+    functional_reqs: frs,
+    nonfunctional_reqs: nfrs,
+    use_case_map,
+  });
+});
+
+// ──────────────────────────────────────────────
+// 404 fallback for API
+// ──────────────────────────────────────────────
+app.use('/api/*path', (req, res) => {
+  res.status(404).json({ error: `No API route: ${req.method} ${req.path}` });
+});
+
+// ──────────────────────────────────────────────
+// SPA fallback — serve index.html for all non-API routes
+// ──────────────────────────────────────────────
+app.get('*path', (req, res) => {
+  const idx = path.join(__dirname, '..', 'frontend', 'index.html');
+  res.sendFile(idx, (err) => {
+    if (err) res.status(404).send('Frontend not found');
+  });
+});
+
+// ──────────────────────────────────────────────
+// Start
+// ──────────────────────────────────────────────
+app.listen(PORT, () => {
+  console.log(`[server] Agentic SDLC Workbench API running on http://localhost:${PORT}`);
+});
+
+module.exports = app;

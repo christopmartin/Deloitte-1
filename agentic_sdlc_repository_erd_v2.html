@@ -1,0 +1,171 @@
+<style>
+#erd { padding: 1rem 0; }
+#erd svg { max-width: 100%; height: auto; }
+.legend { display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--color-text-secondary); margin-top:8px; padding:8px 0; }
+.legend span { display:inline-flex; align-items:center; gap:6px; }
+.legend i { display:inline-block; width:14px; height:14px; border-radius:3px; border:1px solid; }
+</style>
+<div id="erd"></div>
+<div class="legend">
+  <span><i style="background:#EEEDFE;border-color:#7F77DD"></i>Workspace & Access</span>
+  <span><i style="background:#E1F5EE;border-color:#1D9E75"></i>Design Content</span>
+  <span><i style="background:#FAEEDA;border-color:#BA7517"></i>Field Truth & Evidence</span>
+  <span><i style="background:#FBEAF0;border-color:#D4537E"></i>Change & Validation</span>
+  <span><i style="background:#E6F1FB;border-color:#378ADD"></i>Baselines & Reporting</span>
+  <span><i style="background:#F1EFE8;border-color:#888780"></i>Agent Operations</span>
+</div>
+<script type="module">
+import mermaid from 'https://esm.sh/mermaid@11/dist/mermaid.esm.min.mjs';
+const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+await document.fonts.ready;
+mermaid.initialize({
+  startOnLoad: false,
+  theme: 'base',
+  fontFamily: '"Anthropic Sans", sans-serif',
+  themeVariables: {
+    darkMode: dark,
+    fontSize: '12px',
+    fontFamily: '"Anthropic Sans", sans-serif',
+    primaryColor: dark ? '#444441' : '#FFFFFF',
+    primaryTextColor: dark ? '#F1EFE8' : '#2C2C2A',
+    primaryBorderColor: dark ? '#9c9a92' : '#73726c',
+    lineColor: dark ? '#9c9a92' : '#73726c',
+    textColor: dark ? '#c2c0b6' : '#3d3d3a',
+    clusterBkg: 'transparent',
+    clusterBorder: dark ? '#5F5E5A' : '#888780',
+  },
+  flowchart: { htmlLabels: true, curve: 'basis', nodeSpacing: 18, rankSpacing: 38, padding: 12 }
+});
+const src = `flowchart TB
+  subgraph WS ["Workspace & Access"]
+    CLIENT[asdlc_client]
+    APP[asdlc_application]
+    APPMEM[asdlc_application_member]
+    APPAGT[asdlc_application_agent_setting]
+    CAT[asdlc_agent_catalog]
+    RS[asdlc_reuse_steward]
+  end
+
+  subgraph DC ["Design Content"]
+    UC[asdlc_use_case]
+    PS[asdlc_process_segment]
+    WF[asdlc_workflow]
+    WST[asdlc_workflow_step]
+    HITL[asdlc_hitl_gate]
+    AS[asdlc_agent_spec]
+    AT[asdlc_agent_tool]
+    TOOL[asdlc_tool]
+    GR[asdlc_guardrail]
+    DS[asdlc_data_source]
+    TS[asdlc_test_scenario]
+    CE[asdlc_cost_estimate]
+    GC[asdlc_governance_control]
+    US[asdlc_user_story]
+    KA[asdlc_knowledge_article]
+  end
+
+  subgraph FT ["Field Truth & Evidence"]
+    FV[asdlc_field_value]
+    FVA[asdlc_field_value_audit]
+    ES[asdlc_evidence_source]
+    SR[asdlc_source_reference]
+  end
+
+  subgraph CV ["Change & Validation"]
+    CP[asdlc_change_packet]
+    CPI[asdlc_change_packet_item]
+    VR[asdlc_validation_result]
+    EXC[asdlc_exception]
+  end
+
+  subgraph BR ["Baselines & Reporting"]
+    BSL[asdlc_baseline]
+    BLI[asdlc_baseline_item]
+    REP[asdlc_report_export]
+  end
+
+  subgraph AO ["Agent Operations"]
+    AR[asdlc_agent_run]
+    ATSK[asdlc_agent_task]
+    OE[asdlc_orchestration_event]
+  end
+
+  %% Workspace
+  CLIENT --- APP
+  APP --- APPMEM
+  APP --- APPAGT
+  CAT --- APPAGT
+  CAT -.- RS
+
+  %% Application -> Design
+  APP --- UC
+
+  %% Design content
+  UC --- PS
+  UC --- WF
+  WF --- WST
+  WF --- HITL
+  WST -.- HITL
+  UC --- AS
+  AS --- AT
+  AT --- TOOL
+  AS --- GR
+  AS --- DS
+  UC --- TS
+  UC --- CE
+  UC --- GC
+  UC --- US
+  UC --- KA
+
+  %% Reuse Steward optional links to reusable-pattern tables (dotted)
+  RS -.- TOOL
+  RS -.- GR
+  RS -.- DS
+  RS -.- TS
+  RS -.- GC
+  RS -.- KA
+
+  %% Field truth & evidence
+  FV --- SR
+  SR --- ES
+  FV --- FVA
+
+  %% Change & validation
+  FVA --- CP
+  CP --- CPI
+  CP --- ES
+  CP --- VR
+  CP --- APPMEM
+  EXC --- APPMEM
+
+  %% Baselines & reporting
+  APP --- BSL
+  BSL --- BLI
+  BLI --- FV
+  APP --- REP
+  REP --- BSL
+
+  %% Agent operations
+  APP --- AR
+  AR --- CAT
+  AR --- ATSK
+  AR --- OE
+
+  %% Layer styling
+  classDef ws fill:#EEEDFE,stroke:#7F77DD,color:#26215C
+  classDef dc fill:#E1F5EE,stroke:#1D9E75,color:#04342C
+  classDef ft fill:#FAEEDA,stroke:#BA7517,color:#412402
+  classDef cv fill:#FBEAF0,stroke:#D4537E,color:#4B1528
+  classDef br fill:#E6F1FB,stroke:#378ADD,color:#042C53
+  classDef ao fill:#F1EFE8,stroke:#888780,color:#2C2C2A
+
+  class CLIENT,APP,APPMEM,APPAGT,CAT,RS ws
+  class UC,PS,WF,WST,HITL,AS,AT,TOOL,GR,DS,TS,CE,GC,US,KA dc
+  class FV,FVA,ES,SR ft
+  class CP,CPI,VR,EXC cv
+  class BSL,BLI,REP br
+  class AR,ATSK,OE ao
+`;
+const { svg } = await mermaid.render('erd-svg', src);
+document.getElementById('erd').innerHTML = svg;
+</script>

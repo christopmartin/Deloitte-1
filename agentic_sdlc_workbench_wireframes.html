@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Agentic SDLC Workbench — Wireframes (v0.1)</title>
+<style>
+  /* --- Low-fi wireframe aesthetic: monochrome, gray boxes, placeholder feel --- */
+  :root {
+    --bg: #f5f5f4;
+    --panel: #ffffff;
+    --line: #c7c7c4;
+    --line-strong: #8b8b87;
+    --ink: #2a2a28;
+    --muted: #8b8b87;
+    --placeholder: #b8b8b4;
+    --accent: #3a5a78;       /* used very sparingly to flag v1 */
+    --warn: #b25c2a;
+    --ok: #4a6b3f;
+    --shadow: 0 1px 0 rgba(0,0,0,0.04);
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    font-family: var(--sans);
+    background: var(--bg);
+    color: var(--ink);
+    font-size: 13px;
+    line-height: 1.4;
+  }
+  /* --- Top bar --- */
+  .topbar {
+    height: 48px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+    display: flex; align-items: center;
+    padding: 0 16px;
+    gap: 16px;
+    position: sticky; top: 0; z-index: 10;
+  }
+  .topbar .logo {
+    width: 28px; height: 28px;
+    border: 1px dashed var(--line-strong);
+    display: grid; place-items: center;
+    color: var(--muted);
+    font-size: 11px;
+  }
+  .topbar h1 {
+    font-size: 14px; font-weight: 600; margin: 0;
+  }
+  .topbar .meta {
+    color: var(--muted); font-size: 11px; font-family: var(--mono);
+  }
+  .topbar .right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+  .topbar .right .pill { font-size: 11px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 12px; color: var(--muted); }
+  .topbar .right .avatar { width: 26px; height: 26px; border-radius: 50%; background: var(--line); }
+
+  /* --- App layout --- */
+  .app { display: grid; grid-template-columns: 240px 1fr; min-height: calc(100vh - 48px); }
+
+  /* --- Sidebar --- */
+  .sidebar {
+    background: var(--panel);
+    border-right: 1px solid var(--line);
+    padding: 16px 0;
+  }
+  .sidebar .section-label {
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    padding: 8px 16px 4px;
+  }
+  .sidebar nav button {
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    border-left: 3px solid transparent;
+    padding: 8px 16px;
+    font-family: inherit;
+    font-size: 13px;
+    color: var(--ink);
+    cursor: pointer;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .sidebar nav button:hover { background: var(--bg); }
+  .sidebar nav button.active {
+    background: var(--bg);
+    border-left-color: var(--accent);
+    font-weight: 600;
+  }
+  .sidebar nav button .v1-badge {
+    margin-left: auto;
+    font-size: 9px;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+  }
+  .sidebar .footnote {
+    font-size: 10px; color: var(--muted);
+    padding: 12px 16px;
+    border-top: 1px dashed var(--line);
+    margin-top: 16px;
+  }
+
+  /* --- Main content --- */
+  main { padding: 24px 32px; overflow: auto; }
+  .module { display: none; }
+  .module.active { display: block; }
+  .module-header {
+    display: flex; align-items: baseline; gap: 12px;
+    margin-bottom: 4px;
+  }
+  .module-header h2 {
+    font-size: 18px; font-weight: 600; margin: 0;
+  }
+  .module-header .v1-tag {
+    font-size: 10px; color: var(--accent);
+    border: 1px solid var(--accent); padding: 1px 6px; border-radius: 3px;
+    font-weight: 600; letter-spacing: 0.05em;
+  }
+  .module-purpose {
+    color: var(--muted); margin: 0 0 20px; font-size: 12px; max-width: 720px;
+  }
+
+  /* --- Wireframe primitives --- */
+  .wf-row { display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }
+  .wf-col { flex: 1; min-width: 0; }
+  .wf-panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 14px;
+    box-shadow: var(--shadow);
+  }
+  .wf-panel.dashed { border-style: dashed; border-color: var(--line-strong); background: transparent; }
+  .wf-panel-title {
+    font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--muted);
+    margin: 0 0 10px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .wf-panel-title .count { color: var(--ink); font-size: 11px; }
+  .wf-panel-title .actions { margin-left: auto; display: flex; gap: 6px; }
+
+  .wf-kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .wf-kpi {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 12px 14px;
+  }
+  .wf-kpi .label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .wf-kpi .value { font-size: 22px; font-weight: 600; margin-top: 4px; }
+  .wf-kpi .delta { font-size: 10px; color: var(--muted); margin-top: 2px; font-family: var(--mono); }
+
+  /* Generic placeholder lines (for text we won't write out) */
+  .ph { background: var(--bg); border-radius: 2px; height: 10px; margin: 6px 0; }
+  .ph.short { width: 40%; }
+  .ph.med   { width: 65%; }
+  .ph.long  { width: 90%; }
+
+  /* Buttons (wireframe-style) */
+  .btn {
+    font-family: inherit; font-size: 11px;
+    background: var(--panel);
+    border: 1px solid var(--line-strong);
+    padding: 4px 10px; border-radius: 3px;
+    cursor: pointer; color: var(--ink);
+  }
+  .btn.primary { background: var(--ink); color: white; border-color: var(--ink); }
+  .btn.danger  { color: var(--warn); border-color: var(--warn); }
+  .btn.ok      { color: var(--ok); border-color: var(--ok); }
+  .btn.icon    { padding: 3px 6px; }
+
+  /* Tables */
+  table.wf {
+    width: 100%; border-collapse: collapse; font-size: 12px;
+  }
+  table.wf th, table.wf td {
+    text-align: left;
+    padding: 7px 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  table.wf th {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--muted); font-weight: 600;
+    background: var(--bg);
+    border-bottom: 1px solid var(--line-strong);
+  }
+  table.wf tr:hover td { background: var(--bg); }
+  table.wf td.muted { color: var(--muted); }
+  table.wf td.mono { font-family: var(--mono); font-size: 11px; }
+
+  /* Tags / chips */
+  .tag {
+    display: inline-block; font-size: 10px; padding: 1px 6px;
+    border: 1px solid var(--line-strong); border-radius: 10px;
+    color: var(--muted); margin-right: 4px;
+  }
+  .tag.warn { color: var(--warn); border-color: var(--warn); }
+  .tag.ok   { color: var(--ok); border-color: var(--ok); }
+  .tag.accent { color: var(--accent); border-color: var(--accent); }
+
+  /* Trust dial */
+  .dial { display: inline-flex; gap: 2px; }
+  .dial .pip {
+    width: 14px; height: 14px; border: 1px solid var(--line-strong);
+    background: var(--panel); border-radius: 2px;
+  }
+  .dial .pip.on { background: var(--ink); border-color: var(--ink); }
+
+  /* Diff (old → new) */
+  .diff-row { display: grid; grid-template-columns: 1fr 20px 1fr; gap: 8px; align-items: center; padding: 6px 0; border-bottom: 1px dashed var(--line); }
+  .diff-row .old { color: var(--muted); text-decoration: line-through; }
+  .diff-row .arrow { color: var(--muted); text-align: center; }
+  .diff-row .new { color: var(--ink); }
+
+  /* Detail two-pane layout */
+  .twopane { display: grid; grid-template-columns: 320px 1fr; gap: 16px; }
+  @media (max-width: 1100px) { .twopane { grid-template-columns: 1fr; } }
+
+  /* Filter bar */
+  .filterbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+  .filterbar .search {
+    flex: 1; min-width: 160px;
+    border: 1px solid var(--line-strong);
+    border-radius: 3px; padding: 4px 8px; font-size: 12px;
+    color: var(--placeholder); background: var(--panel);
+    font-family: inherit;
+  }
+  .filterbar select, .filterbar .chip {
+    font-family: inherit; font-size: 11px;
+    background: var(--panel); border: 1px solid var(--line-strong);
+    border-radius: 3px; padding: 3px 8px;
+  }
+
+  /* Timeline (audit) */
+  .timeline { border-left: 2px dashed var(--line-strong); padding-left: 14px; margin-left: 6px; }
+  .timeline .item { margin-bottom: 14px; position: relative; }
+  .timeline .item::before {
+    content: ''; position: absolute; left: -19px; top: 4px;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--panel); border: 2px solid var(--line-strong);
+  }
+  .timeline .item.current::before { background: var(--ink); border-color: var(--ink); }
+  .timeline .when { font-family: var(--mono); font-size: 10px; color: var(--muted); }
+  .timeline .what { font-size: 12px; }
+  .timeline .who  { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+  /* Baseline rail */
+  .baseline-rail { display: flex; align-items: center; gap: 0; padding: 16px 0; flex-wrap: wrap; }
+  .baseline-rail .node {
+    border: 1px solid var(--line-strong); padding: 8px 12px; border-radius: 4px;
+    background: var(--panel); font-size: 11px; min-width: 100px; text-align: center;
+  }
+  .baseline-rail .node.locked { border-style: solid; background: var(--bg); }
+  .baseline-rail .node.current { border-color: var(--ink); border-width: 2px; font-weight: 600; }
+  .baseline-rail .node.draft { border-style: dashed; }
+  .baseline-rail .arrow { color: var(--line-strong); padding: 0 6px; }
+
+  /* Sticky-note style legend */
+  .legend {
+    background: #fffbe8; border: 1px solid #e8d97a;
+    padding: 8px 12px; border-radius: 3px; font-size: 11px;
+    color: #5a4a1a; margin-bottom: 16px;
+  }
+  .legend strong { color: #3a2f0f; }
+
+  /* Disclaimer banner */
+  .disclaimer {
+    background: #fff;
+    border: 1px dashed var(--line-strong);
+    padding: 10px 14px; margin-bottom: 16px;
+    font-size: 11px; color: var(--muted);
+  }
+  .disclaimer strong { color: var(--ink); }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="logo">SDLC</div>
+  <h1>Agentic SDLC Workbench</h1>
+  <span class="meta">v0.1 · wireframes · low-fi</span>
+  <div class="right">
+    <span class="pill">Project: ACME · Pilot 1</span>
+    <span class="pill">Env: Sandbox</span>
+    <div class="avatar"></div>
+  </div>
+</div>
+
+<div class="app">
+
+  <!-- ============= SIDEBAR ============= -->
+  <aside class="sidebar">
+    <div class="section-label">Modules</div>
+    <nav>
+      <button data-target="m-home" class="active">Repository Admin Home</button>
+      <button data-target="m-project">Project Setup &amp; Access <span class="v1-badge">v1</span></button>
+      <button data-target="m-trust">Agent Trust &amp; Permissions <span class="v1-badge">v1</span></button>
+      <button data-target="m-cpq">Change Packet Queue <span class="v1-badge">v1</span></button>
+      <button data-target="m-evidence">Evidence &amp; Source Registry <span class="v1-badge">v1</span></button>
+      <button data-target="m-audit">Field-Level Audit Viewer</button>
+      <button data-target="m-baseline">Baseline &amp; Version Manager <span class="v1-badge">v1</span></button>
+      <button data-target="m-library">Reusable Pattern Library</button>
+      <button data-target="m-validation">Validation &amp; Exception Queue</button>
+      <button data-target="m-reports">Report Builder / Export <span class="v1-badge">v1</span></button>
+    </nav>
+    <div class="footnote">
+      <strong>v1</strong> badge = recommended for v1 per §15.<br><br>
+      These are wireframes — gray boxes and placeholder content are intentional. Layout &amp; information architecture only; no visual design yet.
+    </div>
+  </aside>
+
+  <!-- ============= MAIN ============= -->
+  <main>
+
+  <!-- ============= 1. ADMIN HOME ============= -->
+  <section class="module active" id="m-home">
+    <div class="module-header"><h2>Repository Admin Home</h2></div>
+    <p class="module-purpose">Control tower for the methodology owner / system admin. Surfaces what needs human attention across all projects.</p>
+
+    <div class="disclaimer"><strong>Wireframe note:</strong> This is the landing screen. All numbers, names, and labels are placeholders.</div>
+
+    <div class="wf-kpi-grid">
+      <div class="wf-kpi"><div class="label">Active projects</div><div class="value">7</div><div class="delta">+1 this week</div></div>
+      <div class="wf-kpi"><div class="label">Open Change Packets</div><div class="value">23</div><div class="delta">4 awaiting approval</div></div>
+      <div class="wf-kpi"><div class="label">Failed validations</div><div class="value">5</div><div class="delta">2 governance-sensitive</div></div>
+      <div class="wf-kpi"><div class="label">Pending approvals</div><div class="value">11</div><div class="delta">oldest: 3d</div></div>
+    </div>
+
+    <div class="wf-row" style="margin-top:16px;">
+      <div class="wf-col" style="flex:2;">
+        <div class="wf-panel">
+          <div class="wf-panel-title">Recent repository changes <span class="count">· last 24h</span>
+            <div class="actions"><button class="btn">Filter</button><button class="btn">Export</button></div>
+          </div>
+          <table class="wf">
+            <thead><tr><th>Time</th><th>Project</th><th>Field / Record</th><th>Change</th><th>Source</th><th>Status</th></tr></thead>
+            <tbody>
+              <tr><td class="mono">10:42</td><td>ACME</td><td>WF-014 · Step 4 owner</td><td>Process Agent suggests</td><td>Transcript T-118</td><td><span class="tag warn">pending</span></td></tr>
+              <tr><td class="mono">10:31</td><td>ACME</td><td>Agent.Cost thresholds</td><td>Cost Agent updated</td><td>Auto</td><td><span class="tag ok">approved</span></td></tr>
+              <tr><td class="mono">09:58</td><td>BetaCo</td><td>HITL-Pattern P-22</td><td>Reviewer flagged conflict</td><td>Validation Agent</td><td><span class="tag warn">conflict</span></td></tr>
+              <tr><td class="mono">09:14</td><td>ACME</td><td>KA-3001</td><td>Story Agent drafted</td><td>Incidents</td><td><span class="tag">draft</span></td></tr>
+              <tr><td class="mono">08:50</td><td>Gamma</td><td>Baseline · Pilot</td><td>Locked</td><td>Manual</td><td><span class="tag ok">baselined</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="wf-col">
+        <div class="wf-panel">
+          <div class="wf-panel-title">Missing owners <span class="count">· 6</span></div>
+          <div class="ph long"></div><div class="ph med"></div><div class="ph long"></div><div class="ph short"></div>
+          <button class="btn" style="margin-top:8px;">Assign owners →</button>
+        </div>
+        <div class="wf-panel" style="margin-top:12px;">
+          <div class="wf-panel-title">Reusable records to review <span class="count">· 9</span></div>
+          <div class="ph long"></div><div class="ph short"></div><div class="ph med"></div>
+          <button class="btn" style="margin-top:8px;">Open library →</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============= 2. PROJECT SETUP ============= -->
+  <section class="module" id="m-project">
+    <div class="module-header"><h2>Project Setup &amp; Access</h2><span class="v1-tag">v1</span></div>
+    <p class="module-purpose">Define project boundaries and control who can act on a project. Sets reuse scope, baseline model, and active agents.</p>
+
+    <div class="twopane">
+      <div class="wf-panel">
+        <div class="wf-panel-title">Projects <span class="count">· 7</span>
+          <div class="actions"><button class="btn primary">+ New project</button></div>
+        </div>
+        <div class="filterbar"><input class="search" placeholder="Search projects..."><select><option>All clients</option></select></div>
+        <table class="wf">
+          <thead><tr><th>Client</th><th>Project</th><th>Stage</th></tr></thead>
+          <tbody>
+            <tr style="background:var(--bg);"><td>ACME Corp</td><td><strong>Pilot 1</strong></td><td><span class="tag">Build</span></td></tr>
+            <tr><td>ACME Corp</td><td>Wave 2</td><td><span class="tag">Draft</span></td></tr>
+            <tr><td>BetaCo</td><td>Greenfield</td><td><span class="tag ok">Production</span></td></tr>
+            <tr><td>Gamma Ltd</td><td>Modernization</td><td><span class="tag">Pilot</span></td></tr>
+            <tr><td class="muted" colspan="3">… 3 more</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="wf-panel">
+        <div class="wf-panel-title">ACME Corp · Pilot 1
+          <div class="actions"><button class="btn">Archive</button><button class="btn primary">Save</button></div>
+        </div>
+
+        <div class="wf-row">
+          <div class="wf-col">
+            <div class="section-label" style="padding-left:0;">Identity</div>
+            <table class="wf">
+              <tr><td style="width:160px;" class="muted">Client</td><td>ACME Corp</td></tr>
+              <tr><td class="muted">Project name</td><td>Pilot 1</td></tr>
+              <tr><td class="muted">Project code</td><td class="mono">ACME-P1</td></tr>
+              <tr><td class="muted">Created</td><td class="mono">2026-03-12</td></tr>
+            </table>
+          </div>
+          <div class="wf-col">
+            <div class="section-label" style="padding-left:0;">Reuse scope</div>
+            <table class="wf">
+              <tr><td class="muted" style="width:180px;">Inherit from</td><td>ACME · Master library</td></tr>
+              <tr><td class="muted">Cross-client patterns</td><td><span class="tag">read-only</span></td></tr>
+              <tr><td class="muted">Project-only artifacts</td><td><span class="tag ok">isolated</span></td></tr>
+              <tr><td class="muted">Baseline model</td><td>Draft → Build → Pilot → Prod</td></tr>
+            </table>
+          </div>
+        </div>
+
+        <div class="section-label" style="padding-left:0; margin-top:12px;">Members</div>
+        <table class="wf">
+          <thead><tr><th>Name</th><th>Role</th><th>Permissions</th><th></th></tr></thead>
+          <tbody>
+            <tr><td>Chris H.</td><td>Methodology Owner</td><td><span class="tag">approve</span><span class="tag">configure</span><span class="tag">export</span></td><td><button class="btn icon">⋯</button></td></tr>
+            <tr><td>Priya R.</td><td>Reviewer</td><td><span class="tag">approve</span><span class="tag">comment</span></td><td><button class="btn icon">⋯</button></td></tr>
+            <tr><td>Sam O.</td><td>Functional Owner</td><td><span class="tag">approve (own fields)</span></td><td><button class="btn icon">⋯</button></td></tr>
+            <tr><td class="muted" colspan="4"><button class="btn">+ Add member</button></td></tr>
+          </tbody>
+        </table>
+
+        <div class="section-label" style="padding-left:0; margin-top:12px;">Active agents <span class="count" style="font-weight:400; color:var(--muted);">(see Trust console for thresholds)</span></div>
+        <div class="wf-row">
+          <div class="wf-col"><label><input type="checkbox" checked> Orchestrator</label></div>
+          <div class="wf-col"><label><input type="checkbox" checked> Intake</label></div>
+          <div class="wf-col"><label><input type="checkbox" checked> Process</label></div>
+          <div class="wf-col"><label><input type="checkbox" checked> Workflow Design</label></div>
+          <div class="wf-col"><label><input type="checkbox"> Cost</label></div>
+          <div class="wf-col"><label><input type="checkbox" checked> Validation</label></div>
+          <div class="wf-col"><label><input type="checkbox"> Governance</label></div>
+          <div class="wf-col"><label><input type="checkbox" checked> Story</label></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============= 3. TRUST DIAL ============= -->
+  <section class="module" id="m-trust">
+    <div class="module-header"><h2>Agent Trust &amp; Permission Console</h2><span class="v1-tag">v1</span></div>
+    <p class="module-purpose">Set the manual 1–5 trust dial per project &amp; per agent. Higher trust = fewer approval gates. Project-specific overrides allowed.</p>
+
+    <div class="legend">Trust dial: <strong>1</strong> always require approval · <strong>2</strong> approval for changes · <strong>3</strong> approval for cross-record/baseline impact · <strong>4</strong> approval for governance-sensitive only · <strong>5</strong> autonomous (audit only)</div>
+
+    <div class="wf-panel">
+      <div class="wf-panel-title">Project: ACME · Pilot 1
+        <div class="actions"><select><option>ACME · Pilot 1</option></select><button class="btn">Reset to defaults</button></div>
+      </div>
+      <table class="wf">
+        <thead><tr><th>Agent</th><th>Trust</th><th>Allowed behaviors</th><th>Approval expectation</th><th>Override</th><th>Enabled</th></tr></thead>
+        <tbody>
+          <tr><td>Orchestrator</td>
+            <td><div class="dial"><span class="pip on"></span><span class="pip on"></span><span class="pip on"></span><span class="pip"></span><span class="pip"></span></div></td>
+            <td>Routing, queue mgmt</td><td>Per child agent</td>
+            <td class="muted">—</td><td><input type="checkbox" checked></td></tr>
+          <tr><td>Intake</td>
+            <td><div class="dial"><span class="pip on"></span><span class="pip on"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span></div></td>
+            <td>Read transcripts, propose fields</td><td>All proposed fields</td>
+            <td><span class="tag accent">project override</span></td><td><input type="checkbox" checked></td></tr>
+          <tr><td>Process</td>
+            <td><div class="dial"><span class="pip on"></span><span class="pip on"></span><span class="pip on"></span><span class="pip"></span><span class="pip"></span></div></td>
+            <td>Map steps, derive RACI</td><td>Cross-record/baseline only</td>
+            <td class="muted">—</td><td><input type="checkbox" checked></td></tr>
+          <tr><td>Workflow Design</td>
+            <td><div class="dial"><span class="pip on"></span><span class="pip on"></span><span class="pip on"></span><span class="pip"></span><span class="pip"></span></div></td>
+            <td>Author paths, swimlanes</td><td>Cross-record/baseline only</td>
+            <td class="muted">—</td><td><input type="checkbox" checked></td></tr>
+          <tr><td>Cost</td>
+            <td><div class="dial"><span class="pip on"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span></div></td>
+            <td>Compute tokens, budgets</td><td>All</td>
+            <td class="muted">—</td><td><input type="checkbox"></td></tr>
+          <tr><td>Validation</td>
+            <td><div class="dial"><span class="pip on"></span><span class="pip on"></span><span class="pip on"></span><span class="pip on"></span><span class="pip"></span></div></td>
+            <td>Run rule packs, flag conflicts</td><td>Governance-sensitive only</td>
+            <td class="muted">—</td><td><input type="checkbox" checked></td></tr>
+          <tr><td>Governance</td>
+            <td><div class="dial"><span class="pip on"></span><span class="pip on"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span></div></td>
+            <td>Compliance checks</td><td>Most outputs</td>
+            <td class="muted">—</td><td><input type="checkbox"></td></tr>
+          <tr><td>Story</td>
+            <td><div class="dial"><span class="pip on"></span><span class="pip on"></span><span class="pip on"></span><span class="pip"></span><span class="pip"></span></div></td>
+            <td>Draft KAs, user stories</td><td>Cross-record/baseline only</td>
+            <td><span class="tag accent">project override</span></td><td><input type="checkbox" checked></td></tr>
+          <tr><td>Reviewer</td>
+            <td><div class="dial"><span class="pip on"></span><span class="pip on"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span></div></td>
+            <td>QA pass, surface issues</td><td>All</td>
+            <td class="muted">—</td><td><input type="checkbox" checked></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============= 4. CHANGE PACKET QUEUE ============= -->
+  <section class="module" id="m-cpq">
+    <div class="module-header"><h2>Change Packet Queue</h2><span class="v1-tag">v1</span></div>
+    <p class="module-purpose">Primary human review experience for repository updates. Each Change Packet bundles related field-level changes for one approve / reject / send-back / split decision.</p>
+
+    <div class="filterbar">
+      <input class="search" placeholder="Search packets... (id, field, source)">
+      <select><option>All projects</option></select>
+      <select><option>All sources</option><option>Transcripts</option><option>Reports</option><option>Templates</option><option>Signals</option></select>
+      <select><option>All risk</option><option>High</option><option>Medium</option><option>Low</option></select>
+      <select><option>Status: open</option><option>Approved</option><option>Rejected</option><option>Sent back</option></select>
+    </div>
+
+    <div class="twopane">
+      <div class="wf-panel" style="padding:0;">
+        <table class="wf">
+          <thead><tr><th>ID</th><th>Summary</th><th>Risk</th><th>Status</th></tr></thead>
+          <tbody>
+            <tr style="background:var(--bg);"><td class="mono">CP-2041</td><td>Update Step 4 owner in WF-014<br><span class="muted" style="font-size:10px;">Source: Transcript T-118 · 3 fields</span></td><td><span class="tag warn">high</span></td><td><span class="tag">pending</span></td></tr>
+            <tr><td class="mono">CP-2040</td><td>Add validation rule to KA-3001<br><span class="muted" style="font-size:10px;">Source: Reviewer · 1 field</span></td><td><span class="tag">low</span></td><td><span class="tag">pending</span></td></tr>
+            <tr><td class="mono">CP-2039</td><td>Conflict: HITL-P-22 vs P-15<br><span class="muted" style="font-size:10px;">Source: Validation Agent</span></td><td><span class="tag warn">high</span></td><td><span class="tag warn">conflict</span></td></tr>
+            <tr><td class="mono">CP-2038</td><td>New tool spec: jira-mcp<br><span class="muted" style="font-size:10px;">Source: Agent Architect · net-new</span></td><td><span class="tag">med</span></td><td><span class="tag">pending</span></td></tr>
+            <tr><td class="mono">CP-2037</td><td>Cost threshold update<br><span class="muted" style="font-size:10px;">Source: Cost Agent · 4 fields</span></td><td><span class="tag">low</span></td><td><span class="tag">pending</span></td></tr>
+            <tr><td class="muted" colspan="4" style="text-align:center; padding:10px;">… 18 more</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="wf-panel">
+        <div class="wf-panel-title">CP-2041 · Update Step 4 owner in WF-014
+          <div class="actions">
+            <button class="btn">Split</button>
+            <button class="btn">Send back</button>
+            <button class="btn danger">Reject</button>
+            <button class="btn ok">Approve</button>
+          </div>
+        </div>
+
+        <div class="wf-row">
+          <div class="wf-col">
+            <div class="section-label" style="padding-left:0;">Metadata</div>
+            <table class="wf">
+              <tr><td class="muted" style="width:140px;">Source</td><td>Transcript T-118 (link)</td></tr>
+              <tr><td class="muted">Authoring agent</td><td>Process Agent</td></tr>
+              <tr><td class="muted">Risk</td><td><span class="tag warn">high</span> baseline-impacting</td></tr>
+              <tr><td class="muted">Validation</td><td><span class="tag ok">passed</span> · 2 rules · 0 violations</td></tr>
+              <tr><td class="muted">Type</td><td>Conflict resolution (overrides existing)</td></tr>
+              <tr><td class="muted">Impacted records</td><td>WF-014, RACI-014, KA-3001</td></tr>
+            </table>
+          </div>
+          <div class="wf-col">
+            <div class="section-label" style="padding-left:0;">Conversation / rationale</div>
+            <div class="ph long"></div><div class="ph long"></div><div class="ph med"></div><div class="ph long"></div><div class="ph short"></div>
+            <button class="btn" style="margin-top:6px;">+ Add comment</button>
+          </div>
+        </div>
+
+        <div class="section-label" style="padding-left:0; margin-top:12px;">Proposed changes (3)</div>
+        <div>
+          <div class="diff-row">
+            <div><span class="muted" style="font-size:10px; display:block;">WF-014.step[4].owner</span><span class="old">Sam O. (Functional Owner)</span></div>
+            <div class="arrow">→</div>
+            <div><span class="muted" style="font-size:10px; display:block;">&nbsp;</span><span class="new">Priya R. (Reviewer)</span></div>
+          </div>
+          <div class="diff-row">
+            <div><span class="muted" style="font-size:10px; display:block;">WF-014.step[4].sla_hours</span><span class="old">48</span></div>
+            <div class="arrow">→</div>
+            <div><span class="muted" style="font-size:10px; display:block;">&nbsp;</span><span class="new">24</span></div>
+          </div>
+          <div class="diff-row">
+            <div><span class="muted" style="font-size:10px; display:block;">RACI-014.step[4].accountable</span><span class="old">Sam O.</span></div>
+            <div class="arrow">→</div>
+            <div><span class="muted" style="font-size:10px; display:block;">&nbsp;</span><span class="new">Priya R.</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============= 5. EVIDENCE REGISTRY ============= -->
+  <section class="module" id="m-evidence">
+    <div class="module-header"><h2>Evidence &amp; Source Registry</h2><span class="v1-tag">v1</span></div>
+    <p class="module-purpose">Shows the source material feeding repository fields. Every field can be traced back to a transcript, report, template, KA, or signal.</p>
+
+    <div class="filterbar">
+      <input class="search" placeholder="Search evidence...">
+      <select><option>All types</option><option>Transcript</option><option>Report</option><option>Template</option><option>KA</option><option>Signal</option><option>Voice note</option></select>
+      <select><option>All projects</option></select>
+      <select><option>Validation: any</option><option>Validated</option><option>Unverified</option><option>Conflicting</option></select>
+    </div>
+
+    <div class="wf-panel" style="padding:0;">
+      <table class="wf">
+        <thead><tr><th>ID</th><th>Type</th><th>Title</th><th>Ingested</th><th>Linked fields</th><th>Validation</th><th>Owner</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">T-118</td><td><span class="tag">transcript</span></td><td>SME interview · Order ops · 2026-04-22</td><td class="mono">2026-04-22</td><td>14</td><td><span class="tag ok">validated</span></td><td>Process</td></tr>
+          <tr><td class="mono">R-044</td><td><span class="tag">report</span></td><td>Marked-up Q1 design report</td><td class="mono">2026-04-15</td><td>32</td><td><span class="tag ok">validated</span></td><td>Reviewer</td></tr>
+          <tr><td class="mono">TPL-009</td><td><span class="tag">template</span></td><td>Corrected Workflow Step Map (Excel)</td><td class="mono">2026-04-10</td><td>61</td><td><span class="tag warn">unverified</span></td><td>—</td></tr>
+          <tr><td class="mono">KA-3001</td><td><span class="tag">KA</span></td><td>How to escalate a held order</td><td class="mono">2026-04-08</td><td>4</td><td><span class="tag ok">validated</span></td><td>Story</td></tr>
+          <tr><td class="mono">SIG-77</td><td><span class="tag">signal</span></td><td>Production: avg handle time +18%</td><td class="mono">2026-05-03</td><td>2</td><td><span class="tag warn">conflicting</span></td><td>—</td></tr>
+          <tr><td class="mono">VN-12</td><td><span class="tag">voice</span></td><td>Owner walkthrough · 7 min</td><td class="mono">2026-05-01</td><td>9</td><td><span class="tag">draft</span></td><td>Intake</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="wf-row" style="margin-top:16px;">
+      <div class="wf-col">
+        <div class="wf-panel">
+          <div class="wf-panel-title">Selected: T-118 · SME interview</div>
+          <div class="ph long"></div><div class="ph long"></div><div class="ph med"></div><div class="ph long"></div>
+          <div style="margin-top:8px;"><button class="btn">Open transcript</button> <button class="btn">Re-run extraction</button></div>
+        </div>
+      </div>
+      <div class="wf-col">
+        <div class="wf-panel">
+          <div class="wf-panel-title">Linked fields <span class="count">· 14</span></div>
+          <table class="wf">
+            <tr><td class="mono">WF-014.step[4].owner</td><td><span class="tag ok">approved</span></td></tr>
+            <tr><td class="mono">WF-014.step[4].sla_hours</td><td><span class="tag">pending</span></td></tr>
+            <tr><td class="mono">RACI-014.step[4]</td><td><span class="tag">pending</span></td></tr>
+            <tr><td class="mono">KA-3001.trigger</td><td><span class="tag ok">approved</span></td></tr>
+            <tr><td class="muted" colspan="2">… 10 more</td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============= 6. AUDIT VIEWER ============= -->
+  <section class="module" id="m-audit">
+    <div class="module-header"><h2>Field-Level Audit Viewer</h2></div>
+    <p class="module-purpose">Look up any field and see how it changed: current value, prior values, source, timestamp, agent, approver, Change Packet, baseline impact.</p>
+
+    <div class="filterbar">
+      <input class="search" placeholder="Search field by ID or path... e.g. WF-014.step[4].owner">
+      <select><option>Any project</option></select>
+      <button class="btn">Search</button>
+    </div>
+
+    <div class="twopane">
+      <div class="wf-panel">
+        <div class="wf-panel-title">Field: WF-014.step[4].owner</div>
+        <table class="wf">
+          <tr><td class="muted" style="width:140px;">Project</td><td>ACME · Pilot 1</td></tr>
+          <tr><td class="muted">Current value</td><td><strong>Priya R.</strong></td></tr>
+          <tr><td class="muted">Type</td><td>Owner reference</td></tr>
+          <tr><td class="muted">First set</td><td class="mono">2026-03-28 · Intake Agent</td></tr>
+          <tr><td class="muted">Last changed</td><td class="mono">2026-05-04 · CP-2041</td></tr>
+          <tr><td class="muted">Baseline impact</td><td><span class="tag accent">post-Pilot revision</span></td></tr>
+          <tr><td class="muted">Reuse scope</td><td>Project-only</td></tr>
+        </table>
+        <div style="margin-top:8px;"><button class="btn">View record</button> <button class="btn">Restore prior</button></div>
+      </div>
+
+      <div class="wf-panel">
+        <div class="wf-panel-title">History · 4 changes</div>
+        <div class="timeline">
+          <div class="item current">
+            <div class="when">2026-05-04 10:42 · CP-2041</div>
+            <div class="what"><strong>Sam O.</strong> → <strong>Priya R.</strong></div>
+            <div class="who">Process Agent · approved by Chris H. · source: T-118</div>
+          </div>
+          <div class="item">
+            <div class="when">2026-04-15 14:08 · CP-1987</div>
+            <div class="what">SLA changed 72h → 48h (related field)</div>
+            <div class="who">Workflow Design Agent · approved by Priya R.</div>
+          </div>
+          <div class="item">
+            <div class="when">2026-04-02 09:11 · CP-1820</div>
+            <div class="what">Initial: <strong>Sam O.</strong></div>
+            <div class="who">Intake Agent · auto-approved (trust 4)</div>
+          </div>
+          <div class="item">
+            <div class="when">2026-03-28 · creation</div>
+            <div class="what">Field created (empty)</div>
+            <div class="who">Process Agent</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============= 7. BASELINE & VERSION ============= -->
+  <section class="module" id="m-baseline">
+    <div class="module-header"><h2>Baseline &amp; Version Manager</h2><span class="v1-tag">v1</span></div>
+    <p class="module-purpose">Manage named design baselines and post-production revisions. Compare baselines, lock for handoff, branch revisions.</p>
+
+    <div class="wf-panel">
+      <div class="wf-panel-title">Project: ACME · Pilot 1
+        <div class="actions"><button class="btn">Compare</button><button class="btn primary">Lock current</button></div>
+      </div>
+
+      <div class="baseline-rail">
+        <div class="node locked">Draft Design<br><span class="muted" style="font-size:10px;">locked 2026-04-01</span></div>
+        <div class="arrow">→</div>
+        <div class="node locked">Build Baseline<br><span class="muted" style="font-size:10px;">locked 2026-04-18</span></div>
+        <div class="arrow">→</div>
+        <div class="node current">Pilot Baseline<br><span class="muted" style="font-size:10px;">current</span></div>
+        <div class="arrow">→</div>
+        <div class="node draft">Production Baseline<br><span class="muted" style="font-size:10px;">draft</span></div>
+        <div class="arrow">→</div>
+        <div class="node draft">Post-Prod v1<br><span class="muted" style="font-size:10px;">—</span></div>
+      </div>
+
+      <div class="wf-row" style="margin-top:8px;">
+        <div class="wf-col">
+          <div class="section-label" style="padding-left:0;">Pilot Baseline · contents</div>
+          <table class="wf">
+            <tr><td class="muted">Records</td><td>418</td></tr>
+            <tr><td class="muted">Fields</td><td>3,907</td></tr>
+            <tr><td class="muted">Open Change Packets</td><td>23</td></tr>
+            <tr><td class="muted">Validation status</td><td><span class="tag ok">all passing</span></td></tr>
+            <tr><td class="muted">Baseline owner</td><td>Chris H.</td></tr>
+          </table>
+        </div>
+        <div class="wf-col">
+          <div class="section-label" style="padding-left:0;">Compare: Build → Pilot</div>
+          <table class="wf">
+            <tr><td class="muted">Added</td><td>+47 fields, +12 records</td></tr>
+            <tr><td class="muted">Modified</td><td>~204 fields</td></tr>
+            <tr><td class="muted">Removed</td><td>−18 fields, −2 records</td></tr>
+            <tr><td class="muted">Baseline-impacting CPs</td><td>9</td></tr>
+          </table>
+          <button class="btn" style="margin-top:8px;">View full diff →</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============= 8. PATTERN LIBRARY ============= -->
+  <section class="module" id="m-library">
+    <div class="module-header"><h2>Reusable Knowledge / Pattern Library</h2></div>
+    <p class="module-purpose">Maintain reusable patterns (agents, tools, tests, controls, HITL patterns) without mixing client-specific data. Each entry has scope, owner, status, and review date.</p>
+
+    <div class="filterbar">
+      <input class="search" placeholder="Search patterns...">
+      <select><option>All scopes</option><option>Project-only</option><option>Client-only</option><option>All-client</option></select>
+      <select><option>All types</option><option>Agent</option><option>Tool</option><option>Test</option><option>Control</option><option>HITL pattern</option></select>
+      <select><option>Status: any</option><option>Active</option><option>Under review</option><option>Deprecated</option></select>
+    </div>
+
+    <div class="wf-panel" style="padding:0;">
+      <table class="wf">
+        <thead><tr><th>ID</th><th>Type</th><th>Name</th><th>Scope</th><th>Functional Owner</th><th>Status</th><th>Last review</th><th>Next review</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">P-22</td><td><span class="tag">HITL</span></td><td>Approve before baseline lock</td><td><span class="tag accent">all-client</span></td><td>Chris H.</td><td><span class="tag ok">active</span></td><td class="mono">2026-02-10</td><td class="mono">2026-08-10</td></tr>
+          <tr><td class="mono">P-15</td><td><span class="tag">HITL</span></td><td>Reviewer concur on conflict</td><td><span class="tag accent">all-client</span></td><td>Chris H.</td><td><span class="tag warn">conflict P-22</span></td><td class="mono">2026-01-22</td><td class="mono">2026-07-22</td></tr>
+          <tr><td class="mono">A-07</td><td><span class="tag">agent</span></td><td>Cost Agent · v2</td><td>client-only</td><td>Priya R.</td><td><span class="tag ok">active</span></td><td class="mono">2026-03-01</td><td class="mono">2026-09-01</td></tr>
+          <tr><td class="mono">T-014</td><td><span class="tag">tool</span></td><td>jira-mcp</td><td>project-only</td><td>Sam O.</td><td><span class="tag">under review</span></td><td class="mono">—</td><td class="mono">—</td></tr>
+          <tr><td class="mono">CTL-31</td><td><span class="tag">control</span></td><td>Cross-record SoD check</td><td><span class="tag accent">all-client</span></td><td>Governance</td><td><span class="tag ok">active</span></td><td class="mono">2026-02-28</td><td class="mono">2026-08-28</td></tr>
+          <tr><td class="mono">TST-92</td><td><span class="tag">test</span></td><td>Order intake · happy path</td><td>client-only</td><td>Reviewer</td><td><span class="tag">deprecated</span></td><td class="mono">2025-11-12</td><td class="mono">—</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============= 9. EXCEPTION QUEUE ============= -->
+  <section class="module" id="m-validation">
+    <div class="module-header"><h2>Validation &amp; Exception Queue</h2></div>
+    <p class="module-purpose">Routes work that the agents could not safely resolve. Failed validations, conflicts, low-confidence outputs, missing owners/evidence, governance-sensitive or baseline-impacting changes.</p>
+
+    <div class="wf-row">
+      <div class="wf-kpi"><div class="label">Failed validation</div><div class="value">3</div></div>
+      <div class="wf-kpi"><div class="label">Conflicts</div><div class="value">2</div></div>
+      <div class="wf-kpi"><div class="label">Low confidence</div><div class="value">7</div></div>
+      <div class="wf-kpi"><div class="label">Missing owner</div><div class="value">6</div></div>
+      <div class="wf-kpi"><div class="label">Missing evidence</div><div class="value">4</div></div>
+      <div class="wf-kpi"><div class="label">Gov-sensitive</div><div class="value">2</div></div>
+      <div class="wf-kpi"><div class="label">Baseline-impacting</div><div class="value">5</div></div>
+    </div>
+
+    <div class="wf-panel" style="padding:0; margin-top:12px;">
+      <table class="wf">
+        <thead><tr><th>ID</th><th>Type</th><th>Record / field</th><th>Reason</th><th>Suggested action</th><th>Age</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">EX-301</td><td><span class="tag warn">conflict</span></td><td>HITL-P-22 vs HITL-P-15</td><td>Two patterns prescribe contradictory approval rules</td><td>Pick one / merge</td><td class="mono">2d</td></tr>
+          <tr><td class="mono">EX-300</td><td><span class="tag warn">failed validation</span></td><td>WF-019.step[2]</td><td>Step has no owner reference</td><td>Assign owner</td><td class="mono">1d</td></tr>
+          <tr><td class="mono">EX-299</td><td><span class="tag">low confidence</span></td><td>KA-3014.body</td><td>Story Agent confidence 0.42</td><td>Human edit / re-source</td><td class="mono">5h</td></tr>
+          <tr><td class="mono">EX-298</td><td><span class="tag">missing evidence</span></td><td>RACI-021</td><td>No transcript or template citation</td><td>Provide source</td><td class="mono">3h</td></tr>
+          <tr><td class="mono">EX-297</td><td><span class="tag accent">gov-sensitive</span></td><td>CTL-44</td><td>Touches access boundary</td><td>Governance review</td><td class="mono">1h</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============= 10. REPORT BUILDER ============= -->
+  <section class="module" id="m-reports">
+    <div class="module-header"><h2>Report Builder / Export Center</h2><span class="v1-tag">v1</span></div>
+    <p class="module-purpose">Produce client-facing and reviewer-facing outputs (and ingest corrections back) without exposing the raw repository.</p>
+
+    <div class="wf-row">
+      <div class="wf-col" style="flex:2;">
+        <div class="wf-panel">
+          <div class="wf-panel-title">New export</div>
+
+          <div class="section-label" style="padding-left:0;">1 · Output type</div>
+          <div class="wf-row">
+            <label class="wf-panel" style="flex:1; cursor:pointer; padding:10px;"><input type="radio" name="rpt" checked> Consolidated design report <br><span class="muted" style="font-size:10px;">All records · narrative · DOCX/PDF</span></label>
+            <label class="wf-panel" style="flex:1; cursor:pointer; padding:10px;"><input type="radio" name="rpt"> Template-specific report <br><span class="muted" style="font-size:10px;">One template only · DOCX</span></label>
+            <label class="wf-panel" style="flex:1; cursor:pointer; padding:10px;"><input type="radio" name="rpt"> Excel review pack <br><span class="muted" style="font-size:10px;">For SME markup · XLSX</span></label>
+          </div>
+          <div class="wf-row">
+            <label class="wf-panel" style="flex:1; cursor:pointer; padding:10px;"><input type="radio" name="rpt"> Governance packet <br><span class="muted" style="font-size:10px;">Controls, SoD, audit · PDF</span></label>
+            <label class="wf-panel" style="flex:1; cursor:pointer; padding:10px;"><input type="radio" name="rpt"> Baseline comparison <br><span class="muted" style="font-size:10px;">Diff between two baselines · DOCX</span></label>
+            <label class="wf-panel dashed" style="flex:1; padding:10px; color:var(--muted);">+ Custom report</label>
+          </div>
+
+          <div class="section-label" style="padding-left:0; margin-top:12px;">2 · Scope</div>
+          <table class="wf">
+            <tr><td class="muted" style="width:160px;">Project</td><td>ACME · Pilot 1</td></tr>
+            <tr><td class="muted">Baseline</td><td>Pilot Baseline (current)</td></tr>
+            <tr><td class="muted">Include</td><td><label><input type="checkbox" checked> Workflows</label> &nbsp; <label><input type="checkbox" checked> RACI</label> &nbsp; <label><input type="checkbox" checked> KAs</label> &nbsp; <label><input type="checkbox"> HITL patterns</label> &nbsp; <label><input type="checkbox"> Cost</label></td></tr>
+            <tr><td class="muted">Audience</td><td><select><option>Client steerco</option><option>Reviewer</option><option>Internal QA</option></select></td></tr>
+          </table>
+
+          <div class="section-label" style="padding-left:0; margin-top:12px;">3 · Format</div>
+          <div><label><input type="radio" name="fmt" checked> DOCX</label> &nbsp; <label><input type="radio" name="fmt"> PDF</label> &nbsp; <label><input type="radio" name="fmt"> XLSX</label> &nbsp; <label><input type="radio" name="fmt"> HTML</label></div>
+
+          <div style="margin-top:14px; display:flex; gap:8px;">
+            <button class="btn">Preview</button>
+            <button class="btn primary">Generate</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="wf-col">
+        <div class="wf-panel">
+          <div class="wf-panel-title">Ingest corrections</div>
+          <p class="muted" style="font-size:11px;">Upload marked-up reports, corrected templates, or voice notes. Routed through Intake Agent → Change Packet Queue.</p>
+          <div class="wf-panel dashed" style="text-align:center; padding:18px; color:var(--muted);">Drop files here<br><span style="font-size:10px;">.docx · .xlsx · .pdf · .m4a · .mp3</span></div>
+          <button class="btn" style="margin-top:8px;">Browse…</button>
+        </div>
+
+        <div class="wf-panel" style="margin-top:12px;">
+          <div class="wf-panel-title">Recent exports</div>
+          <table class="wf">
+            <tr><td class="mono">2026-05-03</td><td>Pilot review pack</td><td>XLSX</td></tr>
+            <tr><td class="mono">2026-04-28</td><td>Consolidated design</td><td>DOCX</td></tr>
+            <tr><td class="mono">2026-04-18</td><td>Build → Pilot diff</td><td>DOCX</td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  </main>
+</div>
+
+<script>
+  // Sidebar navigation
+  document.querySelectorAll('.sidebar nav button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.sidebar nav button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const target = btn.dataset.target;
+      document.querySelectorAll('.module').forEach(m => m.classList.remove('active'));
+      document.getElementById(target).classList.add('active');
+      window.scrollTo({ top: 0, behavior: 'instant' });
+    });
+  });
+</script>
+
+</body>
+</html>
