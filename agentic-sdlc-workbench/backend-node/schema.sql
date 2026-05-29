@@ -606,7 +606,8 @@ CREATE TABLE IF NOT EXISTS asdlc_ingest_document (
 
 CREATE INDEX IF NOT EXISTS idx_ingest_project ON asdlc_ingest_document(project_id);
 CREATE INDEX IF NOT EXISTS idx_ingest_status ON asdlc_ingest_document(ingest_status);
-CREATE INDEX IF NOT EXISTS idx_ingest_lifecycle ON asdlc_ingest_document(lifecycle_status);
+-- idx_ingest_lifecycle is created in db.js MIGRATIONS, after the lifecycle_status
+-- column is added — on an existing DB the column does not exist at schema-exec time.
 
 -- ============================================================
 -- AI CONFIG, USAGE, BEST PRACTICES, LEARNING FEEDBACK

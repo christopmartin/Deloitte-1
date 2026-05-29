@@ -104,6 +104,9 @@ const MIGRATIONS = [
   "ALTER TABLE asdlc_ingest_document ADD COLUMN cancelled_at TEXT",
   "ALTER TABLE asdlc_ingest_document ADD COLUMN cancelled_by TEXT",
   "ALTER TABLE asdlc_ingest_document ADD COLUMN cancel_reason TEXT",
+  // Index must come AFTER the column is added (runs post-schema-exec, so it is
+  // safe on both fresh and existing databases).
+  "CREATE INDEX IF NOT EXISTS idx_ingest_lifecycle ON asdlc_ingest_document(lifecycle_status)",
 ];
 for (const migration of MIGRATIONS) {
   try { db.exec(migration); } catch { /* column already exists — safe to ignore */ }
