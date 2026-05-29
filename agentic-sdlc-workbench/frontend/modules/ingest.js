@@ -63,13 +63,15 @@ function entityName(type, data) {
 let allDocs = [];
 let filterStatus = '';
 let filterType   = '';
+let filterArchived = false;   // when true, the catalog shows cancelled docs
 
 // ── Render ────────────────────────────────────────────────────────────────────
 export async function render(container) {
   container.innerHTML = '';
-  allDocs      = [];
-  filterStatus = '';
-  filterType   = '';
+  allDocs        = [];
+  filterStatus   = '';
+  filterType     = '';
+  filterArchived = false;
 
   container.appendChild(el('div', { className: 'module-header' },
     el('h2', {}, 'Ingest Documents'),
@@ -403,8 +405,16 @@ async function buildCatalog(paneLeft, paneRight) {
   statusSel.addEventListener('change', () => { filterStatus = statusSel.value; renderCatalog(catalogBody, paneRight); });
   typeSel.addEventListener('change',   () => { filterType   = typeSel.value;   renderCatalog(catalogBody, paneRight); });
 
+  // Archived / cancelled toggle — re-fetches because cancelled docs are excluded server-side by default
+  const archChk = el('input', { type: 'checkbox' });
+  archChk.addEventListener('change', () => { filterArchived = archChk.checked; refreshCatalog(catalogBody, paneRight); });
+  const archLabel = el('label',
+    { className: 'filter-archived', style: { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--color-text-muted)' } },
+    archChk, 'Show cancelled');
+
   filterBar.appendChild(statusSel);
   filterBar.appendChild(typeSel);
+  filterBar.appendChild(archLabel);
   paneLeft.appendChild(filterBar);
 
   const catalogBody = el('div', { className: 'pane-body', id: 'ingest-catalog-body' });
@@ -420,6 +430,7 @@ async function refreshCatalog(catalogBody, paneRight) {
     const params = new URLSearchParams();
     const active = getCurrentProjectId();
     if (active) params.set('project_id', active);
+    if (filterArchived) params.set('archived', '1');
     const data = await apiFetch(`/ingest-documents?${params}`);
     allDocs = Array.isArray(data) ? data : (data.items || []);
     renderCatalog(catalogBody, paneRight);
@@ -437,7 +448,7 @@ function renderCatalog(catalogBody, paneRight) {
   });
 
   if (filtered.length === 0) {
-    catalogBody.innerHTML = '<div class="empty-state"><p>No documents found.</p></div>';
+    catalogBody.innerHTML = `<div class="empty-state"><p>${filterArchived ? 'No cancelled documents.' : 'No documents found.'}</p></div>`;
     return;
   }
 
@@ -450,7 +461,7 @@ function renderCatalog(catalogBody, paneRight) {
     const tr = el('tr', { className: 'clickable' },
       el('td', { style: { fontWeight: '500' } }, d.document_title),
       el('td', {}, tag(typeLabel, 'info')),
-      el('td', {}, ingestTag(d.ingest_status)),
+      el('td', {}, d.lifecycle_status === 'cancelled' ? tag('Cancelled', 'danger') : ingestTag(d.ingest_status)),
       el('td', { className: 'muted' }, formatDateTime(d.uploaded_at))
     );
     tr.addEventListener('click', () => {
@@ -469,13 +480,14 @@ function renderCatalog(catalogBody, paneRight) {
 async function renderDetail(doc, pane) {
   pane.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div></div>';
 
-  // Fetch live state + extractions + clarifications in parallel
-  let fresh = doc, extractions = [], clarifications = [];
+  // Fetch live state + extractions + clarifications + AI usage in parallel
+  let fresh = doc, extractions = [], clarifications = [], usage = [];
   try {
-    [fresh, extractions, clarifications] = await Promise.all([
+    [fresh, extractions, clarifications, usage] = await Promise.all([
       apiFetch(`/ingest-documents/${doc.ingest_id}`).catch(() => doc),
       apiFetch(`/ingest-documents/${doc.ingest_id}/extractions`).catch(() => []),
       apiFetch(`/ingest-documents/${doc.ingest_id}/clarifications`).catch(() => []),
+      apiFetch(`/ingest-documents/${doc.ingest_id}/usage`).catch(() => []),
     ]);
   } catch { /* use defaults */ }
 
@@ -483,7 +495,7 @@ async function renderDetail(doc, pane) {
 
   const header = el('div', { className: 'pane-header' },
     el('span', { className: 'pane-title' }, fresh.document_title),
-    ingestTag(fresh.ingest_status)
+    fresh.lifecycle_status === 'cancelled' ? tag('Cancelled', 'danger') : ingestTag(fresh.ingest_status)
   );
   pane.appendChild(header);
 
@@ -494,14 +506,27 @@ async function renderDetail(doc, pane) {
   infoSec.appendChild(el('h4', {}, 'Document Information'));
   const grid = el('div', { className: 'meta-grid' });
   const typeLabel = DOC_TYPES.find(t => t.id === fresh.document_type)?.label || fresh.document_type || '—';
-  [
+  const metaRows = [
     ['Application',   fresh.project_name || '—'],
     ['Document Type', typeLabel],
     ['File',          fresh.file_name || '—'],
     ['Submitted By',  fresh.uploaded_by_name || '—'],
     ['Submitted',     formatDateTime(fresh.uploaded_at)],
     ['CPs Generated', fresh.change_packets_generated ?? 0],
-  ].forEach(([k, v]) => {
+  ];
+  // AI usage (token/cost) for this ingest — part of the audit trail
+  if (Array.isArray(usage) && usage.length) {
+    const tot = usage.reduce((a, u) => ({
+      in:  a.in  + (u.input_tokens  || 0),
+      out: a.out + (u.output_tokens || 0),
+      cost: a.cost + (u.cost_usd || 0),
+    }), { in: 0, out: 0, cost: 0 });
+    const k = n => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+    const model = usage[0].model || '';
+    metaRows.push(['AI Usage',
+      `${k(tot.in)} in / ${k(tot.out)} out${tot.cost ? ` · ~$${tot.cost.toFixed(3)}` : ''}${model ? ` · ${model}` : ''}`]);
+  }
+  metaRows.forEach(([k, v]) => {
     const item = el('div', { className: 'meta-item' }, el('div', { className: 'meta-key' }, k));
     item.appendChild(el('div', { className: 'meta-val' }, String(v)));
     grid.appendChild(item);
@@ -515,6 +540,13 @@ async function renderDetail(doc, pane) {
   body.appendChild(infoSec);
 
   // ── 2. Status-dependent content ────────────────────────────────────────────
+  // A cancelled doc is on hold: hide all action sections, show the cancelled
+  // banner + restore instead.
+  if (fresh.lifecycle_status === 'cancelled') {
+    body.appendChild(buildCancelledSection(fresh, pane));
+    pane.appendChild(body);
+    return;
+  }
 
   if (fresh.ingest_status === 'pending' || fresh.ingest_status === 'failed') {
     body.appendChild(buildTriggerSection(fresh, pane));
@@ -556,7 +588,68 @@ async function renderDetail(doc, pane) {
     body.appendChild(buildPromotedSection(fresh));
   }
 
+  // ── 3. Cancel action — allowed any time before promote ──────────────────────
+  if (fresh.ingest_status !== 'promoted') {
+    body.appendChild(buildCancelAction(fresh, pane));
+  }
+
   pane.appendChild(body);
+}
+
+// Cancel action (soft, reversible). Shown for any non-promoted, active document.
+function buildCancelAction(doc, pane) {
+  const sec = el('div', { className: 'detail-section' });
+  const btn = el('button', { className: 'btn btn-secondary', style: { color: 'var(--color-danger)' } }, '✕ Cancel document');
+  btn.addEventListener('click', async () => {
+    if (!confirm('Cancel this document? It moves to the cancelled list and its extractions/questions are put on hold. You can restore it later.')) return;
+    const reason = (prompt('Optional reason for cancelling (leave blank to skip):') || '').trim();
+    btn.disabled = true; btn.textContent = 'Cancelling…';
+    try {
+      await apiFetch(`/ingest-documents/${doc.ingest_id}/cancel`, {
+        method: 'POST', body: JSON.stringify({ reason }),
+      });
+      showToast('Document cancelled.', 'success');
+      const cb = document.getElementById('ingest-catalog-body');
+      if (cb) await refreshCatalog(cb, pane);
+      await renderDetail(doc, pane);   // re-fetches fresh → now shows the cancelled banner
+    } catch (err) {
+      showToast(`Error: ${err.message}`, 'error');
+      btn.disabled = false; btn.textContent = '✕ Cancel document';
+    }
+  });
+  sec.appendChild(btn);
+  return sec;
+}
+
+// Banner shown for a cancelled document, with a Restore (un-cancel) action.
+function buildCancelledSection(doc, pane) {
+  const sec = el('div', { className: 'detail-section' });
+  sec.appendChild(el('h4', {}, 'Cancelled'));
+  sec.appendChild(el('p',
+    { style: { fontSize: '13px', color: 'var(--color-text-muted)', marginBottom: '12px', lineHeight: '1.6' } },
+    `This document was cancelled${doc.cancelled_by_name ? ' by ' + doc.cancelled_by_name : ''}` +
+    `${doc.cancelled_at ? ' on ' + formatDateTime(doc.cancelled_at) : ''}. ` +
+    'Its extractions and clarification questions are on hold and cannot be promoted until it is restored.'));
+  if (doc.cancel_reason) {
+    sec.appendChild(el('div', { className: 'section-label' }, 'Reason'));
+    sec.appendChild(el('p', { style: { fontSize: '13px', marginTop: '4px', marginBottom: '12px' } }, doc.cancel_reason));
+  }
+  const restoreBtn = el('button', { className: 'btn btn-primary' }, '↻ Restore document');
+  restoreBtn.addEventListener('click', async () => {
+    restoreBtn.disabled = true; restoreBtn.textContent = 'Restoring…';
+    try {
+      await apiFetch(`/ingest-documents/${doc.ingest_id}/restore`, { method: 'POST' });
+      showToast('Document restored.', 'success');
+      const cb = document.getElementById('ingest-catalog-body');
+      if (cb) await refreshCatalog(cb, pane);
+      await renderDetail(doc, pane);   // re-fetches fresh → back to its normal state
+    } catch (err) {
+      showToast(`Error: ${err.message}`, 'error');
+      restoreBtn.disabled = false; restoreBtn.textContent = '↻ Restore document';
+    }
+  });
+  sec.appendChild(restoreBtn);
+  return sec;
 }
 
 // ── Section builders ──────────────────────────────────────────────────────────

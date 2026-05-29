@@ -33,6 +33,7 @@ function seed() {
   const U3  = '11111111-0000-0000-0000-000000000003'; // Sam O.
   const U4  = '11111111-0000-0000-0000-000000000004'; // Jordan K.
   const U5  = '11111111-0000-0000-0000-000000000005'; // Nia W.
+  const U6  = '11111111-0000-0000-0000-000000000006'; // Chris M.
 
   const P1  = '33333333-0000-0000-0000-000000000001'; // ACME Pilot 1
   const P2  = '33333333-0000-0000-0000-000000000002'; // ACME Wave 2
@@ -227,6 +228,7 @@ function seed() {
     [U3, 'Sam O.',    'sam.o@internal.example',    'functional_owner'],
     [U4, 'Jordan K.', 'jordan.k@internal.example', 'technical'],
     [U5, 'Nia W.',    'nia.w@internal.example',    'governance'],
+    [U6, 'Chris M.',  'chris.m@internal.example',  'methodology_owner'],
   ]);
 
   // Disable FK enforcement for the duration of the seed. The historical insert

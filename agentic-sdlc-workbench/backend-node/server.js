@@ -6,7 +6,9 @@ require('dotenv').config();          // load .env before anything else
 const path = require('path');
 const fs = require('fs');
 const express = require('express');
-const { db, generateId, auditLog, nextSlug } = require('./db');
+const { db, generateId, auditLog, nextSlug, getSetting, setSetting } = require('./db');
+const registry = require('./agent/entity-registry');
+const aiConfig = require('./agent/ai-config');
 
 // Phase 1 enum constants (Decisions #2, #16, #17, #18) — used for validation
 // in PUT endpoints. SQLite CHECK constraints back-stop these, but validating
@@ -448,40 +450,460 @@ function transitionCp(req, res, newStatus) {
   if (!existing) return res.status(404).json({ error: 'Change packet not found' });
   const uid = userId(req);
   const { approver_member_id, decision_notes } = req.body || {};
+
+  // ── Approval: status change + materialization + version bump, atomically ───
+  if (newStatus === 'approved') {
+    if (existing.status === 'approved') {
+      return res.json({ ...existing, apply_result: { applied: 0, updated: 0, deleted: 0, skipped: 0, errors: [], note: 'already approved' } });
+    }
+    let applyResult;
+    db.exec('BEGIN');
+    try {
+      db.prepare(`
+        UPDATE asdlc_change_packet
+        SET status='approved', approver_member_id=COALESCE(?,approver_member_id),
+            decision_notes=COALESCE(?,decision_notes), approval_timestamp=datetime('now'),
+            updated_by=?, updated_at=datetime('now'), version=version+1
+        WHERE change_packet_id=?
+      `).run(approver_member_id || null, decision_notes || null, uid, req.params.id);
+
+      // Materialize the packet into the real design tables (the missing pipeline)
+      applyResult = applyChangePacket(req.params.id, uid);
+
+      // Increment the project version so design history tracks the release
+      if (existing.project_id) {
+        const projBefore = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(existing.project_id);
+        db.prepare("UPDATE asdlc_project SET version=version+1, updated_at=datetime('now'), updated_by=? WHERE project_id=?")
+          .run(uid, existing.project_id);
+        const projAfter = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(existing.project_id);
+        auditLog('asdlc_project', existing.project_id, 'UPDATE', projBefore, projAfter, uid);
+      }
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      console.error('[transitionCp] apply failed — rolled back:', err.message);
+      return res.status(500).json({ error: `Failed to apply change packet: ${err.message}` });
+    }
+
+    const updated = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(req.params.id);
+    auditLog('asdlc_change_packet', req.params.id, 'UPDATE', existing, updated, uid);
+    try { recordFeedbackForCp(updated, 'accepted_asis', uid); } catch (e) { console.error('[feedback]', e.message); }
+    return res.json({ ...updated, apply_result: applyResult });
+  }
+
+  // ── Reject / send-back: simple status update ───────────────────────────────
   db.prepare(`
     UPDATE asdlc_change_packet
-    SET status             = ?,
-        approver_member_id = COALESCE(?, approver_member_id),
-        decision_notes     = COALESCE(?, decision_notes),
-        approval_timestamp = datetime('now'),
-        updated_by         = ?,
-        updated_at         = datetime('now'),
-        version            = version + 1
-    WHERE change_packet_id = ?
+    SET status=?, approver_member_id=COALESCE(?,approver_member_id),
+        decision_notes=COALESCE(?,decision_notes), approval_timestamp=datetime('now'),
+        updated_by=?, updated_at=datetime('now'), version=version+1
+    WHERE change_packet_id=?
   `).run(newStatus, approver_member_id || null, decision_notes || null, uid, req.params.id);
   const updated = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(req.params.id);
   auditLog('asdlc_change_packet', req.params.id, 'UPDATE', existing, updated, uid);
-
-  // On approval, increment the project's version counter so the design history tracks it
-  if (newStatus === 'approved' && existing.project_id) {
-    const projBefore = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(existing.project_id);
-    db.prepare(`
-      UPDATE asdlc_project
-      SET version    = version + 1,
-          updated_at = datetime('now'),
-          updated_by = ?
-      WHERE project_id = ?
-    `).run(uid, existing.project_id);
-    const projAfter = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(existing.project_id);
-    auditLog('asdlc_project', existing.project_id, 'UPDATE', projBefore, projAfter, uid);
+  if (newStatus === 'rejected') {
+    try { recordFeedbackForCp(updated, 'rejected', uid); } catch (e) { console.error('[feedback]', e.message); }
   }
-
   res.json(updated);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHANGE PACKET MATERIALIZER  (registry-driven)
+// Applies an approved packet's items to the real design tables. Called from
+// transitionCp inside a transaction. SoftSkip = a business-rule skip (recorded,
+// commit continues); any other throw rolls the whole packet back.
+// ─────────────────────────────────────────────────────────────────────────────
+class SoftSkip extends Error {}
+
+/** Generate a unique, human-readable change-packet code (collision-safe). */
+function uniquePacketCode() {
+  for (let i = 0; i < 25; i++) {
+    const base = `CP-${now().replace(/\D/g, '').slice(4, 14)}`;   // MMDDHHMMSS
+    const code = i === 0 ? base : `${base}-${Math.random().toString(36).slice(2, 5)}`;
+    if (!db.prepare('SELECT 1 FROM asdlc_change_packet WHERE packet_code = ?').get(code)) return code;
+  }
+  return `CP-${generateId().slice(0, 8)}`;
+}
+
+function mtRow(table, pk, id) {
+  return db.prepare(`SELECT * FROM ${table} WHERE ${pk} = ?`).get(id);
+}
+
+/** Resolve a per-project slug to its real entity id (null if not found). */
+function resolveSlugToId(entity, projectId, slug) {
+  if (!slug || !entity || !entity.slugPrefix) return null;
+  const row = db.prepare(
+    `SELECT ${entity.pk} AS id FROM ${entity.table} WHERE slug = ? AND project_id = ?`
+  ).get(slug, projectId);
+  return row ? row.id : null;
+}
+
+/** Map entity_data → { column: value } using the registry fieldMap. */
+function mapFields(entity, data) {
+  const out = {};
+  for (const [key, spec] of Object.entries(entity.fieldMap || {})) {
+    let v = data[key];
+    if (v === undefined || v === null) continue;
+    if (spec.enumMap && spec.enumMap[v] !== undefined) v = spec.enumMap[v];
+    if (spec.transform) v = spec.transform(v);
+    else if (spec.json)  v = JSON.stringify(v);
+    out[spec.col] = v;
+  }
+  return out;
+}
+
+/** Resolve a child entity's parent FK columns to real ids (same-packet → DB → fallback). */
+function resolveParents(entity, data, projectId, idMap) {
+  const fks = {};
+  for (const link of (entity.parentLinks || [])) {
+    const nameVal = data[link.nameKeyInData];
+    let parentId = null;
+
+    if (nameVal) {
+      parentId = idMap[`${link.parentType}::${nameVal}`] || null;
+      if (!parentId) {
+        const pe = registry.byEntityType[link.parentType];
+        const pNameKey = pe && pe.nameKeys && pe.nameKeys[0];
+        const pNameCol = pe && pNameKey && pe.fieldMap[pNameKey] ? pe.fieldMap[pNameKey].col : null;
+        if (pe && pNameCol) {
+          const row = db.prepare(
+            `SELECT ${pe.pk} AS id FROM ${pe.table}
+             WHERE project_id = ? AND ${pNameCol} = ?
+               AND (lifecycle_status IS NULL OR lifecycle_status != 'retired')
+             ORDER BY created_at LIMIT 1`
+          ).get(projectId, nameVal);
+          if (row) parentId = row.id;
+        }
+      }
+    }
+    if (!parentId && link.required) parentId = fallbackParent(link.parentType, projectId, idMap);
+    if (!parentId && link.required) {
+      throw new SoftSkip(`${entity.entity_type}: could not resolve required parent ${link.parentType} (${link.nameKeyInData}="${nameVal || ''}")`);
+    }
+    if (parentId) fks[link.col] = parentId;
+  }
+  return fks;
+}
+
+/** Last-resort parent: the single one created in this packet, else the single existing one. */
+function fallbackParent(parentType, projectId, idMap) {
+  const inPacket = Object.entries(idMap)
+    .filter(([k]) => k.startsWith(parentType + '::'))
+    .map(([, v]) => v);
+  if (inPacket.length === 1) return inPacket[0];
+  const pe = registry.byEntityType[parentType];
+  if (pe) {
+    const rows = db.prepare(
+      `SELECT ${pe.pk} AS id FROM ${pe.table}
+       WHERE project_id = ? AND (lifecycle_status IS NULL OR lifecycle_status != 'retired')`
+    ).all(projectId);
+    if (rows.length === 1) return rows[0].id;
+  }
+  if (inPacket.length > 1) return inPacket[inPacket.length - 1];
+  return null;
+}
+
+function mtCreate(entity, data, projectId, uid, idMap, item) {
+  const fks = resolveParents(entity, data, projectId, idMap);
+  const id  = generateId();
+  const cols = [entity.pk, 'project_id'];
+  const vals = [id, projectId];
+
+  if (entity.slugPrefix) { cols.push('slug'); vals.push(nextSlug(entity.table, entity.slugPrefix, projectId)); }
+  for (const [c, v] of Object.entries(fks)) { cols.push(c); vals.push(v); }
+
+  const mapped = mapFields(entity, data);
+  if (entity.entity_type === 'workflow_step' && (mapped.step_number === undefined || mapped.step_number === null)) {
+    const r = db.prepare("SELECT COALESCE(MAX(step_number),0)+1 AS n FROM asdlc_workflow_step WHERE workflow_id = ?").get(fks.workflow_id);
+    mapped.step_number = r ? r.n : 1;
+  }
+  for (const [c, v] of Object.entries(mapped)) { cols.push(c); vals.push(v); }
+
+  cols.push('created_by', 'updated_by'); vals.push(uid, uid);
+
+  db.prepare(`INSERT INTO ${entity.table} (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).run(...vals);
+  auditLog(entity.table, id, 'INSERT', null, mtRow(entity.table, entity.pk, id), uid);
+
+  const nm = registry.entityName(entity.entity_type, data);
+  if (nm) idMap[`${entity.entity_type}::${nm}`] = id;
+  // CP item entity_id was an extraction placeholder for creates — point it at the real row
+  db.prepare("UPDATE asdlc_change_packet_item SET entity_id = ? WHERE change_packet_item_id = ?").run(id, item.change_packet_item_id);
+  return id;
+}
+
+function mtUpdate(entity, data, item, uid) {
+  const id = item.entity_id;
+  const before = mtRow(entity.table, entity.pk, id);
+  if (!before) throw new SoftSkip(`${entity.entity_type}: update target ${id} no longer exists`);
+  const mapped = mapFields(entity, data);
+  const setCols = Object.keys(mapped);
+  if (setCols.length === 0) return;
+  const sql = setCols.map(c => `${c} = ?`).join(', ');
+  db.prepare(
+    `UPDATE ${entity.table} SET ${sql}, version=version+1, updated_by=?, updated_at=datetime('now') WHERE ${entity.pk}=?`
+  ).run(...setCols.map(c => mapped[c]), uid, id);
+  auditLog(entity.table, id, 'UPDATE', before, mtRow(entity.table, entity.pk, id), uid);
+}
+
+function mtDelete(entity, item, uid) {
+  const id = item.entity_id;
+  const before = mtRow(entity.table, entity.pk, id);
+  if (!before) throw new SoftSkip(`${entity.entity_type}: delete target ${id} no longer exists`);
+  for (const k of (registry.childrenOf[entity.entity_type] || [])) {
+    const cnt = db.prepare(
+      `SELECT COUNT(*) AS c FROM ${k.table} WHERE ${k.col} = ? AND (lifecycle_status IS NULL OR lifecycle_status != 'retired')`
+    ).get(id).c;
+    if (cnt > 0) return { blocked: true, reason: `${entity.entity_type} has ${cnt} dependent ${k.childType} — not deleted` };
+  }
+  db.prepare(
+    `UPDATE ${entity.table} SET lifecycle_status='retired', version=version+1, updated_by=?, updated_at=datetime('now') WHERE ${entity.pk}=?`
+  ).run(uid, id);
+  auditLog(entity.table, id, 'UPDATE', before, mtRow(entity.table, entity.pk, id), uid);
+  return { blocked: false };
+}
+
+function markItemApplied(itemId, note) {
+  if (note) {
+    db.prepare("UPDATE asdlc_change_packet_item SET applied_at=datetime('now'), rationale=TRIM(COALESCE(rationale,'') || ' ' || ?) WHERE change_packet_item_id=?").run(note, itemId);
+  } else {
+    db.prepare("UPDATE asdlc_change_packet_item SET applied_at=datetime('now') WHERE change_packet_item_id=?").run(itemId);
+  }
+}
+
+/**
+ * Apply all items of an approved change packet to the real design tables.
+ * @returns {{applied:number, updated:number, deleted:number, skipped:number, errors:Array}}
+ */
+function applyChangePacket(cpId, uid) {
+  const cp = db.prepare("SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?").get(cpId);
+  const projectId = cp ? cp.project_id : null;
+  const items = db.prepare("SELECT * FROM asdlc_change_packet_item WHERE change_packet_id = ? ORDER BY created_at").all(cpId);
+
+  // Parents before children (FK-safe)
+  const ordered = items.slice().sort((a, b) =>
+    (registry.byEntityType[a.entity_type]?.order ?? 999) - (registry.byEntityType[b.entity_type]?.order ?? 999)
+  );
+
+  const idMap = {};
+  const result = { applied: 0, updated: 0, deleted: 0, skipped: 0, errors: [] };
+
+  for (const item of ordered) {
+    if (item.applied_at) { result.skipped++; continue; }
+
+    // Only materialize items produced by the AI ingest pipeline (field_path
+    // "<type>.new_record|create|update|delete"). Skip legacy/manual items —
+    // e.g. seed 'initial_import' rows or design-review field edits — so they are
+    // never re-created as new rows when an old change packet is approved.
+    const fp = item.field_path || '';
+    if (!new RegExp(`^${item.entity_type}\\.(new_record|create|update|delete)$`).test(fp)) {
+      result.skipped++;
+      continue;
+    }
+
+    const entity = registry.byEntityType[item.entity_type];
+    let data; try { data = JSON.parse(item.new_value); } catch { data = {}; }
+
+    if (!entity || !entity.materializable) {
+      markItemApplied(item.change_packet_item_id, '[not materialized — no target table in v1]');
+      result.skipped++;
+      continue;
+    }
+
+    const op = item.operation || 'create';
+    try {
+      if (op === 'delete') {
+        const r = mtDelete(entity, item, uid);
+        if (r.blocked) { result.errors.push({ item: item.change_packet_item_id, entity_type: item.entity_type, reason: r.reason }); continue; }
+        result.deleted++;
+      } else if (op === 'update') {
+        mtUpdate(entity, data, item, uid); result.updated++;
+      } else {
+        mtCreate(entity, data, projectId, uid, idMap, item); result.applied++;
+      }
+      markItemApplied(item.change_packet_item_id, null);
+    } catch (err) {
+      if (err instanceof SoftSkip) {
+        result.errors.push({ item: item.change_packet_item_id, entity_type: item.entity_type, reason: err.message });
+        continue;
+      }
+      throw err;   // fatal — caller rolls back the whole transaction
+    }
+  }
+  return result;
+}
+
+/** Learning loop: record proposed-vs-final for AI-sourced (ingest) change packets. */
+function recordFeedbackForCp(cp, outcome, uid) {
+  if (!cp || !cp.packet_code || !cp.packet_code.startsWith('CP-')) return;  // only ingest CPs, not manual EDIT-* CPs
+  const items = db.prepare("SELECT * FROM asdlc_change_packet_item WHERE change_packet_id = ?").all(cp.change_packet_id);
+  if (items.length === 0) return;
+  const model = aiConfig.resolveModel('extraction');
+  const ins = db.prepare(`
+    INSERT INTO asdlc_ingest_feedback
+      (feedback_id, project_id, ingest_id, extraction_id, change_packet_id, entity_type,
+       model, confidence, outcome, proposed_value, final_value, reviewer_id, created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
+  `);
+  for (const it of items) {
+    let finalValue = null;
+    if (outcome !== 'rejected') {
+      const entity = registry.byEntityType[it.entity_type];
+      if (entity && entity.materializable && it.applied_at) {
+        try { finalValue = JSON.stringify(mtRow(entity.table, entity.pk, it.entity_id)); } catch { /* ignore */ }
+      }
+    }
+    ins.run(generateId(), cp.project_id, null, it.entity_id, cp.change_packet_id,
+      it.entity_type, model, null, outcome, it.new_value, finalValue, uid);
+  }
 }
 
 app.post('/api/v1/change-packets/:id/approve',    (req, res) => transitionCp(req, res, 'approved'));
 app.post('/api/v1/change-packets/:id/reject',     (req, res) => transitionCp(req, res, 'rejected'));
 app.post('/api/v1/change-packets/:id/send-back',  (req, res) => transitionCp(req, res, 'sent_back'));
+
+// ──────────────────────────────────────────────
+// ADMIN — AI SETTINGS (global model / thinking / tokens)
+// ──────────────────────────────────────────────
+const AI_SETTING_KEYS = [
+  'extraction_model', 'quality_reviewer_model', 'prompt_drafter_model', 'build_review_model',
+  'extraction_thinking_enabled', 'extraction_thinking_budget', 'max_tokens',
+];
+
+app.get('/api/v1/settings/ai', (_req, res) => {
+  res.json({
+    available_models: aiConfig.AVAILABLE_MODELS,
+    settings: {
+      extraction_model:            aiConfig.resolveModel('extraction'),
+      quality_reviewer_model:      aiConfig.resolveModel('quality_reviewer'),
+      prompt_drafter_model:        aiConfig.resolveModel('prompt_drafter'),
+      build_review_model:          aiConfig.resolveModel('build_review'),
+      extraction_thinking_enabled: String(getSetting('extraction_thinking_enabled', 'false')) === 'true',
+      extraction_thinking_budget:  parseInt(getSetting('extraction_thinking_budget', '4000'), 10),
+      max_tokens:                  aiConfig.getMaxTokens(),
+    },
+  });
+});
+
+app.put('/api/v1/settings/ai', (req, res) => {
+  const uid = userId(req);
+  const body = req.body || {};
+  const valid = new Set(aiConfig.AVAILABLE_MODELS.map(m => m.id));
+  for (const key of AI_SETTING_KEYS) {
+    if (!(key in body)) continue;
+    let val = body[key];
+    if (key.endsWith('_model') && val && !valid.has(val)) {
+      return res.status(400).json({ error: `Unknown model "${val}" for ${key}` });
+    }
+    if (key === 'extraction_thinking_enabled') val = val ? 'true' : 'false';
+    setSetting(key, val, uid);
+  }
+  auditLog('asdlc_app_setting', 'ai', 'UPDATE', null, body, uid);
+  res.json({ ok: true });
+});
+
+// ──────────────────────────────────────────────
+// AI USAGE (token / cost tracking)
+// ──────────────────────────────────────────────
+app.get('/api/v1/usage', (req, res) => {
+  const { project_id, source, limit } = req.query;
+  const where = [];
+  const params = [];
+  if (project_id) { where.push('project_id = ?'); params.push(project_id); }
+  if (source)     { where.push('source = ?');     params.push(source); }
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const rows = db.prepare(
+    `SELECT * FROM asdlc_ai_usage ${whereSql} ORDER BY created_at DESC LIMIT ?`
+  ).all(...params, Math.min(parseInt(limit, 10) || 200, 1000));
+  const totals = db.prepare(
+    `SELECT COUNT(*) AS runs, COALESCE(SUM(input_tokens),0) AS input_tokens,
+            COALESCE(SUM(output_tokens),0) AS output_tokens, COALESCE(SUM(cost_usd),0) AS cost_usd
+     FROM asdlc_ai_usage ${whereSql}`
+  ).get(...params);
+  const byModel = db.prepare(
+    `SELECT model, COUNT(*) AS runs, COALESCE(SUM(input_tokens),0) AS input_tokens,
+            COALESCE(SUM(output_tokens),0) AS output_tokens, COALESCE(SUM(cost_usd),0) AS cost_usd
+     FROM asdlc_ai_usage ${whereSql} GROUP BY model ORDER BY cost_usd DESC`
+  ).all(...params);
+  res.json({ rows, totals, by_model: byModel });
+});
+
+app.get('/api/v1/projects/:id/usage', (req, res) => {
+  const rows = db.prepare(
+    "SELECT * FROM asdlc_ai_usage WHERE project_id = ? ORDER BY created_at DESC LIMIT 200"
+  ).all(req.params.id);
+  res.json(rows);
+});
+
+// Usage for a single ingest document (surfaced on the ingest detail screen)
+app.get('/api/v1/ingest-documents/:id/usage', (req, res) => {
+  const rows = db.prepare(
+    "SELECT * FROM asdlc_ai_usage WHERE ref_id = ? AND source = 'ingest_extraction' ORDER BY created_at DESC"
+  ).all(req.params.id);
+  res.json(rows);
+});
+
+// ──────────────────────────────────────────────
+// BEST PRACTICES (global house rules for the AI) + LEARNING FEEDBACK
+// ──────────────────────────────────────────────
+app.get('/api/v1/best-practices', (_req, res) => {
+  res.json(db.prepare("SELECT * FROM asdlc_best_practice ORDER BY is_active DESC, sort_order, created_at").all());
+});
+
+app.post('/api/v1/best-practices', (req, res) => {
+  const uid = userId(req);
+  const { title, rule_text, scope, is_active, sort_order, source } = req.body || {};
+  if (!title || !rule_text) return res.status(400).json({ error: 'title and rule_text are required' });
+  const id = generateId();
+  db.prepare(`
+    INSERT INTO asdlc_best_practice
+      (best_practice_id, scope, title, rule_text, is_active, sort_order, source, created_by, updated_by)
+    VALUES (?,?,?,?,?,?,?,?,?)
+  `).run(id, scope || 'global', title, rule_text,
+         is_active === false ? 0 : 1, sort_order || 0, source || 'manual', uid, uid);
+  auditLog('asdlc_best_practice', id, 'INSERT', null, { title, scope: scope || 'global' }, uid);
+  res.status(201).json(db.prepare("SELECT * FROM asdlc_best_practice WHERE best_practice_id = ?").get(id));
+});
+
+app.put('/api/v1/best-practices/:id', (req, res) => {
+  const uid = userId(req);
+  const existing = db.prepare("SELECT * FROM asdlc_best_practice WHERE best_practice_id = ?").get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Best practice not found' });
+  const { title, rule_text, scope, is_active, sort_order } = req.body || {};
+  db.prepare(`
+    UPDATE asdlc_best_practice
+    SET title=COALESCE(?,title), rule_text=COALESCE(?,rule_text), scope=COALESCE(?,scope),
+        is_active=COALESCE(?,is_active), sort_order=COALESCE(?,sort_order),
+        updated_by=?, updated_at=datetime('now')
+    WHERE best_practice_id=?
+  `).run(
+    title ?? null, rule_text ?? null, scope ?? null,
+    is_active === undefined ? null : (is_active ? 1 : 0),
+    sort_order ?? null, uid, req.params.id
+  );
+  res.json(db.prepare("SELECT * FROM asdlc_best_practice WHERE best_practice_id = ?").get(req.params.id));
+});
+
+app.delete('/api/v1/best-practices/:id', (req, res) => {
+  db.prepare("DELETE FROM asdlc_best_practice WHERE best_practice_id = ?").run(req.params.id);
+  res.json({ ok: true });
+});
+
+// Learning view: extraction acceptance stats + recent corrections.
+app.get('/api/v1/feedback/summary', (req, res) => {
+  const { project_id } = req.query;
+  const where = project_id ? 'WHERE project_id = ?' : '';
+  const params = project_id ? [project_id] : [];
+  const byOutcome = db.prepare(
+    `SELECT outcome, COUNT(*) AS n FROM asdlc_ingest_feedback ${where} GROUP BY outcome`
+  ).all(...params);
+  const byModel = db.prepare(
+    `SELECT model, outcome, COUNT(*) AS n FROM asdlc_ingest_feedback ${where} GROUP BY model, outcome`
+  ).all(...params);
+  const recent = db.prepare(
+    `SELECT * FROM asdlc_ingest_feedback ${where} ORDER BY created_at DESC LIMIT 100`
+  ).all(...params);
+  res.json({ by_outcome: byOutcome, by_model: byModel, recent });
+});
 
 // ──────────────────────────────────────────────
 // MASS APPROVE (semantic versioning + baseline)
@@ -3309,7 +3731,7 @@ app.get('/api/v1/projects/:id/design-report/relationships', (req, res) => {
  *                use_cases, workflows, agents, tools, guardrails, data_sources,
  *                test_scenarios, user_stories, governance, relationships
  */
-app.get('/api/v1/projects/:id/build-export', (req, res) => {
+app.get('/api/v1/projects/:id/build-export', async (req, res) => {
   const project = db.prepare(`
     SELECT p.*, c.client_name, c.client_code
     FROM asdlc_project p
@@ -3584,8 +4006,21 @@ app.get('/api/v1/projects/:id/build-export', (req, res) => {
     data.cost_summary = { assumption, use_cases: ucCosts };
   }
 
-  // Build and stream markdown
-  const md       = buildExportMarkdown(project, baseline, sections, data);
+  // Build the deterministic markdown (a faithful DB dump — never altered by AI)
+  let md = buildExportMarkdown(project, baseline, sections, data);
+
+  // Optional, additive AI review section (req #6). Appended only; the body above
+  // is always the authoritative, reproducible export.
+  if (String(req.query.ai_review) === '1' || String(req.query.ai_review) === 'true') {
+    try {
+      const review = await generateBuildReview(project, md);
+      if (review) md += `\n\n${review}\n`;
+    } catch (err) {
+      console.error('[build-export] AI review failed:', err.message);
+      md += `\n\n---\n\n> _AI design review could not be generated: ${err.message}_\n`;
+    }
+  }
+
   const dateStr  = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const code     = (project.project_code || project.project_name || 'project').replace(/\s+/g, '-');
   const fileName = `${code}-build-spec-${dateStr}.md`;
@@ -3594,6 +4029,39 @@ app.get('/api/v1/projects/:id/build-export', (req, res) => {
   res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
   res.send(md);
 });
+
+/**
+ * Optional AI review of the deterministic build spec. Returns an additive Markdown
+ * section (Executive Summary + Gaps + Implementation Notes) or null if no API key.
+ */
+async function generateBuildReview(project, md) {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key || key === 'paste-your-anthropic-key-here') return null;
+  const Anthropic = require('@anthropic-ai/sdk');
+  const client = new Anthropic({ apiKey: key });
+  const model  = aiConfig.resolveModel('build_review');
+  const system = [
+    'You are a senior solution architect reviewing an Agentic AI build specification.',
+    'You are given the complete, authoritative design spec (already assembled from the database).',
+    'Write a concise review with EXACTLY these three Markdown H2 sections:',
+    '## Executive Summary — 4–6 sentences for a non-technical sponsor.',
+    '## Design Gaps & Completeness Review — bullet list of missing/weak/ambiguous areas, risks, and unanswered questions; reference entities by name.',
+    '## Implementation Notes — practical guidance for the engineers who will build this (sequencing, integration risks, test focus).',
+    'Do NOT restate the whole spec. Do NOT invent requirements not implied by the spec. If something is missing, say it is missing rather than fabricating it.',
+  ].join('\n');
+
+  const resp = await client.messages.create({
+    model,
+    max_tokens: 2048,
+    system,
+    messages: [{ role: 'user', content: `Here is the build specification to review:\n\n${md}` }],
+  });
+  aiConfig.logUsage({ projectId: project.project_id, source: 'build_review', refId: project.project_id, model, usage: resp.usage });
+
+  const text = (resp.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+  if (!text) return null;
+  return `---\n\n# AI Design Review & Implementation Notes\n\n_Generated by ${model}. Advisory only — the specification above is the authoritative, deterministic export._\n\n${text}`;
+}
 
 // ─── Build export markdown assembler ──────────────────────────────────────────
 
@@ -4374,6 +4842,7 @@ app.post('/api/v1/ingest-documents/:id/process', async (req, res) => {
   try {
     const doc = db.prepare('SELECT * FROM asdlc_ingest_document WHERE ingest_id = ?').get(req.params.id);
     if (!doc) return res.status(404).json({ error: 'Ingest document not found' });
+    if (doc.lifecycle_status === 'cancelled') return res.status(409).json({ error: 'Document is cancelled — restore it before processing.' });
 
     // If a file was uploaded and raw_text hasn't been extracted yet, do it now
     if (doc.file_path && !doc.raw_text) {
@@ -4414,6 +4883,8 @@ app.get('/api/v1/ingest-documents/:id/extractions', (req, res) => {
 app.put('/api/v1/ingest-documents/:id/extractions/:eid', (req, res) => {
   const { status } = req.body;
   if (!status) return res.status(400).json({ error: 'status is required' });
+  const parent = db.prepare('SELECT lifecycle_status FROM asdlc_ingest_document WHERE ingest_id = ?').get(req.params.id);
+  if (parent && parent.lifecycle_status === 'cancelled') return res.status(409).json({ error: 'Document is cancelled — restore it before editing extractions.' });
   db.prepare("UPDATE asdlc_ingest_extraction SET status=? WHERE extraction_id=? AND ingest_id=?")
     .run(status, req.params.eid, req.params.id);
   const row = db.prepare('SELECT * FROM asdlc_ingest_extraction WHERE extraction_id=?').get(req.params.eid);
@@ -4435,6 +4906,8 @@ app.post('/api/v1/ingest-documents/:id/clarifications/answer', async (req, res) 
   if (!answers || typeof answers !== 'object') {
     return res.status(400).json({ error: 'answers object is required' });
   }
+  const parentDoc = db.prepare('SELECT lifecycle_status FROM asdlc_ingest_document WHERE ingest_id = ?').get(req.params.id);
+  if (parentDoc && parentDoc.lifecycle_status === 'cancelled') return res.status(409).json({ error: 'Document is cancelled — restore it before answering clarifications.' });
   for (const [clarId, answerText] of Object.entries(answers)) {
     if (answerText && String(answerText).trim()) {
       db.prepare(`
@@ -4458,6 +4931,7 @@ app.post('/api/v1/ingest-documents/:id/promote', (req, res) => {
   const uid = userId(req);
   const doc = db.prepare('SELECT * FROM asdlc_ingest_document WHERE ingest_id=?').get(req.params.id);
   if (!doc) return res.status(404).json({ error: 'Ingest document not found' });
+  if (doc.lifecycle_status === 'cancelled') return res.status(409).json({ error: 'Document is cancelled — restore it before promoting.' });
 
   const extractions = db.prepare(
     "SELECT * FROM asdlc_ingest_extraction WHERE ingest_id=? AND status='staged' ORDER BY entity_type"
@@ -4465,39 +4939,78 @@ app.post('/api/v1/ingest-documents/:id/promote', (req, res) => {
 
   if (extractions.length === 0) return res.status(400).json({ error: 'No staged extractions to promote' });
 
-  // Feature #9: ONE CP per ingest iteration listing all affected entities,
-  // regardless of entity type. Each extraction becomes a change_packet_item.
+  // ONE CP per ingest iteration. Each extraction becomes a change_packet_item
+  // carrying its operation (create/update/delete), the resolved target for
+  // update/delete, the prior value (old_value) and a conflict classification.
   const cpId    = generateId();
-  const cpCode  = `CP-${now().replace(/\D/g, '').slice(4, 10)}`;
+  const cpCode  = uniquePacketCode();
   const summary = `Ingest promotion — ${extractions.length} entities from "${doc.document_title}"`;
+
+  const CONFLICT_RANK    = { net_new: 0, modifies_existing: 1, deletes_existing: 2 };
+  const CONFLICT_BY_RANK = ['net_new', 'modifies_existing', 'deletes_existing'];
+
+  // First pass: resolve each extraction into a concrete CP item spec.
+  const itemSpecs = [];
+  let worstRank = 0;
+  let hasChange = false;   // any update/delete present
+  for (const ex of extractions) {
+    const data   = ex.entity_data || {};
+    const entity = registry.byEntityType[ex.entity_type];
+    let op        = data.operation || 'create';
+    let entityId  = ex.extraction_id;            // placeholder until materialized
+    let fieldPath = `${ex.entity_type}.new_record`;
+    let oldValue  = null;
+    let rationale = `Extracted from "${doc.document_title}" (confidence ${Math.round(ex.confidence * 100)}%)` +
+      (data.conflict_rationale ? ` — ${data.conflict_rationale}` : '');
+    let classification = data.conflict_classification ||
+      (op === 'delete' ? 'deletes_existing' : op === 'update' ? 'modifies_existing' : 'net_new');
+
+    if ((op === 'update' || op === 'delete') && entity && entity.materializable && data.target_slug) {
+      const targetId = resolveSlugToId(entity, doc.project_id, data.target_slug);
+      if (targetId) {
+        entityId  = targetId;
+        fieldPath = `${ex.entity_type}.${op}`;
+        const row = mtRow(entity.table, entity.pk, targetId);
+        oldValue  = row ? JSON.stringify(row) : null;
+        hasChange = true;
+      } else {
+        op = 'create';
+        rationale = `[auto-downgraded: target ${data.target_slug} not found] ` + rationale;
+      }
+    } else if (op === 'update' || op === 'delete') {
+      op = 'create';   // no resolvable target → safe downgrade
+    }
+    if (op === 'create') classification = 'net_new';
+
+    worstRank = Math.max(worstRank, CONFLICT_RANK[classification] ?? 0);
+    itemSpecs.push({ ex, op, entityId, fieldPath, oldValue, rationale });
+  }
 
   db.prepare(`
     INSERT INTO asdlc_change_packet
       (change_packet_id, project_id, packet_code, status, summary,
        source_timestamp, conflict_classification, risk_level, recommended_action,
        visibility_scope, created_by, created_at, updated_at)
-    VALUES (?,?,?,'pending_review',?,datetime('now'),'net_new','low','review','PROJECT',?,datetime('now'),datetime('now'))
-  `).run(cpId, doc.project_id, cpCode, summary, uid);
+    VALUES (?,?,?,'pending_review',?,datetime('now'),?,?,'review','PROJECT',?,datetime('now'),datetime('now'))
+  `).run(cpId, doc.project_id, cpCode, summary, CONFLICT_BY_RANK[worstRank] || 'net_new', hasChange ? 'med' : 'low', uid);
 
   const insertItem = db.prepare(`
     INSERT INTO asdlc_change_packet_item
-      (change_packet_item_id, change_packet_id, entity_type, entity_id,
-       field_path, new_value, rationale, created_at, updated_at)
-    VALUES (?,?,?,?,?,?,?,datetime('now'),datetime('now'))
+      (change_packet_item_id, change_packet_id, entity_type, entity_id, operation,
+       field_path, old_value, new_value, rationale, created_at, updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))
   `);
   const markPromoted = db.prepare("UPDATE asdlc_ingest_extraction SET status='promoted' WHERE extraction_id=?");
 
   // Per-type counts purely for the response (UX context)
   const byType = {};
-  for (const ex of extractions) {
+  for (const spec of itemSpecs) {
     insertItem.run(
-      generateId(), cpId, ex.entity_type, ex.extraction_id,
-      `${ex.entity_type}.new_record`,
-      JSON.stringify(ex.entity_data),
-      `Extracted from "${doc.document_title}" (confidence ${Math.round(ex.confidence * 100)}%)`
+      generateId(), cpId, spec.ex.entity_type, spec.entityId, spec.op,
+      spec.fieldPath, spec.oldValue, JSON.stringify(spec.ex.entity_data), spec.rationale
     );
-    markPromoted.run(ex.extraction_id);
-    byType[ex.entity_type] = (byType[ex.entity_type] || 0) + 1;
+    markPromoted.run(spec.ex.extraction_id);
+    byType[spec.ex.entity_type] = (byType[spec.ex.entity_type] || 0) + 1;
   }
 
   auditLog('asdlc_change_packet', cpId, 'INSERT', null,
@@ -4533,17 +5046,26 @@ function getEntityLabel(type, data) {
 // INGEST DOCUMENTS
 // ──────────────────────────────────────────────
 app.get('/api/v1/ingest-documents', (req, res) => {
-  const { project_id, status } = req.query;
+  const { project_id, status, include_cancelled, archived } = req.query;
   let sql = `
-    SELECT d.*, u.display_name AS uploaded_by_name, p.project_name
+    SELECT d.*, u.display_name AS uploaded_by_name, c.display_name AS cancelled_by_name, p.project_name
     FROM asdlc_ingest_document d
     LEFT JOIN asdlc_user u ON d.uploaded_by = u.user_id
+    LEFT JOIN asdlc_user c ON d.cancelled_by = c.user_id
     LEFT JOIN asdlc_project p ON d.project_id = p.project_id
     WHERE 1=1
   `;
   const params = [];
   if (project_id) { sql += ' AND d.project_id = ?'; params.push(project_id); }
   if (status)     { sql += ' AND d.ingest_status = ?'; params.push(status); }
+  // Lifecycle filter: default = active only. ?archived=1 → cancelled only.
+  // ?include_cancelled=1 → both (no lifecycle filter).
+  const truthy = v => v === '1' || v === 'true';
+  if (truthy(archived)) {
+    sql += " AND d.lifecycle_status = 'cancelled'";
+  } else if (!truthy(include_cancelled)) {
+    sql += " AND d.lifecycle_status = 'active'";
+  }
   sql += ' ORDER BY d.uploaded_at DESC';
   const rows = db.prepare(sql).all(...params);
   res.json(rows);
@@ -4551,9 +5073,10 @@ app.get('/api/v1/ingest-documents', (req, res) => {
 
 app.get('/api/v1/ingest-documents/:id', (req, res) => {
   const row = db.prepare(`
-    SELECT d.*, u.display_name AS uploaded_by_name, p.project_name
+    SELECT d.*, u.display_name AS uploaded_by_name, c.display_name AS cancelled_by_name, p.project_name
     FROM asdlc_ingest_document d
     LEFT JOIN asdlc_user u ON d.uploaded_by = u.user_id
+    LEFT JOIN asdlc_user c ON d.cancelled_by = c.user_id
     LEFT JOIN asdlc_project p ON d.project_id = p.project_id
     WHERE d.ingest_id = ?
   `).get(req.params.id);
@@ -4629,6 +5152,20 @@ app.post('/api/v1/ingest-documents', upload.single('file'), (req, res) => {
     return res.status(400).json({ error: 'project_id and document_title are required' });
   }
 
+  // ── Guard foreign keys so a stale client value can't throw an opaque
+  //    "FOREIGN KEY constraint failed". project_id must exist; a stale/unknown
+  //    uploaded_by (e.g. a user_id cached from an older DB) is downgraded to NULL
+  //    rather than blocking the upload.
+  const projExists = db.prepare('SELECT 1 FROM asdlc_project WHERE project_id = ?').get(project_id);
+  if (!projExists) {
+    if (req.file) require('fs').unlinkSync(req.file.path);
+    return res.status(400).json({ error: `Unknown project_id "${project_id}". Re-select the application and try again.` });
+  }
+  const uploadedBy = (uid && db.prepare('SELECT 1 FROM asdlc_user WHERE user_id = ?').get(uid)) ? uid : null;
+  if (uid && !uploadedBy) {
+    console.warn(`[ingest-documents] uploaded_by "${uid}" is not a known user — storing NULL. The current profile may be stale; re-pick a user.`);
+  }
+
   const id = generateId();
   db.prepare(`
     INSERT INTO asdlc_ingest_document
@@ -4637,10 +5174,10 @@ app.post('/api/v1/ingest-documents', upload.single('file'), (req, res) => {
        uploaded_at, created_at, updated_at)
     VALUES (?,?,?,?,?,?,?,'pending',?,?,?,datetime('now'),datetime('now'),datetime('now'))
   `).run(id, project_id, document_title, file_name, file_type,
-         document_type, description, uid, file_path, raw_text);
+         document_type, description, uploadedBy, file_path, raw_text);
 
   auditLog('asdlc_ingest_document', id, 'INSERT', null,
-    { project_id, document_title, file_name, document_type }, uid);
+    { project_id, document_title, file_name, document_type }, uploadedBy);
 
   const created = db.prepare(`
     SELECT d.*, u.display_name AS uploaded_by_name, p.project_name
@@ -4667,6 +5204,46 @@ app.put('/api/v1/ingest-documents/:id', (req, res) => {
     .run(...Object.values(updates), req.params.id);
   auditLog('asdlc_ingest_document', req.params.id, 'UPDATE', row, updates, uid);
   res.json(db.prepare('SELECT * FROM asdlc_ingest_document WHERE ingest_id = ?').get(req.params.id));
+});
+
+// Soft-cancel an ingest document (reversible). Allowed any time BEFORE promote.
+// A cancelled doc drops out of the default list and all mutating endpoints refuse,
+// which effectively voids its staged extractions + open clarifications until restored.
+app.post('/api/v1/ingest-documents/:id/cancel', (req, res) => {
+  const uid = userId(req);
+  const row = db.prepare('SELECT * FROM asdlc_ingest_document WHERE ingest_id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  if (row.lifecycle_status === 'cancelled') return res.status(409).json({ error: 'Document is already cancelled' });
+  if (row.ingest_status === 'promoted') {
+    return res.status(409).json({ error: 'Promoted documents cannot be cancelled — their design has already been turned into a Change Packet.' });
+  }
+  const reason = (req.body && req.body.reason ? String(req.body.reason).trim() : '') || null;
+  db.prepare(`
+    UPDATE asdlc_ingest_document
+    SET lifecycle_status='cancelled', cancelled_at=datetime('now'), cancelled_by=?, cancel_reason=?,
+        updated_at=datetime('now')
+    WHERE ingest_id=?
+  `).run(uid, reason, req.params.id);
+  const after = db.prepare('SELECT * FROM asdlc_ingest_document WHERE ingest_id = ?').get(req.params.id);
+  auditLog('asdlc_ingest_document', req.params.id, 'UPDATE', row, after, uid);
+  res.json(after);
+});
+
+// Restore (un-cancel) a soft-cancelled ingest document.
+app.post('/api/v1/ingest-documents/:id/restore', (req, res) => {
+  const uid = userId(req);
+  const row = db.prepare('SELECT * FROM asdlc_ingest_document WHERE ingest_id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  if (row.lifecycle_status !== 'cancelled') return res.status(409).json({ error: 'Document is not cancelled' });
+  db.prepare(`
+    UPDATE asdlc_ingest_document
+    SET lifecycle_status='active', cancelled_at=NULL, cancelled_by=NULL, cancel_reason=NULL,
+        updated_at=datetime('now')
+    WHERE ingest_id=?
+  `).run(req.params.id);
+  const after = db.prepare('SELECT * FROM asdlc_ingest_document WHERE ingest_id = ?').get(req.params.id);
+  auditLog('asdlc_ingest_document', req.params.id, 'UPDATE', row, after, uid);
+  res.json(after);
 });
 
 // ──────────────────────────────────────────────

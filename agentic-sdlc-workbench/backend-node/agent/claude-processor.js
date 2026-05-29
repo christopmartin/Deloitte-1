@@ -4,6 +4,13 @@
 // Uses Anthropic API with tool use (function calling) to extract structured
 // design entities from ingested documents and stage them for human review.
 //
+// Tool definitions, entity→table mapping, and conflict fields all come from
+// agent/entity-registry.js (single source of truth). This module adds:
+//   - context-aware extraction (existing-design summary → create/update/delete)
+//   - best-practice injection (global house rules from Admin)
+//   - live model + extended-thinking selection (Admin AI Settings)
+//   - token-usage logging
+//
 // Same public interface as stub-processor:
 //   async processDocument(ingestId)
 //   → { extractions_staged, clarifications_raised, round, new_status, threshold }
@@ -14,6 +21,8 @@ const Anthropic = require('@anthropic-ai/sdk');
 const fs        = require('fs');
 const path      = require('path');
 const { db, generateId } = require('../db');
+const registry  = require('./entity-registry');
+const aiConfig  = require('./ai-config');
 
 // ── Anthropic client (lazy) ───────────────────────────────────────────────────
 let _client;
@@ -28,205 +37,15 @@ function getClient() {
 // ── Schema loaded once at startup ─────────────────────────────────────────────
 const SCHEMA_SQL = fs.readFileSync(path.join(__dirname, '..', 'schema.sql'), 'utf8');
 
-// ── Model config ──────────────────────────────────────────────────────────────
-const MODEL         = process.env.CLAUDE_EXTRACTION_MODEL || 'claude-sonnet-4-6';
-const MAX_TOKENS    = 8192;
-const MAX_API_LOOPS = 10;   // safety cap on the tool-call agentic loop
+// ── Safety cap on the tool-call agentic loop ──────────────────────────────────
+const MAX_API_LOOPS = 10;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TOOL DEFINITIONS
-// Each tool maps directly to a Workbench entity type.
-// Parameters mirror the schema columns.
-// confidence (0–1) is REQUIRED on every extraction tool — forces honest self-assessment.
+// TOOL DEFINITIONS — entity tools come from the registry; raise_clarification is
+// the one non-entity tool defined locally.
 // ─────────────────────────────────────────────────────────────────────────────
 const EXTRACTION_TOOLS = [
-  {
-    name: 'extract_use_case',
-    description: 'Extract a use case identified in the document. Maps to asdlc_use_case.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        title:             { type: 'string',  description: 'Short descriptive title of the use case' },
-        summary:           { type: 'string',  description: 'Brief summary of what this use case achieves' },
-        business_objective:{ type: 'string',  description: 'The business objective this use case serves' },
-        expected_value:    { type: 'string',  description: 'Expected value — cost saving, time saving, quality improvement' },
-        users:             { type: 'string',  description: 'Who uses this — roles, teams, or systems' },
-        success_criteria:  { type: 'array',   items: { type: 'string' }, description: 'Measurable success criteria' },
-        constraints_list:  { type: 'array',   items: { type: 'string' }, description: 'Known constraints or limitations' },
-        supervision_model: { type: 'string',  enum: ['Assisted', 'Automated', 'Human-led'], description: 'Level of human supervision required' },
-        urgency:           { type: 'string',  description: 'Business urgency or priority' },
-        confidence:        { type: 'number',  minimum: 0, maximum: 1, description: 'Your confidence in this extraction (0–1)' },
-        confidence_notes:  { type: 'string',  description: 'What you are uncertain about, if anything' },
-      },
-      required: ['title', 'summary', 'confidence'],
-    },
-  },
-  {
-    name: 'extract_workflow',
-    description: 'Extract a workflow — a named sequence of steps that accomplishes a goal. Maps to asdlc_workflow.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        name:          { type: 'string', description: 'Name of the workflow' },
-        trigger:       { type: 'string', description: 'What starts this workflow — event, schedule, human action, or system call' },
-        handoffs:      { type: 'array',  items: { type: 'string' }, description: 'Hand-off points where work moves between roles or systems' },
-        decisions:     { type: 'array',  items: { type: 'string' }, description: 'Key decision points in the workflow' },
-        fallback_paths:{ type: 'array',  items: { type: 'string' }, description: 'Alternative paths when the happy path fails or branches' },
-        confidence:    { type: 'number', minimum: 0, maximum: 1, description: 'Your confidence in this extraction (0–1)' },
-        confidence_notes: { type: 'string', description: 'What you are uncertain about, if anything' },
-      },
-      required: ['name', 'trigger', 'confidence'],
-    },
-  },
-  {
-    name: 'extract_workflow_step',
-    description: 'Extract a single step within a workflow. Call once per step. Maps to asdlc_workflow_step.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        name:          { type: 'string',  description: 'Name of the step' },
-        step_number:   { type: 'integer', description: 'Sequence number within the workflow (1, 2, 3…)' },
-        workflow_name: { type: 'string',  description: 'Name of the parent workflow this step belongs to' },
-        actor_role:    { type: 'string',  description: 'Role or system responsible for executing this step' },
-        sla_hours:     { type: 'number',  description: 'Maximum hours allowed to complete this step' },
-        inputs:        { type: 'array',   items: { type: 'string' }, description: 'Inputs required to begin this step' },
-        outputs:       { type: 'array',   items: { type: 'string' }, description: 'Outputs produced when this step completes' },
-        decisions_list:{ type: 'array',   items: { type: 'string' }, description: 'Decisions made at this step' },
-        confidence:    { type: 'number',  minimum: 0, maximum: 1, description: 'Your confidence in this extraction (0–1)' },
-        confidence_notes: { type: 'string', description: 'What you are uncertain about, if anything' },
-      },
-      required: ['name', 'step_number', 'confidence'],
-    },
-  },
-  {
-    name: 'extract_hitl_gate',
-    description: 'Extract a Human-in-the-Loop gate — a point where a human must review, approve, or decide before the workflow continues. Maps to asdlc_hitl_gate.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        gate_name:         { type: 'string', description: 'Name of this HITL gate' },
-        workflow_name:     { type: 'string', description: 'Name of the workflow this gate belongs to' },
-        gate_type:         { type: 'string', enum: ['approval', 'review', 'escalation', 'sign-off', 'other'], description: 'Type of human intervention required' },
-        criteria:          { type: 'string', description: 'What the human is reviewing or deciding — the question they must answer' },
-        owner_role:        { type: 'string', description: 'Role responsible for responding at this gate' },
-        sla:               { type: 'string', description: 'Time allowed for the human to respond (e.g. "4 hours", "1 business day")' },
-        handoff_mechanism: { type: 'string', description: 'How the work reaches the human — notification, queue, dashboard, email' },
-        trigger_condition: { type: 'string', description: 'When this gate fires — always, on threshold breach, on exception flag' },
-        confidence:        { type: 'number', minimum: 0, maximum: 1, description: 'Your confidence in this extraction (0–1)' },
-        confidence_notes:  { type: 'string', description: 'What you are uncertain about, if anything' },
-      },
-      required: ['gate_name', 'criteria', 'owner_role', 'confidence'],
-    },
-  },
-  {
-    name: 'extract_agent_spec',
-    description: 'Extract an AI agent specification — a named agent with a defined role in the workflow. Maps to asdlc_agent_spec.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        name:            { type: 'string', description: 'Name of the agent' },
-        scope:           { type: 'string', description: 'What this agent is responsible for — its domain and boundaries' },
-        instructions:    { type: 'string', description: 'Key operating rules or instructions for this agent' },
-        goals:           { type: 'array',  items: { type: 'string' }, description: 'Goals this agent must achieve' },
-        done_criteria:   { type: 'array',  items: { type: 'string' }, description: 'How to determine when this agent has successfully completed its task' },
-        memory_strategy: { type: 'string', description: 'How this agent retains context — none, session, or persistent' },
-        design_risks:    { type: 'array',  items: { type: 'string' }, description: 'Known risks or failure modes in this agent\'s design' },
-        model_preference:{ type: 'string', description: 'Preferred AI model (e.g. claude-sonnet, claude-opus)' },
-        confidence:      { type: 'number', minimum: 0, maximum: 1, description: 'Your confidence in this extraction (0–1)' },
-        confidence_notes:{ type: 'string', description: 'What you are uncertain about, if anything' },
-      },
-      required: ['name', 'scope', 'confidence'],
-    },
-  },
-  {
-    name: 'extract_guardrail',
-    description: 'Extract a guardrail — a rule, constraint, limit, or boundary on agent behaviour. Not stored in its own table; promoted to a Change Packet for human approval.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        rule_name:           { type: 'string', description: 'Short name for this guardrail' },
-        rule_text:           { type: 'string', description: 'Full plain-English statement of the rule' },
-        severity:            { type: 'string', enum: ['critical', 'high', 'medium', 'low'], description: 'How severe a breach of this rule would be' },
-        applies_to:          { type: 'string', description: 'What entity type or process this guardrail constrains' },
-        threshold_value:     { type: 'string', description: 'Numeric or categorical threshold that triggers this rule (e.g. "10000", "> 7")' },
-        threshold_unit:      { type: 'string', description: 'Unit of the threshold — GBP, items, hours, score, etc.' },
-        regulatory_reference:{ type: 'string', description: 'Regulation or policy this guardrail derives from, if any' },
-        action_if_triggered: { type: 'string', enum: ['block', 'escalate', 'flag', 'log', 'halt'], description: 'What should happen when this rule is triggered' },
-        confidence:          { type: 'number', minimum: 0, maximum: 1, description: 'Your confidence in this extraction (0–1)' },
-        confidence_notes:    { type: 'string', description: 'What you are uncertain about, if anything' },
-      },
-      required: ['rule_name', 'rule_text', 'severity', 'confidence'],
-    },
-  },
-  {
-    name: 'extract_user_story',
-    description: 'Extract a user story in Role / Want / So-That format.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        role:                { type: 'string', description: 'The type of user — their role or title' },
-        want:                { type: 'string', description: 'What this user wants the system to do' },
-        so_that:             { type: 'string', description: 'The business reason — why they want it' },
-        acceptance_criteria: { type: 'array',  items: { type: 'string' }, description: 'Testable conditions that must be met for this story to be complete' },
-        priority:            { type: 'string', enum: ['must-have', 'should-have', 'could-have'], description: 'Priority of this story' },
-        confidence:          { type: 'number', minimum: 0, maximum: 1, description: 'Your confidence in this extraction (0–1)' },
-        confidence_notes:    { type: 'string', description: 'What you are uncertain about, if anything' },
-      },
-      required: ['role', 'want', 'so_that', 'confidence'],
-    },
-  },
-  {
-    name: 'extract_data_source',
-    description: 'Extract a data source — any system, database, API, file store, or service that an agent reads from or writes to.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        source_name:        { type: 'string',  description: 'Name of the system or data source' },
-        source_type:        { type: 'string',  enum: ['api', 'database', 'file', 'service', 'queue', 'other'], description: 'Type of data source' },
-        description:        { type: 'string',  description: 'What this source contains and what it is used for' },
-        access_type:        { type: 'string',  enum: ['read', 'write', 'read-write'], description: 'Whether agents read, write, or both' },
-        access_requirements:{ type: 'array',   items: { type: 'string' }, description: 'Authentication, permission, or licensing requirements' },
-        contains_pii:       { type: 'boolean', description: 'Does this source contain personal or sensitive data?' },
-        rate_limits:        { type: 'string',  description: 'API rate limits or quota constraints if known' },
-        confidence:         { type: 'number',  minimum: 0, maximum: 1, description: 'Your confidence in this extraction (0–1)' },
-        confidence_notes:   { type: 'string',  description: 'What you are uncertain about, if anything' },
-      },
-      required: ['source_name', 'source_type', 'confidence'],
-    },
-  },
-  {
-    name: 'extract_process_segment',
-    description: 'Extract a process segment — a named phase or stage within the overall process (commonly used for as-is analysis).',
-    input_schema: {
-      type: 'object',
-      properties: {
-        segment_name:   { type: 'string',  description: 'Name of the process segment' },
-        description:    { type: 'string',  description: 'What happens in this segment' },
-        swim_lane:      { type: 'string',  description: 'Department, team, or system boundary that owns this segment' },
-        sequence_order: { type: 'integer', description: 'Position of this segment in the overall process' },
-        confidence:     { type: 'number',  minimum: 0, maximum: 1, description: 'Your confidence in this extraction (0–1)' },
-        confidence_notes:{ type: 'string', description: 'What you are uncertain about, if anything' },
-      },
-      required: ['segment_name', 'confidence'],
-    },
-  },
-  {
-    name: 'extract_governance_control',
-    description: 'Extract a governance control — a recurring review, audit, or oversight mechanism.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        control_name:     { type: 'string', description: 'Name of the governance control' },
-        description:      { type: 'string', description: 'What this control does and why it exists' },
-        frequency:        { type: 'string', description: 'How often — daily, weekly, monthly, quarterly, annually' },
-        owner_role:       { type: 'string', description: 'Role responsible for this control' },
-        evidence_required:{ type: 'string', description: 'Evidence that must be produced to demonstrate this control was performed' },
-        confidence:       { type: 'number', minimum: 0, maximum: 1, description: 'Your confidence in this extraction (0–1)' },
-        confidence_notes: { type: 'string', description: 'What you are uncertain about, if anything' },
-      },
-      required: ['control_name', 'confidence'],
-    },
-  },
+  ...registry.buildApiTools(),
   {
     name: 'raise_clarification',
     description: [
@@ -246,21 +65,58 @@ const EXTRACTION_TOOLS = [
       required: ['question_text', 'target_entity_type', 'target_field'],
     },
   },
+  {
+    name: 'get_existing_entity',
+    description: [
+      'Fetch the FULL current record of an existing design entity by its slug, so you can reconcile',
+      'EVERY field before proposing an update or delete. The existing-design list shows only names —',
+      'not field values — so you MUST call this before any operation=update/delete to see what is',
+      'actually stored. Use the slug and entity_type exactly as shown in the existing-design list.',
+    ].join(' '),
+    input_schema: {
+      type: 'object',
+      properties: {
+        slug:        { type: 'string', description: 'The slug from the existing-design list, e.g. "T-002"' },
+        entity_type: { type: 'string', description: 'The entity_type from the existing-design list, e.g. "tool"' },
+      },
+      required: ['slug', 'entity_type'],
+    },
+  },
 ];
 
-// ── tool name → entity_type ───────────────────────────────────────────────────
-const TOOL_TO_ENTITY = {
-  extract_use_case:           'use_case',
-  extract_workflow:           'workflow',
-  extract_workflow_step:      'workflow_step',
-  extract_hitl_gate:          'hitl_gate',
-  extract_agent_spec:         'agent_spec',
-  extract_guardrail:          'guardrail',
-  extract_user_story:         'user_story',
-  extract_data_source:        'data_source',
-  extract_process_segment:    'process_segment',
-  extract_governance_control: 'governance_control',
-};
+// ── tool name → entity_type (from registry) ───────────────────────────────────
+const TOOL_TO_ENTITY = registry.toolToEntity();
+
+/**
+ * Fetch a single existing entity's full current record by slug, for the
+ * get_existing_entity lookup tool. Returns a cleaned object (internal/audit
+ * columns dropped, JSON string columns parsed) or null when not found.
+ */
+function fetchExistingEntity(projectId, entityType, slug) {
+  if (!projectId || !entityType || !slug) return null;
+  const e = registry.byEntityType[entityType];
+  if (!e || !e.table) return null;
+  let row;
+  try {
+    row = db.prepare(
+      `SELECT * FROM ${e.table}
+       WHERE project_id = ? AND slug = ?
+         AND (lifecycle_status IS NULL OR lifecycle_status != 'retired')`
+    ).get(projectId, slug);
+  } catch { return null; }
+  if (!row) return null;
+
+  const DROP = new Set(['created_by', 'updated_by', 'created_at', 'updated_at', 'project_id', 'version', 'visibility_scope']);
+  const out = {};
+  for (const [k, v] of Object.entries(row)) {
+    if (DROP.has(k)) continue;
+    if (typeof v === 'string' && (v.startsWith('{') || v.startsWith('['))) {
+      try { out[k] = JSON.parse(v); continue; } catch { /* keep as string */ }
+    }
+    out[k] = v;
+  }
+  return out;
+}
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
 function getCurrentRound(ingestId) {
@@ -276,11 +132,51 @@ function getAnsweredClarifications(ingestId) {
   ).all(ingestId);
 }
 
+/**
+ * Build a compact, token-bounded snapshot of the application's existing design so
+ * Claude can match new requirements against current entities (create vs update vs
+ * delete). Iterates registry entries flagged summarizable. Returns '' for a brand
+ * new application.
+ */
+function buildExistingDesignSummary(projectId) {
+  if (!projectId) return '';
+  const CAP = 150;
+  const lines = [];
+  let total = 0;
+  let omitted = 0;
+
+  for (const e of registry.REGISTRY) {
+    if (!e.summarizable || !e.materializable) continue;
+    const nameKey = e.nameKeys && e.nameKeys[0];
+    const nameCol = nameKey && e.fieldMap && e.fieldMap[nameKey] ? e.fieldMap[nameKey].col : null;
+    if (!nameCol) continue;
+
+    let rows;
+    try {
+      rows = db.prepare(
+        `SELECT slug, ${nameCol} AS nm FROM ${e.table}
+         WHERE project_id = ? AND (lifecycle_status IS NULL OR lifecycle_status != 'retired')
+         ORDER BY slug`
+      ).all(projectId);
+    } catch { continue; }
+
+    for (const r of rows) {
+      if (total >= CAP) { omitted++; continue; }
+      const slug = r.slug || '(no-slug)';
+      lines.push(`  ${slug} | ${e.entity_type} | "${String(r.nm || '').slice(0, 80)}"`);
+      total++;
+    }
+  }
+
+  if (omitted > 0) lines.push(`  (… ${omitted} more entities omitted for brevity)`);
+  return lines.join('\n');
+}
+
 /** Upsert an extraction row — match on entity_type + primary name field to avoid duplicates on re-runs. */
 function upsertExtraction(ingestId, entityType, entityData, confidence, status, round) {
-  const keyValue =
-    entityData.title        || entityData.name      || entityData.rule_name  ||
-    entityData.gate_name    || entityData.segment_name || entityData.source_name ||
+  const keyValue = registry.entityName(entityType, entityData) ||
+    entityData.title || entityData.name || entityData.rule_name ||
+    entityData.gate_name || entityData.segment_name || entityData.source_name ||
     entityData.control_name ||
     (entityData.role && entityData.want ? `${entityData.role}::${entityData.want}` : null);
 
@@ -294,9 +190,9 @@ function upsertExtraction(ingestId, entityType, entityData, confidence, status, 
     for (const row of rows) {
       try {
         const d = JSON.parse(row.entity_data);
-        const k =
-          d.title        || d.name      || d.rule_name  ||
-          d.gate_name    || d.segment_name || d.source_name ||
+        const k = registry.entityName(entityType, d) ||
+          d.title || d.name || d.rule_name ||
+          d.gate_name || d.segment_name || d.source_name ||
           d.control_name ||
           (d.role && d.want ? `${d.role}::${d.want}` : null);
         if (k === keyValue) { existingId = row.extraction_id; break; }
@@ -343,12 +239,23 @@ function writeClarification(ingestId, round, q) {
 }
 
 // ── Prompt builders ───────────────────────────────────────────────────────────
-function buildSystemPrompt(doc, threshold, answeredClarifications) {
+function buildSystemPrompt(doc, threshold, answeredClarifications, existingSummary, bestPractices) {
   const lines = [
     `You are an expert requirements extraction agent for an Agentic AI Software Development Lifecycle (SDLC) Workbench.`,
     ``,
     `Your job: read the document and call the appropriate extraction tool for EVERY design entity you find.`,
     `Call tools repeatedly — one call per entity. Do not combine multiple entities into one tool call.`,
+  ];
+
+  if (bestPractices && bestPractices.length > 0) {
+    lines.push(
+      ``,
+      `## Best practices / house rules (FOLLOW THESE)`,
+      ...bestPractices.map(b => `  - ${b.title ? b.title + ': ' : ''}${b.rule_text}`),
+    );
+  }
+
+  lines.push(
     ``,
     `## Confidence rules`,
     `- confidence is on a 0–1 scale and is REQUIRED on every extraction tool call.`,
@@ -364,17 +271,65 @@ function buildSystemPrompt(doc, threshold, answeredClarifications) {
     `  workflow_step     — each individual step within a workflow (one tool call per step)`,
     `  hitl_gate         — any point where a human must review, approve, or decide`,
     `  agent_spec        — any AI agent described or clearly implied`,
+    `  tool              — any tool, API, function, query, or integration an agent uses`,
     `  guardrail         — any rule, constraint, limit, or boundary on agent behaviour`,
     `  user_story        — any requirement stated from a user's perspective`,
     `  data_source       — any system, database, API, or data store mentioned`,
     `  process_segment   — named phases or stages (as-is or to-be analysis)`,
     `  governance_control — any recurring audit, review, or oversight mechanism`,
     ``,
+    `## Linking entities`,
+    `  - When you extract a workflow, set use_case_title to the use case it belongs to.`,
+    `  - When you extract a workflow_step or hitl_gate, set workflow_name to its parent workflow.`,
+    `  - When you extract an agent_spec, set use_case_title (and workflow_name if relevant).`,
+    `  - Use the EXACT title/name of an entity you are also extracting, or one already in the existing design.`,
+    ``,
     `## What NOT to do`,
     `  - Do not invent entities not present or clearly implied in the document`,
     `  - Do not extract the same entity twice`,
     `  - Do not raise clarification questions for things you can reasonably infer`,
     `  - Do not stop early — read the entire document before concluding`,
+  );
+
+  // ── Conflict detection against existing design ──────────────────────────────
+  lines.push(
+    ``,
+    `## Existing design for this application (detect overlaps before creating new)`,
+  );
+  if (existingSummary && existingSummary.trim()) {
+    lines.push(
+      `Each line is:  slug | entity_type | "name"`,
+      existingSummary,
+      ``,
+      `For every entity you extract, set these fields:`,
+      `  - operation: "create" for a brand-new entity; "update" if it changes one of the entities`,
+      `    listed above; "delete" if the document says to remove one.`,
+      `  - target_slug: REQUIRED for update/delete — the slug from the list above. NEVER invent a slug.`,
+      `  - conflict_classification: net_new | modifies_existing | deletes_existing.`,
+      `  - conflict_rationale: one sentence explaining the classification.`,
+      `If you are unsure whether something matches an existing entity, prefer operation=create and note the`,
+      `possible overlap in conflict_rationale so a human can decide.`,
+      ``,
+      `### Reconciling updates (IMPORTANT — avoid leaving stale data)`,
+      `The list above shows only slugs and names, NOT field values. Before you propose operation=update`,
+      `or operation=delete, you MUST call get_existing_entity(slug, entity_type) to load the entity's`,
+      `full current record. Then re-emit the COMPLETE entity with EVERY field reconciled — not just the`,
+      `one field the document mentions. Only fields you include are written; any field you omit keeps its`,
+      `old value.`,
+      `Changes ripple: e.g. renaming a tool from a SAP integration to an Oracle one usually also changes`,
+      `its error codes (sap_unavailable → oracle_unavailable), access roles ("SAP AP read role" → the`,
+      `Oracle equivalent), endpoints, base URLs, and descriptions. Inspect every field of the loaded`,
+      `record and update anything that still references the old system, name, or behaviour. Do not leave`,
+      `stale values behind.`,
+    );
+  } else {
+    lines.push(
+      `This application has no existing design yet — everything you find is brand new.`,
+      `Set operation="create" and conflict_classification="net_new" on every entity.`,
+    );
+  }
+
+  lines.push(
     ``,
     `## Document context`,
     `  Application : ${doc.project_name || 'Unknown'}`,
@@ -382,7 +337,7 @@ function buildSystemPrompt(doc, threshold, answeredClarifications) {
     `  Title        : ${doc.document_title}`,
     `  Description  : ${doc.description || 'None provided'}`,
     `  Confidence threshold for this application: ${threshold}`,
-  ];
+  );
 
   if (answeredClarifications && answeredClarifications.length > 0) {
     lines.push(
@@ -441,42 +396,82 @@ function buildUserMessage(doc, round, threshold) {
 }
 
 // ── Agentic extraction loop ───────────────────────────────────────────────────
-async function runExtractionLoop(systemPrompt, userMessage) {
+async function runExtractionLoop(systemPrompt, userMessage, usageCtx) {
   const client = getClient();
+  const projectId = usageCtx && usageCtx.projectId;
   const allToolUses = [];
   let messages = [{ role: 'user', content: userMessage }];
   let loops = 0;
 
+  const model      = aiConfig.resolveModel('extraction');
+  const thinkCfg   = aiConfig.getThinkingConfig('extraction');
+  let   maxTokens  = aiConfig.getMaxTokens();
+  // For Claude 3 budget_tokens thinking, ensure max_tokens > budget
+  if (thinkCfg && thinkCfg.thinking && thinkCfg.thinking.budget_tokens) {
+    if (maxTokens <= thinkCfg.thinking.budget_tokens) maxTokens = thinkCfg.thinking.budget_tokens + 1024;
+  }
+
+  // Accumulate token usage across the whole loop for a single usage row.
+  const totalUsage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+
   while (loops < MAX_API_LOOPS) {
     loops++;
 
-    const response = await client.messages.create({
-      model:      MODEL,
-      max_tokens: MAX_TOKENS,
+    const req = {
+      model,
+      max_tokens: maxTokens,
       system:     systemPrompt,
       tools:      EXTRACTION_TOOLS,
       tool_choice:{ type: 'auto' },
       messages,
-    });
+    };
+    if (thinkCfg) {
+      req.thinking = thinkCfg.thinking;
+      if (thinkCfg.outputConfig) req.output_config = thinkCfg.outputConfig;
+    }
+
+    const response = await client.messages.create(req);
+
+    if (response.usage) {
+      totalUsage.input_tokens             += response.usage.input_tokens || 0;
+      totalUsage.output_tokens            += response.usage.output_tokens || 0;
+      totalUsage.cache_read_input_tokens  += response.usage.cache_read_input_tokens || 0;
+      totalUsage.cache_creation_input_tokens += response.usage.cache_creation_input_tokens || 0;
+    }
 
     const toolUses = response.content.filter(b => b.type === 'tool_use');
 
     console.log(
-      `[claude-processor] Loop ${loops} — stop_reason: ${response.stop_reason}, ` +
-      `tool_uses this turn: ${toolUses.length}, total so far: ${allToolUses.length + toolUses.length}`
+      `[claude-processor] Loop ${loops} — model ${model}${thinkCfg ? ' +thinking' : ''}, ` +
+      `stop_reason: ${response.stop_reason}, tool_uses this turn: ${toolUses.length}, ` +
+      `total so far: ${allToolUses.length + toolUses.length}`
     );
 
-    allToolUses.push(...toolUses);
+    // Lookups (get_existing_entity) are answered inline below — they are NOT
+    // extractions, so keep them out of the collected tool-use set.
+    allToolUses.push(...toolUses.filter(tu => tu.name !== 'get_existing_entity'));
 
     // Done when Claude signals end_turn or produces no tool calls
     if (response.stop_reason === 'end_turn' || toolUses.length === 0) break;
 
-    // Build tool results (one per tool_use) and continue the conversation
-    const toolResults = toolUses.map(tu => ({
-      type:        'tool_result',
-      tool_use_id: tu.id,
-      content:     'Recorded.',
-    }));
+    // Build tool results (one per tool_use) and continue the conversation.
+    // get_existing_entity returns the full current record so Claude can reconcile
+    // every field on an update/delete; everything else is just acknowledged.
+    const toolResults = toolUses.map(tu => {
+      if (tu.name === 'get_existing_entity') {
+        const slug = tu.input && tu.input.slug;
+        const etype = tu.input && tu.input.entity_type;
+        const rec = fetchExistingEntity(projectId, etype, slug);
+        return {
+          type:        'tool_result',
+          tool_use_id: tu.id,
+          content:     rec
+            ? JSON.stringify(rec)
+            : `No active entity found for slug "${slug}" (entity_type "${etype}"). It may not exist or may already be retired — prefer operation=create and note the uncertainty in conflict_rationale.`,
+        };
+      }
+      return { type: 'tool_result', tool_use_id: tu.id, content: 'Recorded.' };
+    });
 
     messages = [
       ...messages,
@@ -489,7 +484,150 @@ async function runExtractionLoop(systemPrompt, userMessage) {
     console.warn(`[claude-processor] Hit MAX_API_LOOPS (${MAX_API_LOOPS}) — extraction may be incomplete`);
   }
 
+  // Record token usage for this run (never throws)
+  if (usageCtx) {
+    const cost = aiConfig.logUsage({
+      projectId: usageCtx.projectId,
+      source:    usageCtx.source || 'ingest_extraction',
+      refId:     usageCtx.ingestId,
+      model,
+      round:     usageCtx.round,
+      usage:     totalUsage,
+    });
+    console.log(
+      `[claude-processor] Usage — in:${totalUsage.input_tokens} out:${totalUsage.output_tokens}` +
+      (cost != null ? ` ~$${cost.toFixed(4)}` : '')
+    );
+  }
+
   return allToolUses;
+}
+
+// ── Forced reconciliation pass (no reliance on the model choosing to look up) ──
+//
+// After pass 1, the server deterministically finds every update/delete whose
+// target_slug resolves to a real entity, loads each one's FULL current record,
+// and runs a second pass that hands those records to the model and requires a
+// complete reconciled re-emit. This guarantees the model can never update an
+// entity while blind to its current field values — the core fix for stale data.
+
+/** Delete a staged extraction row (used to replace a pass-1 item with its reconciled version). */
+function deleteExtraction(extractionId) {
+  try { db.prepare("DELETE FROM asdlc_ingest_extraction WHERE extraction_id = ?").run(extractionId); }
+  catch (err) { console.warn(`[claude-processor] deleteExtraction(${extractionId}) failed: ${err.message}`); }
+}
+
+function buildReconcileSystemPrompt(doc, bestPractices) {
+  const lines = [
+    `You are reconciling UPDATES to existing design entities for the application "${doc.project_name || 'Unknown'}".`,
+    ``,
+    `You will be given a set of existing entities that the source document changes. For EACH one you`,
+    `receive its COMPLETE current stored record (JSON). Your job is to call that entity's extract_<type>`,
+    `tool ONCE, re-emitting the FULL reconciled record.`,
+  ];
+
+  if (bestPractices && bestPractices.length > 0) {
+    lines.push(
+      ``,
+      `## Best practices / house rules (FOLLOW THESE)`,
+      ...bestPractices.map(b => `  - ${b.title ? b.title + ': ' : ''}${b.rule_text}`),
+    );
+  }
+
+  lines.push(
+    ``,
+    `## Reconciliation rules (CRITICAL)`,
+    `  - Call the extract_<type> tool once per entity listed below — no more, no fewer.`,
+    `  - Set operation="update" (or "delete" if the document removes the entity) and target_slug to the`,
+    `    slug shown for that entity. Never invent a slug.`,
+    `  - Include EVERY field of the entity, not just the ones that change. Any field you omit is LOST —`,
+    `    the system only writes fields you provide.`,
+    `  - Start from the current record. Change every field affected by the document; keep correct fields`,
+    `    exactly as they are.`,
+    `  - Propagate ripple effects. A rename or system change cascades: e.g. moving a tool from SAP to`,
+    `    Oracle also changes its error codes (sap_unavailable → oracle_unavailable), access roles`,
+    `    ("SAP AP read role" → the Oracle equivalent), endpoints, base URLs, contract, and descriptions.`,
+    `    Scan the whole record for anything still referencing the old system, name, or behaviour and fix it.`,
+    `  - Do NOT introduce new entities or re-emit entities not in the list below.`,
+    `  - Set confidence (0–1) and conflict_rationale on each call.`,
+    ``,
+    `## Workbench database schema`,
+    SCHEMA_SQL,
+  );
+
+  return lines.join('\n');
+}
+
+function buildReconcileUserMessage(doc, targets) {
+  const lines = [`## Entities to reconcile (${targets.length})`, ``];
+  targets.forEach((t, i) => {
+    lines.push(
+      `### ${i + 1}. ${t.entityType} — slug ${t.slug} (operation=${t.operation})`,
+      `Current stored record:`,
+      '```json',
+      JSON.stringify(t.current, null, 2),
+      '```',
+      `What the document changes about it: ${t.proposed.conflict_rationale || '(see document below)'}`,
+      ``,
+    );
+  });
+  lines.push(
+    `## Source document`,
+    `---`,
+    doc.raw_text,
+    `---`,
+    ``,
+    `Re-emit each of the ${targets.length} entities above by calling its extract_<type> tool with the`,
+    `FULL reconciled record. Remember: omitted fields are lost.`,
+  );
+  return lines.join('\n');
+}
+
+/**
+ * Run the forced reconciliation pass. Returns null when there is nothing to
+ * reconcile (no update/delete whose target resolves to a real entity).
+ * @returns {Promise<null | { corrected: Array, replacedKeys: Set<string> }>}
+ */
+async function reconcileUpdates(doc, threshold, round, pass1Items, bestPractices) {
+  // Find pass-1 update/delete items whose target_slug resolves to a live record.
+  const targets = [];
+  for (const it of pass1Items) {
+    const op = it.entityData.operation;
+    if (op !== 'update' && op !== 'delete') continue;
+    const slug = it.entityData.target_slug;
+    if (!slug) continue;
+    const current = fetchExistingEntity(doc.project_id, it.entityType, slug);
+    if (!current) continue; // unresolved targets were/are handled as creates downstream
+    targets.push({ entityType: it.entityType, slug, operation: op, current, proposed: it.entityData });
+  }
+
+  if (targets.length === 0) return null;
+
+  console.log(`[claude-processor] Reconciliation pass — forcing full-record re-emit for ${targets.length} update/delete target(s)`);
+
+  const toolUses = await runExtractionLoop(
+    buildReconcileSystemPrompt(doc, bestPractices),
+    buildReconcileUserMessage(doc, targets),
+    { projectId: doc.project_id, ingestId: doc.ingest_id, round, source: 'ingest_reconcile' }
+  );
+
+  // Keep only entity extractions that target one of the slugs we asked about.
+  const wanted = new Set(targets.map(t => `${t.entityType}::${t.slug}`));
+  const corrected = [];
+  const replacedKeys = new Set();
+  for (const { name, input } of toolUses) {
+    if (name === 'raise_clarification') continue;
+    const entityType = TOOL_TO_ENTITY[name];
+    if (!entityType) continue;
+    const { confidence = 0, confidence_notes, ...entityData } = input;
+    const key = `${entityType}::${entityData.target_slug}`;
+    if (!wanted.has(key)) continue; // ignore anything we didn't ask to reconcile
+    corrected.push({ entityType, entityData, confidence, confidence_notes });
+    replacedKeys.add(key);
+  }
+
+  console.log(`[claude-processor] Reconciliation pass — reconciled ${corrected.length}/${targets.length} target(s)`);
+  return { corrected, replacedKeys };
 }
 
 // ── Main entry point ──────────────────────────────────────────────────────────
@@ -513,8 +651,13 @@ async function processDocument(ingestId) {
   const threshold            = doc.confidence_threshold ?? 0.75;
   const round                = getCurrentRound(ingestId);
   const answeredClarifications = round > 1 ? getAnsweredClarifications(ingestId) : [];
+  const existingSummary      = buildExistingDesignSummary(doc.project_id);
+  const bestPractices        = aiConfig.getActiveBestPractices(Object.keys(registry.byEntityType));
 
-  console.log(`[claude-processor] Starting — ingest ${ingestId}, round ${round}, threshold ${threshold}, model ${MODEL}`);
+  console.log(
+    `[claude-processor] Starting — ingest ${ingestId}, round ${round}, threshold ${threshold}, ` +
+    `model ${aiConfig.resolveModel('extraction')}, existing-design lines: ${existingSummary ? existingSummary.split('\n').length : 0}`
+  );
 
   // Mark as processing
   db.prepare("UPDATE asdlc_ingest_document SET ingest_status='processing', updated_at=datetime('now') WHERE ingest_id=?")
@@ -524,8 +667,9 @@ async function processDocument(ingestId) {
   let allToolUses;
   try {
     allToolUses = await runExtractionLoop(
-      buildSystemPrompt(doc, threshold, answeredClarifications),
-      buildUserMessage(doc, round, threshold)
+      buildSystemPrompt(doc, threshold, answeredClarifications, existingSummary, bestPractices),
+      buildUserMessage(doc, round, threshold),
+      { projectId: doc.project_id, ingestId, round }
     );
   } catch (err) {
     console.error('[claude-processor] API error:', err.message);
@@ -535,9 +679,10 @@ async function processDocument(ingestId) {
     throw err;
   }
 
-  // ── Process tool call results ──────────────────────────────────────────────
-  let staged     = 0;
+  // ── Process tool call results (pass 1) ─────────────────────────────────────
   let clarified  = 0;
+  const pass1Items = [];                 // entity extractions, with their row id
+  const itemKeyToExId = new Map();       // "<type>::<target_slug>" → extraction_id (for reconcile replacement)
 
   for (const { name, input } of allToolUses) {
 
@@ -557,11 +702,11 @@ async function processDocument(ingestId) {
     const { confidence = 0, confidence_notes, ...entityData } = input;
     const status = confidence >= threshold ? 'staged' : 'needs_clarification';
 
-    upsertExtraction(ingestId, entityType, entityData, confidence, status, round);
+    const exId = upsertExtraction(ingestId, entityType, entityData, confidence, status, round);
+    pass1Items.push({ exId, entityType, entityData, confidence });
+    if (entityData.target_slug) itemKeyToExId.set(`${entityType}::${entityData.target_slug}`, exId);
 
-    if (status === 'staged') {
-      staged++;
-    } else if (confidence_notes) {
+    if (status !== 'staged' && confidence_notes) {
       // Claude signalled uncertainty but didn't raise a question — auto-generate one
       const autoRaised = writeClarification(ingestId, round, {
         question_text:      `The "${entityData.name || entityData.title || entityData.rule_name || entityType}" extraction has low confidence (${Math.round(confidence * 100)}%). ${confidence_notes} Can you provide more detail?`,
@@ -572,6 +717,29 @@ async function processDocument(ingestId) {
       if (autoRaised) clarified++;
     }
   }
+
+  // ── Pass 2: forced reconciliation of update/delete targets ─────────────────
+  // Never fatal — if the reconciliation call fails we keep the pass-1 versions.
+  try {
+    const result = await reconcileUpdates(doc, threshold, round, pass1Items, bestPractices);
+    if (result && result.corrected.length) {
+      for (const c of result.corrected) {
+        const key   = `${c.entityType}::${c.entityData.target_slug}`;
+        const oldId = itemKeyToExId.get(key);
+        if (oldId) deleteExtraction(oldId);   // drop the blind pass-1 version
+        const status = c.confidence >= threshold ? 'staged' : 'needs_clarification';
+        upsertExtraction(ingestId, c.entityType, c.entityData, c.confidence, status, round);
+      }
+    }
+  } catch (err) {
+    console.warn(`[claude-processor] Reconciliation pass failed — keeping pass-1 updates: ${err.message}`);
+  }
+
+  // Recompute the staged count from the DB so it reflects both passes
+  // (reconciliation may have replaced some pass-1 rows).
+  const staged = db.prepare(
+    "SELECT COUNT(*) AS c FROM asdlc_ingest_extraction WHERE ingest_id=? AND round=? AND status='staged'"
+  ).get(ingestId, round).c;
 
   // ── Determine final document status ───────────────────────────────────────
   const openQ = db.prepare(

@@ -7,7 +7,8 @@ const fs = require('fs');
 const { DatabaseSync } = require('node:sqlite');
 const crypto = require('crypto');
 
-const DB_PATH = path.join(__dirname, 'asdlc.db');
+// DB path is overridable via ASDLC_DB_PATH (used for isolated tests); defaults to the app DB.
+const DB_PATH = process.env.ASDLC_DB_PATH || path.join(__dirname, 'asdlc.db');
 const SCHEMA_PATH = path.join(__dirname, 'schema.sql');
 
 const db = new DatabaseSync(DB_PATH);
@@ -96,6 +97,13 @@ const MIGRATIONS = [
   "CREATE INDEX IF NOT EXISTS idx_exception_dedupe ON asdlc_exception(project_id, related_entity_id, field_name, finding_category, status)",
   // Requirements management
   "ALTER TABLE asdlc_test_case ADD COLUMN requirement_ids TEXT NOT NULL DEFAULT '[]'",
+  // AI ingestion pipeline: create/update/delete operation on change-packet items
+  "ALTER TABLE asdlc_change_packet_item ADD COLUMN operation TEXT NOT NULL DEFAULT 'create'",
+  // Ingest document soft-cancel / archive (reversible; never hard-deleted)
+  "ALTER TABLE asdlc_ingest_document ADD COLUMN lifecycle_status TEXT NOT NULL DEFAULT 'active'",
+  "ALTER TABLE asdlc_ingest_document ADD COLUMN cancelled_at TEXT",
+  "ALTER TABLE asdlc_ingest_document ADD COLUMN cancelled_by TEXT",
+  "ALTER TABLE asdlc_ingest_document ADD COLUMN cancel_reason TEXT",
 ];
 for (const migration of MIGRATIONS) {
   try { db.exec(migration); } catch { /* column already exists — safe to ignore */ }
@@ -407,6 +415,37 @@ function generateId() {
 }
 
 /**
+ * Read a global app setting. Resolution order: asdlc_app_setting row →
+ * environment variable (envVar) → hardcoded fallback.
+ * @param {string} key       setting_key in asdlc_app_setting
+ * @param {*} fallback       value if neither table nor env provides one
+ * @param {string} [envVar]  optional env var name to consult before fallback
+ * @returns {string|*}
+ */
+function getSetting(key, fallback, envVar) {
+  try {
+    const row = db.prepare('SELECT setting_value FROM asdlc_app_setting WHERE setting_key = ?').get(key);
+    if (row && row.setting_value !== null && row.setting_value !== undefined && row.setting_value !== '') {
+      return row.setting_value;
+    }
+  } catch { /* table may not exist on a very old DB — fall through */ }
+  if (envVar && process.env[envVar]) return process.env[envVar];
+  return fallback;
+}
+
+/** Upsert a global app setting. */
+function setSetting(key, value, userId) {
+  db.prepare(`
+    INSERT INTO asdlc_app_setting (setting_key, setting_value, updated_by, updated_at)
+    VALUES (?, ?, ?, datetime('now'))
+    ON CONFLICT(setting_key) DO UPDATE SET
+      setting_value = excluded.setting_value,
+      updated_by    = excluded.updated_by,
+      updated_at    = datetime('now')
+  `).run(key, value === null || value === undefined ? null : String(value), userId || null);
+}
+
+/**
  * Write an audit log entry.
  * @param {string} tableName   - DB table that was changed
  * @param {string} recordId    - Primary key value of the changed row
@@ -436,4 +475,4 @@ function auditLog(tableName, recordId, operation, oldData, newData, userId) {
   }
 }
 
-module.exports = { db, generateId, auditLog, nextSlug };
+module.exports = { db, generateId, auditLog, nextSlug, getSetting, setSetting };

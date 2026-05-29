@@ -43,6 +43,7 @@ let _baselineSelect  = null;
 let _downloadBtn     = null;
 let _previewEl       = null;
 let _allCheckboxes   = [];
+let _aiReviewChk     = null;
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 function injectStyles() {
@@ -352,6 +353,13 @@ function buildControls(card, projects) {
 
   card.appendChild(el('hr', { className: 'be-divider' }));
 
+  // ── Optional AI review (additive; deterministic spec is unchanged) ─────────
+  _aiReviewChk = el('input', { type: 'checkbox', id: 'be-chk-ai-review' });
+  card.appendChild(el('label', { className: 'be-chk-label', for: 'be-chk-ai-review', style: 'margin-bottom:8px' },
+    _aiReviewChk, 'Append AI design review & summary'));
+  card.appendChild(el('div', { style: 'font-size:11px;color:var(--text-muted);margin:-4px 0 10px 0' },
+    'Adds an AI-written Executive Summary, gaps/completeness review, and implementation notes after the deterministic spec.'));
+
   // ── Download button ───────────────────────────────────────────────────────
   _downloadBtn = el('button', { className: 'be-download-btn' }, '⬇  Download Build Spec');
   _downloadBtn.addEventListener('click', handleDownload);
@@ -505,6 +513,11 @@ function handleDownload() {
   const baselineId = _baselineSelect?.value;
   if (baselineId) params.set('baseline_id', baselineId);
   params.set('sections', checkedSections.join(','));
+  if (_aiReviewChk?.checked) params.set('ai_review', '1');
+
+  if (_aiReviewChk?.checked) {
+    showToast('Generating AI review — the download may take a few seconds…', 'info');
+  }
 
   // Direct navigation triggers browser file download (Content-Disposition: attachment)
   window.location.href = `/api/v1/projects/${_projectId}/build-export?${params.toString()}`;

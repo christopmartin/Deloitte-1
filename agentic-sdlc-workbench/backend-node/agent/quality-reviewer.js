@@ -33,7 +33,7 @@ function getClient() {
   return _client;
 }
 
-const MODEL      = process.env.CLAUDE_QUALITY_REVIEWER_MODEL || 'claude-sonnet-4-6';
+const aiConfig   = require('./ai-config');
 const MAX_TOKENS = 2048;
 
 const CATEGORIES = ['missing', 'incomplete', 'inconsistent', 'conflicting'];
@@ -349,7 +349,7 @@ async function claudeReview(entityType, entity, neighbors, opts) {
   const client = getClient();
   const userPrompt = buildClaudeReviewPrompt(entityType, entity, neighbors, opts);
   const response = await client.messages.create({
-    model: MODEL,
+    model: aiConfig.resolveModel('quality_reviewer'),
     max_tokens: MAX_TOKENS,
     messages: [{ role: 'user', content: userPrompt }],
   });
@@ -377,7 +377,7 @@ async function reviewEntity({ projectId, entityType, entityId, db }) {
   }
   try {
     const findings = await claudeReview(entityType, entity, neighbors);
-    return { findings, model: MODEL, source: 'claude' };
+    return { findings, model: aiConfig.resolveModel('quality_reviewer'), source: 'claude' };
   } catch (err) {
     console.error('[quality-reviewer] Claude call failed, falling back to stub:', err.message);
     return { findings: stubReview(entityType, entity, neighbors), model: 'stub', source: 'stub', error: err.message };

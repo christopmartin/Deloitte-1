@@ -27,6 +27,8 @@ const MODULE_LOADERS = {
   cost_projections: () => import('./modules/cost_projections.js'),
   cost_management: () => import('./modules/cost_management.js'),
   reports: () => import('./modules/reports.js'),
+  admin_ai: () => import('./modules/admin_ai.js'),
+  admin_best_practices: () => import('./modules/admin_best_practices.js'),
 };
 
 // ============================================================
@@ -216,6 +218,22 @@ function setUserPill(name) {
   const avatar = document.getElementById('user-avatar');
   if (display) display.textContent = name;
   if (avatar) avatar.textContent = getInitials(name);
+
+  // Make the pill clickable to re-open the user picker (switch user)
+  const pill = document.getElementById('user-pill');
+  if (pill && !pill.dataset.clickBound) {
+    pill.dataset.clickBound = '1';
+    pill.style.cursor = 'pointer';
+    pill.title = 'Switch user';
+    pill.addEventListener('click', () => {
+      // Clear stored identity so the picker re-runs the full login flow
+      localStorage.removeItem('asdlc_user_id');
+      localStorage.removeItem('asdlc_user_name');
+      currentUserId = null;
+      currentUserName = null;
+      showUserModal();
+    });
+  }
 }
 
 // ============================================================

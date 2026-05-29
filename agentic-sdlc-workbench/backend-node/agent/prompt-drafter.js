@@ -27,7 +27,7 @@ function getClient() {
 }
 
 // ── Model config ──────────────────────────────────────────────────────────────
-const MODEL      = process.env.CLAUDE_PROMPT_DRAFTER_MODEL || 'claude-sonnet-4-6';
+const aiConfig   = require('./ai-config');
 const MAX_TOKENS = 2048;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -139,7 +139,7 @@ async function claudeDraft(ctx) {
   const userPrompt = buildClaudePrompt(ctx);
 
   const response = await client.messages.create({
-    model: MODEL,
+    model: aiConfig.resolveModel('prompt_drafter'),
     max_tokens: MAX_TOKENS,
     messages: [{ role: 'user', content: userPrompt }],
   });
@@ -170,7 +170,7 @@ async function draftAgentSystemPrompt(ctx) {
   }
   try {
     const draft = await claudeDraft(ctx);
-    return { draft, model: MODEL, source: 'claude' };
+    return { draft, model: aiConfig.resolveModel('prompt_drafter'), source: 'claude' };
   } catch (err) {
     console.error('[prompt-drafter] Claude call failed, falling back to stub:', err.message);
     return { draft: stubDraft(ctx), model: 'stub', source: 'stub', error: err.message };

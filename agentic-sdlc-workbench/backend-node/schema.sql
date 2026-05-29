@@ -442,6 +442,7 @@ CREATE TABLE IF NOT EXISTS asdlc_change_packet_item (
     change_packet_id        TEXT NOT NULL REFERENCES asdlc_change_packet(change_packet_id),
     entity_type             TEXT NOT NULL,
     entity_id               TEXT NOT NULL,
+    operation               TEXT NOT NULL DEFAULT 'create',  -- 'create' | 'update' | 'delete'
     field_path              TEXT NOT NULL,
     old_value               TEXT,
     new_value               TEXT NOT NULL,
@@ -594,12 +595,82 @@ CREATE TABLE IF NOT EXISTS asdlc_ingest_document (
     raw_text            TEXT,
     processing_notes    TEXT,
     change_packets_generated INTEGER NOT NULL DEFAULT 0,
+    -- Soft-cancel / archive (reversible; never hard-deleted)
+    lifecycle_status    TEXT NOT NULL DEFAULT 'active',   -- active | cancelled
+    cancelled_at        TEXT,
+    cancelled_by        TEXT REFERENCES asdlc_user(user_id),
+    cancel_reason       TEXT,
     created_at          TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_ingest_project ON asdlc_ingest_document(project_id);
 CREATE INDEX IF NOT EXISTS idx_ingest_status ON asdlc_ingest_document(ingest_status);
+CREATE INDEX IF NOT EXISTS idx_ingest_lifecycle ON asdlc_ingest_document(lifecycle_status);
+
+-- ============================================================
+-- AI CONFIG, USAGE, BEST PRACTICES, LEARNING FEEDBACK
+-- ============================================================
+
+-- Global, workbench-wide key/value settings (model selection, thinking, tokens).
+-- Resolved by getSetting(): table value → env var → hardcoded default.
+CREATE TABLE IF NOT EXISTS asdlc_app_setting (
+    setting_key   TEXT PRIMARY KEY,
+    setting_value TEXT,
+    updated_by    TEXT,
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- One row per AI API run — token usage + computed cost.
+CREATE TABLE IF NOT EXISTS asdlc_ai_usage (
+    usage_id              TEXT PRIMARY KEY,
+    project_id            TEXT,
+    source                TEXT NOT NULL DEFAULT 'ingest_extraction', -- ingest_extraction | quality_review | build_review
+    ref_id                TEXT,                                       -- e.g. ingest_id
+    model                 TEXT,
+    round                 INTEGER,
+    input_tokens          INTEGER NOT NULL DEFAULT 0,
+    output_tokens         INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd              REAL,
+    created_at            TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_project ON asdlc_ai_usage(project_id);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_source  ON asdlc_ai_usage(source);
+
+-- Human-authored, global house rules injected into the extraction prompt.
+CREATE TABLE IF NOT EXISTS asdlc_best_practice (
+    best_practice_id TEXT PRIMARY KEY,
+    scope            TEXT NOT NULL DEFAULT 'global',   -- 'global' | <entity_type>
+    title            TEXT NOT NULL,
+    rule_text        TEXT NOT NULL DEFAULT '',
+    is_active        INTEGER NOT NULL DEFAULT 1,
+    sort_order       INTEGER NOT NULL DEFAULT 0,
+    source           TEXT NOT NULL DEFAULT 'manual',   -- 'manual' | 'from_correction'
+    created_by       TEXT,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by       TEXT,
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Learning loop: proposed-vs-approved signal captured during CP review.
+CREATE TABLE IF NOT EXISTS asdlc_ingest_feedback (
+    feedback_id      TEXT PRIMARY KEY,
+    project_id       TEXT,
+    ingest_id        TEXT,
+    extraction_id    TEXT,
+    change_packet_id TEXT,
+    entity_type      TEXT,
+    model            TEXT,
+    confidence       REAL,
+    outcome          TEXT NOT NULL,        -- accepted_asis | accepted_edited | rejected
+    proposed_value   TEXT,
+    final_value      TEXT,
+    reviewer_id      TEXT,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_project ON asdlc_ingest_feedback(project_id);
 
 -- ============================================================
 -- AUDIT LOG

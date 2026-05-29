@@ -1,0 +1,476 @@
+// agent/entity-registry.js
+//
+// SINGLE SOURCE OF TRUTH for the design-entity types the Workbench understands.
+// Everything that needs to know "what entity types exist and how they map to
+// tables" reads from here:
+//   - claude-processor.js   builds the Claude extraction tools + tool→entity map
+//   - claude-processor.js   builds the "existing design" summary for conflict detection
+//   - server.js  /promote   resolves target slugs + records create/update/delete items
+//   - server.js  applyChangePacket()  materializes approved items into the real tables
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// HOW TO ADD A NEW DESIGN TYPE (e.g. form/screen design, data design, report design)
+// ─────────────────────────────────────────────────────────────────────────────
+//   1. Add the real table to schema.sql AND a `CREATE TABLE IF NOT EXISTS …`
+//      migration in db.js (so existing DBs get it). Give it the standard
+//      columns: <pk>, project_id, slug, name, …, created_by/at, updated_by/at,
+//      version, lifecycle_status.
+//   2. Add ONE entry to REGISTRY below with: entity_type, tool def, table, pk,
+//      slugPrefix, order, nameKeys, fieldMap, parentLinks, materializable:true.
+//   3. (Optional) add a slug index + backfill spec in db.js.
+//   That's it — extraction, promotion, conflict detection and materialization
+//   all pick the new type up automatically. No edits to claude-processor.js,
+//   /promote, or applyChangePacket() are needed.
+//
+// `materializable:false` types (guardrail, user_story, data_source, …) are still
+// extracted and promoted as Change-Packet items for human review, but have no
+// destination table yet, so the materializer skips them cleanly.
+//
+'use strict';
+
+// ── Common fields merged into EVERY extraction tool ───────────────────────────
+// These drive conflict detection (create vs update vs delete) and honest
+// self-assessment. They live in entity_data JSON but are NEVER written as columns
+// (they are not in any fieldMap), so they ride along for the UI/audit only.
+const COMMON_TOOL_FIELDS = {
+  operation: {
+    type: 'string',
+    enum: ['create', 'update', 'delete'],
+    description: 'create = a brand-new entity; update = change an EXISTING one (set target_slug); ' +
+      'delete = remove an EXISTING one (set target_slug). Defaults to create.',
+  },
+  target_slug: {
+    type: 'string',
+    description: 'The slug of the existing entity to update or delete (e.g. UC-003, WF-014). ' +
+      'REQUIRED when operation is update or delete. Leave empty for create. ' +
+      'Must be a slug shown in the "existing design" list — never invent one.',
+  },
+  conflict_classification: {
+    type: 'string',
+    enum: ['net_new', 'modifies_existing', 'deletes_existing'],
+    description: 'How this relates to the existing design.',
+  },
+  conflict_rationale: {
+    type: 'string',
+    description: 'One sentence: why this is net-new vs a modification/deletion of an existing entity.',
+  },
+  confidence: {
+    type: 'number', minimum: 0, maximum: 1,
+    description: 'Your confidence in this extraction (0–1).',
+  },
+  confidence_notes: {
+    type: 'string',
+    description: 'What you are uncertain about, if anything.',
+  },
+};
+
+// Meta keys present in entity_data that must NEVER be written to entity columns.
+const META_KEYS = Object.keys(COMMON_TOOL_FIELDS);
+
+// ── Value transforms for materialization ──────────────────────────────────────
+const j = (v, fallback) => JSON.stringify(v === undefined || v === null ? fallback : v);
+// Columns that expect a JSON OBJECT but the tool may emit a plain string.
+const wrapText  = (v) => j(typeof v === 'string' ? { text: v }  : v, {});
+const wrapModel = (v) => j(typeof v === 'string' ? { model: v } : v, {});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE REGISTRY
+// `order` = materialization order (parents before children, FK-safe).
+// `fieldMap` keys are entity_data keys; only listed keys are written to columns.
+//   { col, json?:bool, transform?:fn, enumMap?:{} }
+// `parentLinks` resolve NOT-NULL/optional FKs: the AI names the parent, we resolve
+//   it to a real id (same-packet first, then existing DB rows).
+// `nameKeys` derive the entity's display name + the in-packet id-map key.
+// ─────────────────────────────────────────────────────────────────────────────
+const REGISTRY = [
+  {
+    entity_type: 'use_case',
+    order: 1,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_use_case',
+    pk: 'use_case_id',
+    slugPrefix: 'UC',
+    nameKeys: ['title'],
+    tool: {
+      name: 'extract_use_case',
+      description: 'Extract a use case identified in the document. Maps to asdlc_use_case.',
+      properties: {
+        title:              { type: 'string', description: 'Short descriptive title of the use case' },
+        summary:            { type: 'string', description: 'Brief summary of what this use case achieves' },
+        business_objective: { type: 'string', description: 'The business objective this use case serves' },
+        expected_value:     { type: 'string', description: 'Expected value — cost saving, time saving, quality improvement' },
+        users:              { type: 'string', description: 'Who uses this — roles, teams, or systems' },
+        success_criteria:   { type: 'array', items: { type: 'string' }, description: 'Measurable success criteria' },
+        constraints_list:   { type: 'array', items: { type: 'string' }, description: 'Known constraints or limitations' },
+        supervision_model:  { type: 'string', enum: ['Assisted', 'Automated', 'Human-led'], description: 'Level of human supervision required' },
+        urgency:            { type: 'string', description: 'Business urgency or priority' },
+      },
+      required: ['title', 'summary'],
+    },
+    fieldMap: {
+      title:              { col: 'title' },
+      summary:            { col: 'summary' },
+      business_objective: { col: 'business_objective' },
+      expected_value:     { col: 'expected_value' },
+      users:              { col: 'users' },
+      urgency:            { col: 'urgency' },
+      success_criteria:   { col: 'success_criteria', json: true },
+      constraints_list:   { col: 'constraints_list', json: true },
+      supervision_model:  { col: 'supervision_model',
+        enumMap: { Assisted: 'Supervised HITL', Automated: 'Autonomous', 'Human-led': 'Advisory-only' } },
+    },
+    parentLinks: [],
+  },
+
+  {
+    entity_type: 'workflow',
+    order: 2,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_workflow',
+    pk: 'workflow_id',
+    slugPrefix: 'WF',
+    nameKeys: ['name'],
+    tool: {
+      name: 'extract_workflow',
+      description: 'Extract a workflow — a named sequence of steps that accomplishes a goal. Maps to asdlc_workflow.',
+      properties: {
+        name:           { type: 'string', description: 'Name of the workflow' },
+        use_case_title: { type: 'string', description: 'Title of the use case this workflow belongs to (for linking). Use an existing use case title when applicable.' },
+        trigger:        { type: 'string', description: 'What starts this workflow — event, schedule, human action, or system call' },
+        handoffs:       { type: 'array', items: { type: 'string' }, description: 'Hand-off points where work moves between roles or systems' },
+        decisions:      { type: 'array', items: { type: 'string' }, description: 'Key decision points in the workflow' },
+        fallback_paths: { type: 'array', items: { type: 'string' }, description: 'Alternative paths when the happy path fails or branches' },
+      },
+      required: ['name', 'trigger'],
+    },
+    fieldMap: {
+      name:           { col: 'name' },
+      trigger:        { col: 'trigger_def', transform: wrapText },
+      handoffs:       { col: 'handoffs', json: true },
+      decisions:      { col: 'decisions', json: true },
+      fallback_paths: { col: 'fallback_paths', json: true },
+    },
+    parentLinks: [
+      { col: 'use_case_id', parentType: 'use_case', nameKeyInData: 'use_case_title', required: true },
+    ],
+  },
+
+  {
+    entity_type: 'workflow_step',
+    order: 3,
+    materializable: true,
+    summarizable: false,
+    table: 'asdlc_workflow_step',
+    pk: 'workflow_step_id',
+    slugPrefix: 'S',
+    nameKeys: ['name'],
+    tool: {
+      name: 'extract_workflow_step',
+      description: 'Extract a single step within a workflow. Call once per step. Maps to asdlc_workflow_step.',
+      properties: {
+        name:           { type: 'string',  description: 'Name of the step' },
+        step_number:    { type: 'integer', description: 'Sequence number within the workflow (1, 2, 3…)' },
+        workflow_name:  { type: 'string',  description: 'Name of the parent workflow this step belongs to' },
+        actor_role:     { type: 'string',  description: 'Role or system responsible for executing this step' },
+        sla_hours:      { type: 'number',  description: 'Maximum hours allowed to complete this step' },
+        inputs:         { type: 'array',   items: { type: 'string' }, description: 'Inputs required to begin this step' },
+        outputs:        { type: 'array',   items: { type: 'string' }, description: 'Outputs produced when this step completes' },
+        decisions_list: { type: 'array',   items: { type: 'string' }, description: 'Decisions made at this step' },
+      },
+      required: ['name', 'step_number'],
+    },
+    fieldMap: {
+      name:           { col: 'name' },
+      step_number:    { col: 'step_number' },
+      actor_role:     { col: 'actor_role' },
+      sla_hours:      { col: 'sla_hours' },
+      inputs:         { col: 'inputs', json: true },
+      outputs:        { col: 'outputs', json: true },
+      decisions_list: { col: 'decisions_list', json: true },
+    },
+    parentLinks: [
+      { col: 'workflow_id', parentType: 'workflow', nameKeyInData: 'workflow_name', required: true },
+    ],
+  },
+
+  {
+    entity_type: 'hitl_gate',
+    order: 4,
+    materializable: true,
+    summarizable: false,
+    table: 'asdlc_hitl_gate',
+    pk: 'hitl_gate_id',
+    slugPrefix: null,                 // hitl_gate has no slug column
+    nameKeys: ['gate_name'],
+    tool: {
+      name: 'extract_hitl_gate',
+      description: 'Extract a Human-in-the-Loop gate — a point where a human must review, approve, or decide before the workflow continues. Maps to asdlc_hitl_gate.',
+      properties: {
+        gate_name:         { type: 'string', description: 'Name of this HITL gate' },
+        workflow_name:     { type: 'string', description: 'Name of the workflow this gate belongs to' },
+        gate_type:         { type: 'string', enum: ['approval', 'review', 'escalation', 'sign-off', 'other'], description: 'Type of human intervention required' },
+        criteria:          { type: 'string', description: 'What the human is reviewing or deciding — the question they must answer' },
+        owner_role:        { type: 'string', description: 'Role responsible for responding at this gate' },
+        sla:               { type: 'string', description: 'Time allowed for the human to respond (e.g. "4 hours", "1 business day")' },
+        handoff_mechanism: { type: 'string', description: 'How the work reaches the human — notification, queue, dashboard, email' },
+      },
+      required: ['gate_name', 'criteria', 'owner_role'],
+    },
+    fieldMap: {
+      gate_type:         { col: 'gate_type' },
+      criteria:          { col: 'criteria' },
+      owner_role:        { col: 'owner_role' },
+      sla:               { col: 'sla' },
+      handoff_mechanism: { col: 'handoff_mechanism' },
+    },
+    parentLinks: [
+      { col: 'workflow_id', parentType: 'workflow', nameKeyInData: 'workflow_name', required: true },
+    ],
+  },
+
+  {
+    entity_type: 'agent_spec',
+    order: 5,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_agent_spec',
+    pk: 'agent_spec_id',
+    slugPrefix: 'AG',
+    nameKeys: ['name'],
+    tool: {
+      name: 'extract_agent_spec',
+      description: 'Extract an AI agent specification — a named agent with a defined role in the workflow. Maps to asdlc_agent_spec.',
+      properties: {
+        name:             { type: 'string', description: 'Name of the agent' },
+        use_case_title:   { type: 'string', description: 'Title of the use case this agent serves (for linking). Use an existing use case title when applicable.' },
+        workflow_name:    { type: 'string', description: 'Name of the workflow this agent operates in, if any' },
+        scope:            { type: 'string', description: 'What this agent is responsible for — its domain and boundaries' },
+        instructions:     { type: 'string', description: 'Key operating rules or instructions for this agent' },
+        goals:            { type: 'array',  items: { type: 'string' }, description: 'Goals this agent must achieve' },
+        done_criteria:    { type: 'array',  items: { type: 'string' }, description: 'How to determine when this agent has successfully completed its task' },
+        memory_strategy:  { type: 'string', description: 'How this agent retains context — none, session, or persistent' },
+        design_risks:     { type: 'array',  items: { type: 'string' }, description: 'Known risks or failure modes in this agent\'s design' },
+        model_preference: { type: 'string', description: 'Preferred AI model (e.g. claude-sonnet, claude-opus)' },
+      },
+      required: ['name', 'scope'],
+    },
+    fieldMap: {
+      name:             { col: 'name' },
+      scope:            { col: 'scope' },
+      instructions:     { col: 'instructions' },
+      goals:            { col: 'goals', json: true },
+      done_criteria:    { col: 'done_criteria', json: true },
+      memory_strategy:  { col: 'memory_strategy' },
+      design_risks:     { col: 'design_risks', json: true },
+      model_preference: { col: 'run_as_model', transform: wrapModel },
+    },
+    parentLinks: [
+      { col: 'use_case_id', parentType: 'use_case', nameKeyInData: 'use_case_title', required: true },
+      { col: 'workflow_id', parentType: 'workflow', nameKeyInData: 'workflow_name', required: false },
+    ],
+  },
+
+  {
+    entity_type: 'tool',
+    order: 6,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_tool',
+    pk: 'tool_id',
+    slugPrefix: 'T',
+    nameKeys: ['name'],
+    tool: {
+      name: 'extract_tool',
+      description: 'Extract a tool / integration that an agent uses — an API, function, query, or external capability. Maps to asdlc_tool.',
+      properties: {
+        name:                { type: 'string', description: 'Name of the tool' },
+        contract:            { type: 'string', description: 'What the tool does — its purpose and contract' },
+        inputs:              { type: 'array',  items: { type: 'string' }, description: 'Inputs the tool accepts' },
+        outputs:             { type: 'array',  items: { type: 'string' }, description: 'Outputs the tool returns' },
+        errors:              { type: 'array',  items: { type: 'string' }, description: 'Error conditions the tool may return, as short snake_case identifiers (e.g. not_found, timeout, unauthorized, source_unavailable). Prefer system-neutral names — if a system is renamed, rename its error codes to match.' },
+        access_requirements: {
+          type: 'object',
+          description: 'Auth / permission / data-handling requirements for the tool.',
+          properties: {
+            role_required:       { type: 'string',  description: 'Roles, permissions, or service accounts needed to call the tool' },
+            data_classification: { type: 'string',  description: 'Data sensitivity, e.g. public / internal / confidential / restricted' },
+            contains_pii:        { type: 'boolean', description: 'Whether the tool handles personally identifiable information' },
+            rate_limit_per_min:  { type: 'number',  description: 'Max calls per minute; omit if none' },
+          },
+        },
+        cost_impact:         { type: 'string', description: 'Cost note for one invocation, e.g. "1 action + 1 IntegrationHub transaction"' },
+        boundaries:          { type: 'array',  items: { type: 'string' }, description: 'Limits / boundaries on what the tool may do' },
+        execution_mode:      { type: 'string', enum: ['sync', 'async'], description: 'Whether the tool runs synchronously or asynchronously' },
+        dev_status:          { type: 'string', enum: ['Existing', 'To be built'], description: 'Whether the tool already exists or must be built' },
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:                { col: 'name' },
+      contract:            { col: 'contract', transform: wrapText },
+      inputs:              { col: 'inputs', json: true },
+      outputs:             { col: 'outputs', json: true },
+      errors:              { col: 'errors', json: true },
+      access_requirements: { col: 'access_requirements', json: true },
+      cost_impact:         { col: 'cost_impact' },
+      boundaries:          { col: 'boundaries', json: true },
+      execution_mode:      { col: 'execution_mode' },
+      dev_status:          { col: 'dev_status' },
+    },
+    parentLinks: [],
+  },
+
+  // ── Types WITHOUT a dedicated table (v1): extracted + promoted for review, but
+  //    not materialized. Add a table + flip materializable to wire them in later.
+  {
+    entity_type: 'guardrail',
+    order: 50, materializable: false, summarizable: false,
+    nameKeys: ['rule_name'],
+    tool: {
+      name: 'extract_guardrail',
+      description: 'Extract a guardrail — a rule, constraint, limit, or boundary on agent behaviour.',
+      properties: {
+        rule_name:           { type: 'string', description: 'Short name for this guardrail' },
+        rule_text:           { type: 'string', description: 'Full plain-English statement of the rule' },
+        severity:            { type: 'string', enum: ['critical', 'high', 'medium', 'low'], description: 'How severe a breach would be' },
+        applies_to:          { type: 'string', description: 'What entity type or process this guardrail constrains' },
+        threshold_value:     { type: 'string', description: 'Numeric or categorical threshold that triggers this rule' },
+        threshold_unit:      { type: 'string', description: 'Unit of the threshold — GBP, items, hours, score, etc.' },
+        regulatory_reference:{ type: 'string', description: 'Regulation or policy this derives from, if any' },
+        action_if_triggered: { type: 'string', enum: ['block', 'escalate', 'flag', 'log', 'halt'], description: 'What happens when triggered' },
+      },
+      required: ['rule_name', 'rule_text', 'severity'],
+    },
+  },
+  {
+    entity_type: 'user_story',
+    order: 51, materializable: false, summarizable: false,
+    nameKeys: ['role', 'want'],
+    tool: {
+      name: 'extract_user_story',
+      description: 'Extract a user story in Role / Want / So-That format.',
+      properties: {
+        role:                { type: 'string', description: 'The type of user — their role or title' },
+        want:                { type: 'string', description: 'What this user wants the system to do' },
+        so_that:             { type: 'string', description: 'The business reason — why they want it' },
+        acceptance_criteria: { type: 'array',  items: { type: 'string' }, description: 'Testable conditions for completion' },
+        priority:            { type: 'string', enum: ['must-have', 'should-have', 'could-have'], description: 'Priority' },
+      },
+      required: ['role', 'want', 'so_that'],
+    },
+  },
+  {
+    entity_type: 'data_source',
+    order: 52, materializable: false, summarizable: false,
+    nameKeys: ['source_name'],
+    tool: {
+      name: 'extract_data_source',
+      description: 'Extract a data source — any system, database, API, file store, or service an agent reads from or writes to.',
+      properties: {
+        source_name:        { type: 'string',  description: 'Name of the system or data source' },
+        source_type:        { type: 'string',  enum: ['api', 'database', 'file', 'service', 'queue', 'other'], description: 'Type of data source' },
+        description:        { type: 'string',  description: 'What this source contains and what it is used for' },
+        access_type:        { type: 'string',  enum: ['read', 'write', 'read-write'], description: 'Whether agents read, write, or both' },
+        access_requirements:{ type: 'array',   items: { type: 'string' }, description: 'Authentication, permission, or licensing requirements' },
+        contains_pii:       { type: 'boolean', description: 'Does this source contain personal or sensitive data?' },
+        rate_limits:        { type: 'string',  description: 'API rate limits or quota constraints if known' },
+      },
+      required: ['source_name', 'source_type'],
+    },
+  },
+  {
+    entity_type: 'process_segment',
+    order: 53, materializable: false, summarizable: false,
+    nameKeys: ['segment_name'],
+    tool: {
+      name: 'extract_process_segment',
+      description: 'Extract a process segment — a named phase or stage within the overall process (commonly used for as-is analysis).',
+      properties: {
+        segment_name:   { type: 'string',  description: 'Name of the process segment' },
+        description:    { type: 'string',  description: 'What happens in this segment' },
+        swim_lane:      { type: 'string',  description: 'Department, team, or system boundary that owns this segment' },
+        sequence_order: { type: 'integer', description: 'Position of this segment in the overall process' },
+      },
+      required: ['segment_name'],
+    },
+  },
+  {
+    entity_type: 'governance_control',
+    order: 54, materializable: false, summarizable: false,
+    nameKeys: ['control_name'],
+    tool: {
+      name: 'extract_governance_control',
+      description: 'Extract a governance control — a recurring review, audit, or oversight mechanism.',
+      properties: {
+        control_name:     { type: 'string', description: 'Name of the governance control' },
+        description:      { type: 'string', description: 'What this control does and why it exists' },
+        frequency:        { type: 'string', description: 'How often — daily, weekly, monthly, quarterly, annually' },
+        owner_role:       { type: 'string', description: 'Role responsible for this control' },
+        evidence_required:{ type: 'string', description: 'Evidence that must be produced to demonstrate this control was performed' },
+      },
+      required: ['control_name'],
+    },
+  },
+];
+
+// ── Derived lookups ───────────────────────────────────────────────────────────
+const byEntityType = {};
+const byToolName    = {};
+for (const e of REGISTRY) {
+  byEntityType[e.entity_type] = e;
+  byToolName[e.tool.name]     = e;
+}
+
+/** Reverse map: parentType → [ { childType, col } ] — used to block deletes with live children. */
+const childrenOf = {};
+for (const e of REGISTRY) {
+  for (const link of (e.parentLinks || [])) {
+    (childrenOf[link.parentType] ||= []).push({ childType: e.entity_type, table: e.table, col: link.col });
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Build the full Claude API tool definitions (entity tools + merged common fields). */
+function buildApiTools() {
+  return REGISTRY.map(e => ({
+    name: e.tool.name,
+    description: e.tool.description,
+    input_schema: {
+      type: 'object',
+      properties: { ...e.tool.properties, ...COMMON_TOOL_FIELDS },
+      required: [...(e.tool.required || []), 'confidence'],
+    },
+  }));
+}
+
+/** Map of extraction tool name → entity_type. */
+function toolToEntity() {
+  const m = {};
+  for (const e of REGISTRY) m[e.tool.name] = e.entity_type;
+  return m;
+}
+
+/** Derive a human/idMap name for an entity_data blob given its type. */
+function entityName(entityType, data) {
+  const e = byEntityType[entityType];
+  if (!e || !data) return null;
+  const parts = (e.nameKeys || []).map(k => data[k]).filter(Boolean);
+  return parts.length ? parts.join(' :: ') : null;
+}
+
+module.exports = {
+  REGISTRY,
+  COMMON_TOOL_FIELDS,
+  META_KEYS,
+  byEntityType,
+  byToolName,
+  childrenOf,
+  buildApiTools,
+  toolToEntity,
+  entityName,
+};
