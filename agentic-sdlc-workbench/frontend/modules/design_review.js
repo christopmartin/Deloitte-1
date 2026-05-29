@@ -207,6 +207,45 @@ const EDIT_CONFIGS = {
     // server returns 'decisions'; DB column is 'decisions_list' — rename on write
     payloadAlias: { decisions: 'decisions_list' },
   },
+  functional_req: {
+    endpoint: (pid, eid) => `/projects/${pid}/functional-reqs/${eid}`,
+    idKey:   'fr_id',
+    nameKey: 'title',
+    label:   'Functional Requirement',
+    fields: [
+      { key: 'title',               label: 'Title',                                    type: 'text'      },
+      { key: 'description',         label: 'Description',                              type: 'textarea'  },
+      { key: 'actors',              label: 'Actors (one per line)',                    type: 'json-list' },
+      { key: 'preconditions',       label: 'Preconditions',                            type: 'textarea'  },
+      { key: 'postconditions',      label: 'Postconditions',                           type: 'textarea'  },
+      { key: 'priority',            label: 'Priority',                                 type: 'select',
+        options: ['must_have', 'should_have', 'could_have', 'wont_have'] },
+      { key: 'acceptance_criteria', label: 'Acceptance Criteria (one per line)',       type: 'json-list' },
+      { key: 'dependencies',        label: 'Dependencies — FR/NFR slugs (one per line)', type: 'json-list' },
+      { key: 'source',              label: 'Source',                                   type: 'text'      },
+      { key: 'status',              label: 'Status',                                   type: 'select',
+        options: ['draft', 'approved', 'implemented', 'verified', 'deleted'] },
+    ],
+  },
+  nonfunctional_req: {
+    endpoint: (pid, eid) => `/projects/${pid}/nonfunctional-reqs/${eid}`,
+    idKey:   'nfr_id',
+    nameKey: 'title',
+    label:   'Non-Functional Requirement',
+    fields: [
+      { key: 'title',               label: 'Title',                                    type: 'text'      },
+      { key: 'category',            label: 'Category (e.g. Performance, Security)',    type: 'text'      },
+      { key: 'description',         label: 'Description',                              type: 'textarea'  },
+      { key: 'measurable_target',   label: 'Measurable Target (e.g. p95 < 2s)',        type: 'text'      },
+      { key: 'verification_method', label: 'Verification Method',                      type: 'textarea'  },
+      { key: 'priority',            label: 'Priority',                                 type: 'select',
+        options: ['must_have', 'should_have', 'could_have', 'wont_have'] },
+      { key: 'dependencies',        label: 'Dependencies — FR/NFR slugs (one per line)', type: 'json-list' },
+      { key: 'source',              label: 'Source',                                   type: 'text'      },
+      { key: 'status',              label: 'Status',                                   type: 'select',
+        options: ['draft', 'approved', 'implemented', 'verified', 'deleted'] },
+    ],
+  },
 };
 
 // ─── entry point ────────────────────────────────────────────────────────────
@@ -768,14 +807,14 @@ function buildRequirementsSection(frs, nfrs, useCaseMap) {
     return el('span', {}, `${uc.slug || ''}${uc.slug && uc.title ? ' · ' : ''}${uc.title || row.use_case_id}`);
   }
 
-  function buildReqTable(reqs, idField, extraCols) {
+  function buildReqTable(reqs, idField, extraCols, entityType) {
     if (!reqs || reqs.length === 0) {
       return el('div', { className: 'empty-state', style: { margin: '12px 0' } }, 'None defined yet.');
     }
     const tbl = el('table', { className: 'dr-table' });
     const head = el('thead');
     const hRow = el('tr');
-    ['ID', 'Title', 'Priority', 'Use Case', ...extraCols.map(c => c.label), 'Status'].forEach(h => {
+    ['ID', 'Title', 'Priority', 'Use Case', ...extraCols.map(c => c.label), 'Status', ''].forEach(h => {
       hRow.appendChild(el('th', {}, h));
     });
     head.appendChild(hRow);
@@ -820,6 +859,11 @@ function buildRequirementsSection(frs, nfrs, useCaseMap) {
       statCell.appendChild(reqStatusPill(req.status));
       tr.appendChild(statCell);
 
+      const editCell = el('td', { style: { whiteSpace: 'nowrap' } });
+      const editBtn = buildEditBtn(entityType, req);
+      if (editBtn) editCell.appendChild(editBtn);
+      tr.appendChild(editCell);
+
       body.appendChild(tr);
     });
     tbl.appendChild(body);
@@ -847,7 +891,7 @@ function buildRequirementsSection(frs, nfrs, useCaseMap) {
     { field: 'actors',              label: 'Actors' },
     { field: 'acceptance_criteria', label: 'Acceptance Criteria' },
     { field: 'source',              label: 'Source' },
-  ]));
+  ], 'functional_req'));
   wrap.appendChild(frSection);
 
   // ── Non-Functional Requirements ────────────────────────────────
@@ -860,7 +904,7 @@ function buildRequirementsSection(frs, nfrs, useCaseMap) {
     { field: 'measurable_target',   label: 'Target' },
     { field: 'verification_method', label: 'Verification' },
     { field: 'source',              label: 'Source' },
-  ]));
+  ], 'nonfunctional_req'));
   wrap.appendChild(nfrSection);
 
   return wrap;
