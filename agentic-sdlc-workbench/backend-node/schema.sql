@@ -701,6 +701,7 @@ CREATE TABLE IF NOT EXISTS asdlc_acceptance_criterion (
     slug                    TEXT,                                  -- Phase 1: AC-### per project
     parent_type             TEXT NOT NULL,            -- 'use_case' | 'user_story'
     parent_id               TEXT NOT NULL,            -- use_case_id OR user_story story_id_ref
+    req_slug                TEXT,                     -- FR-### or NFR-### this AC satisfies (loose FK via slug)
     text                    TEXT NOT NULL,
     source                  TEXT NOT NULL DEFAULT 'user_added',  -- 'generated' | 'user_added' | 'user_edited'
     status                  TEXT NOT NULL DEFAULT 'draft',       -- 'draft' | 'approved' | 'rejected'
@@ -886,11 +887,41 @@ CREATE TABLE IF NOT EXISTS asdlc_requirement_change_log (
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Requirement → design-element traceability links. Enables multi-level conflict
+-- detection (requirement vs the agents/workflows/tools/steps that implement it).
+-- Soft-FK pattern (like asdlc_requirement_change_log): req_id and entity_id are
+-- stored as plain values, not FK constraints, because the target table varies.
+-- Links are AI-proposed during ingest (status='proposed') and human-confirmed /
+-- edited afterward; manual links default to 'confirmed'.
+CREATE TABLE IF NOT EXISTS asdlc_requirement_link (
+    link_id         TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL REFERENCES asdlc_project(project_id),
+    req_type        TEXT NOT NULL CHECK (req_type IN ('functional','nonfunctional')),
+    req_id          TEXT NOT NULL,   -- fr_id or nfr_id
+    entity_type     TEXT NOT NULL
+        CHECK (entity_type IN ('use_case','workflow','workflow_step','agent_spec','tool')),
+    entity_id       TEXT NOT NULL,   -- soft ref into the target table
+    relationship    TEXT NOT NULL DEFAULT 'implements',
+    confidence      REAL,            -- 0..1 for AI-proposed links; NULL for manual
+    status          TEXT NOT NULL DEFAULT 'proposed'
+        CHECK (status IN ('proposed','confirmed','rejected')),
+    source          TEXT NOT NULL DEFAULT 'manual'
+        CHECK (source IN ('agent_ingest','manual')),
+    lifecycle_status TEXT NOT NULL DEFAULT 'active',
+    created_by      TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by      TEXT,
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    version         INTEGER NOT NULL DEFAULT 1
+);
+
 CREATE INDEX IF NOT EXISTS idx_fr_project    ON asdlc_functional_req(project_id);
 CREATE INDEX IF NOT EXISTS idx_fr_uc         ON asdlc_functional_req(use_case_id);
 CREATE INDEX IF NOT EXISTS idx_nfr_project   ON asdlc_nonfunctional_req(project_id);
 CREATE INDEX IF NOT EXISTS idx_nfr_uc        ON asdlc_nonfunctional_req(use_case_id);
 CREATE INDEX IF NOT EXISTS idx_reqlog_req    ON asdlc_requirement_change_log(req_type, req_id);
+CREATE INDEX IF NOT EXISTS idx_reqlink_req    ON asdlc_requirement_link(project_id, req_type, req_id);
+CREATE INDEX IF NOT EXISTS idx_reqlink_entity ON asdlc_requirement_link(project_id, entity_type, entity_id);
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_project_client ON asdlc_project(client_id);

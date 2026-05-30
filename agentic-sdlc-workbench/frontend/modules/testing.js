@@ -38,12 +38,14 @@ export async function render(container) {
   projSel.innerHTML = '<option value="">— Select application —</option>';
   bar.appendChild(projSel);
 
-  // Top-level toggle: AC vs Test Cases
+  // Top-level toggle: AC vs Test Cases vs Coverage
   const toggle = el('div', { className: 'tst-toggle' });
   const acBtn = el('button', { className: 'tst-toggle-btn', 'data-view': 'ac' }, 'Acceptance Criteria');
   const tcBtn = el('button', { className: 'tst-toggle-btn', 'data-view': 'tc' }, 'Test Cases');
+  const covBtn = el('button', { className: 'tst-toggle-btn', 'data-view': 'coverage' }, 'Coverage');
   toggle.appendChild(acBtn);
   toggle.appendChild(tcBtn);
+  toggle.appendChild(covBtn);
   bar.appendChild(toggle);
 
   container.appendChild(bar);
@@ -72,12 +74,13 @@ export async function render(container) {
   // ── wire toggle ────────────────────────────────────────────────
   const setView = (v) => {
     _topView = v;
-    [acBtn, tcBtn].forEach(b => b.classList.toggle('active', b.dataset.view === v));
+    [acBtn, tcBtn, covBtn].forEach(b => b.classList.toggle('active', b.dataset.view === v));
     if (_projectId) loadView();
     else showEmptyState();
   };
   acBtn.addEventListener('click', () => setView('ac'));
   tcBtn.addEventListener('click', () => setView('tc'));
+  covBtn.addEventListener('click', () => setView('coverage'));
   setView('ac');
 
   // ── wire project selector ──────────────────────────────────────
@@ -103,8 +106,9 @@ async function loadView() {
   _reportArea.innerHTML =
     '<div class="loading-state"><div class="loading-spinner"></div><span>Loading…</span></div>';
   try {
-    if (_topView === 'ac') await renderAcView();
-    else                   await renderTcView();
+    if (_topView === 'ac')            await renderAcView();
+    else if (_topView === 'coverage') await renderCoverageView();
+    else                              await renderTcView();
   } catch (err) {
     _reportArea.innerHTML = `<div class="error-state">${escHtml(err.message)}</div>`;
   }
@@ -203,6 +207,11 @@ function buildAcRow(ac, parentType, parentId) {
   textEl.textContent = ac.text || '';
 
   const meta = el('div', { className: 'tst-row-meta' });
+  // Show requirement traceability link if this AC satisfies a specific FR/NFR
+  if (ac.req_slug) {
+    const reqTag = el('span', { className: 'tst-req-tag', title: 'Satisfies requirement ' + ac.req_slug }, ac.req_slug);
+    meta.appendChild(reqTag);
+  }
   meta.appendChild(sourcePill(ac.source));
   meta.appendChild(statusPill(ac.status, async (newStatus) => {
     await updateAc(ac, { status: newStatus });
@@ -436,7 +445,20 @@ function buildTcBlock({ parentLabel, parentSubtitle, scope, scopeEntityId, items
 
 function buildTcRow(tc) {
   const tr = el('tr', { className: 'tst-tc-row' });
-  tr.appendChild(editableCell(tc, 'title', { strong: true }));
+  // Title cell — includes requirement_ids tags below the title if present
+  const titleTd = editableCell(tc, 'title', { strong: true });
+  const reqIds = (() => {
+    try { return Array.isArray(tc.requirement_ids) ? tc.requirement_ids : JSON.parse(tc.requirement_ids || '[]'); }
+    catch { return []; }
+  })();
+  if (reqIds.length) {
+    const tagsWrap = el('div', { style: 'display:flex;flex-wrap:wrap;gap:3px;margin-top:3px' });
+    reqIds.forEach(slug => tagsWrap.appendChild(
+      el('span', { className: 'tst-req-tag', title: 'Validates requirement ' + slug }, slug)
+    ));
+    titleTd.appendChild(tagsWrap);
+  }
+  tr.appendChild(titleTd);
   tr.appendChild(caseTypeCell(tc));
   tr.appendChild(editableCell(tc, 'test_action'));
   tr.appendChild(editableCell(tc, 'test_input'));
@@ -542,6 +564,185 @@ async function updateTc(tc, fields) {
     method: 'PUT',
     body:   JSON.stringify(fields),
   });
+}
+
+// ─── Coverage view: requirement × case-type matrix ──────────────────────────
+const CASE_TYPE_LABELS = {
+  happy_path: 'Happy', edge_case: 'Edge', negative: 'Negative',
+  regression: 'Regression', performance: 'Performance',
+};
+
+async function renderCoverageView() {
+  _reportArea.innerHTML = '';
+
+  // Toolbar: summary + AI-suggest action
+  const toolbar = el('div', { style: 'display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap;' });
+  const summaryEl = el('div', { style: 'color:var(--text-muted,#64748b);font-size:13px;flex:1;min-width:240px;' }, 'Loading coverage…');
+  const aiBtn = el('button', { className: 'btn btn-secondary btn-sm' }, '🤖 AI: suggest test → requirement links');
+  toolbar.appendChild(summaryEl);
+  toolbar.appendChild(aiBtn);
+  _reportArea.appendChild(toolbar);
+
+  const tableWrap = el('div');
+  _reportArea.appendChild(tableWrap);
+
+  async function load() {
+    tableWrap.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><span>Loading…</span></div>';
+    const data = await apiFetch(`/projects/${_projectId}/test-coverage`);
+    const { case_types, requirements, summary } = data;
+    summaryEl.textContent =
+      `${summary.requirements_with_any_tc}/${summary.total_requirements} requirements have tests · ` +
+      `${summary.test_cases_with_link}/${summary.total_test_cases} test cases linked`;
+
+    tableWrap.innerHTML = '';
+    if (!requirements.length) {
+      tableWrap.appendChild(el('div', { className: 'empty-state', style: 'margin:40px 0' },
+        el('div', { className: 'empty-state-icon' }, '🧪'),
+        el('h3', {}, 'No requirements yet'),
+        el('p', {}, 'Add functional or non-functional requirements first.')));
+      return;
+    }
+
+    const tbl = el('table', { className: 'tst-tc-table' });
+    const headCells = ['<th style="width:34%">Requirement</th>']
+      .concat(case_types.map(ct => `<th style="text-align:center">${CASE_TYPE_LABELS[ct] || ct}</th>`))
+      .concat(['<th style="text-align:center;width:60px">Total</th>', '<th style="width:90px"></th>']);
+    tbl.innerHTML = `<thead><tr>${headCells.join('')}</tr></thead>`;
+    const tbody = el('tbody');
+
+    requirements.forEach(r => {
+      const tr = el('tr');
+      const reqCell = el('td');
+      reqCell.appendChild(el('span', { className: 'tst-req-tag', title: r.req_type }, r.slug));
+      reqCell.appendChild(el('span', { style: 'margin-left:6px' }, r.title || ''));
+      tr.appendChild(reqCell);
+
+      case_types.forEach(ct => {
+        const n = r.counts[ct] || 0;
+        const td = el('td', {
+          style: 'text-align:center;font-weight:600;' +
+            (n === 0
+              ? 'background:#fef2f2;color:#dc2626;'    // gap
+              : 'background:#f0fdf4;color:#16a34a;'),
+          title: n === 0 ? `No ${CASE_TYPE_LABELS[ct] || ct} test for ${r.slug}` : `${n} ${CASE_TYPE_LABELS[ct] || ct} test(s)`,
+        }, n === 0 ? '—' : String(n));
+        tr.appendChild(td);
+      });
+
+      tr.appendChild(el('td', { style: 'text-align:center;font-weight:700;' + (r.total === 0 ? 'color:#dc2626' : '') }, String(r.total)));
+
+      const actionTd = el('td');
+      const manageBtn = el('button', { className: 'btn btn-ghost btn-sm' }, 'Manage…');
+      manageBtn.addEventListener('click', () => openTcLinkModal(r, load));
+      actionTd.appendChild(manageBtn);
+      tr.appendChild(actionTd);
+
+      tbody.appendChild(tr);
+    });
+    tbl.appendChild(tbody);
+    tableWrap.appendChild(tbl);
+  }
+
+  aiBtn.addEventListener('click', async () => {
+    aiBtn.disabled = true; const orig = aiBtn.textContent; aiBtn.textContent = '🤖 Suggesting…';
+    try {
+      const r = await apiFetch(`/projects/${_projectId}/test-coverage/infer`, { method: 'POST', body: JSON.stringify({}) });
+      if (r.source === 'stub') {
+        showToast('AI key not configured — no links suggested (set ANTHROPIC_API_KEY).', 'warning');
+      } else {
+        showToast(`AI linked ${r.test_cases_updated} test case(s) — ${r.links_added} link(s) added.`, 'success');
+      }
+      await load();
+    } catch (err) {
+      showToast(`AI suggest failed: ${err.message}`, 'error');
+    } finally {
+      aiBtn.disabled = false; aiBtn.textContent = orig;
+    }
+  });
+
+  await load();
+}
+
+// ─── Per-requirement test-case link/unlink modal (#2) ───────────────────────
+async function openTcLinkModal(requirement, onSaved) {
+  const overlay = el('div', { className: 'dr-edit-overlay', style: 'position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;z-index:1000;' });
+  const modal = el('div', { style: 'background:#fff;border-radius:12px;max-width:760px;width:92%;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.3);' });
+
+  modal.appendChild(el('div', { style: 'padding:16px 20px;border-bottom:1px solid #e2e8f0;' },
+    el('div', { style: 'font-size:16px;font-weight:700;' }, `Link test cases — ${requirement.slug}`),
+    el('div', { style: 'font-size:13px;color:#64748b;margin-top:2px;' }, requirement.title || '')));
+
+  // Case-type filter
+  const filterBar = el('div', { style: 'padding:10px 20px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;border-bottom:1px solid #f1f5f9;' });
+  filterBar.appendChild(el('span', { style: 'font-size:12px;color:#64748b;' }, 'Filter:'));
+  let typeFilter = 'all';
+  const body = el('div', { style: 'padding:8px 20px;overflow:auto;flex:1;' });
+
+  modal.appendChild(filterBar);
+  modal.appendChild(body);
+
+  const footer = el('div', { style: 'padding:12px 20px;border-top:1px solid #e2e8f0;display:flex;justify-content:flex-end;gap:8px;' });
+  const closeBtn = el('button', { className: 'btn btn-primary' }, 'Done');
+  footer.appendChild(closeBtn);
+  modal.appendChild(footer);
+
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+  const close = () => { overlay.remove(); if (onSaved) onSaved(); };
+  closeBtn.addEventListener('click', close);
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+
+  // Load all project test cases (across scopes)
+  let allTcs = [];
+  try { allTcs = await apiFetch(`/projects/${_projectId}/test-cases`); }
+  catch (err) { body.innerHTML = `<div class="error-state">Could not load test cases: ${escHtml(err.message)}</div>`; return; }
+
+  const parse = v => { try { return Array.isArray(v) ? v : JSON.parse(v || '[]'); } catch { return []; } };
+
+  const renderList = () => {
+    body.innerHTML = '';
+    const rows = allTcs.filter(tc => typeFilter === 'all' || (tc.case_type || 'happy_path') === typeFilter);
+    if (!rows.length) { body.appendChild(el('div', { style: 'color:#64748b;padding:16px;' }, 'No test cases for this filter.')); return; }
+    rows.forEach(tc => {
+      const linked = parse(tc.requirement_ids).includes(requirement.slug);
+      const row = el('label', { style: 'display:flex;align-items:flex-start;gap:10px;padding:8px;border-bottom:1px solid #f1f5f9;cursor:pointer;' });
+      const cb = el('input', { type: 'checkbox' });
+      cb.checked = linked;
+      cb.addEventListener('change', async () => {
+        cb.disabled = true;
+        try {
+          const cur = parse(tc.requirement_ids);
+          const next = cb.checked ? [...new Set([...cur, requirement.slug])] : cur.filter(s => s !== requirement.slug);
+          await updateTc(tc, { requirement_ids: next });
+          tc.requirement_ids = next;
+        } catch (err) { showToast(`Update failed: ${err.message}`, 'error'); cb.checked = !cb.checked; }
+        finally { cb.disabled = false; }
+      });
+      row.appendChild(cb);
+      const meta = el('div', { style: 'flex:1;' });
+      meta.appendChild(el('div', { style: 'font-weight:600;font-size:13px;' }, tc.title || '(untitled)'));
+      const sub = el('div', { style: 'font-size:11px;color:#64748b;margin-top:2px;' });
+      sub.appendChild(el('span', { className: 'tst-pill', style: 'margin-right:6px;' }, (CASE_TYPE_LABELS[tc.case_type] || tc.case_type || 'happy')));
+      sub.appendChild(el('span', {}, (tc.expected_result || tc.test_action || '').slice(0, 90)));
+      meta.appendChild(sub);
+      row.appendChild(meta);
+      body.appendChild(row);
+    });
+  };
+
+  // Filter chips
+  ['all', 'happy_path', 'edge_case', 'negative', 'regression', 'performance'].forEach(ct => {
+    const chip = el('button', { className: 'btn btn-ghost btn-sm', 'data-ct': ct },
+      ct === 'all' ? 'All' : (CASE_TYPE_LABELS[ct] || ct));
+    chip.addEventListener('click', () => {
+      typeFilter = ct;
+      [...filterBar.querySelectorAll('button')].forEach(b => b.classList.toggle('active', b.dataset.ct === ct));
+      renderList();
+    });
+    filterBar.appendChild(chip);
+  });
+
+  renderList();
 }
 
 // ─── shared widgets ─────────────────────────────────────────────────────────
@@ -746,6 +947,18 @@ function injectStyles() {
 .tst-pill-generated { background: #ede9fe; color: #6d28d9; }
 .tst-pill-user      { background: #dbeafe; color: #1d4ed8; }
 .tst-pill-edited    { background: #fef3c7; color: #92400e; }
+
+.tst-req-tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: #dcfce7;
+  color: #166534;
+  white-space: nowrap;
+  cursor: default;
+}
 
 .tst-status-wrap { display: inline-block; }
 .tst-status-select {

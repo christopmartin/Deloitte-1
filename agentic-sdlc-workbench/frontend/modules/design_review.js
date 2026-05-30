@@ -13,7 +13,6 @@ let _currentProjectId  = null;  // set in loadReport; used by edit buttons
 let _currentReportArea = null;  // reference to area DOM node for reload
 let _exceptionsByEntity = {};   // Phase 2 data-quality: { entityType: { entityId: [exception,...] } }
 let _qualityPanel = null;       // Feature #9: findings panel container
-let _cpHistoryPanel = null;     // Feature #9: change-history panel container
 let _currentScope = null;       // set in loadReport; used to refresh panels
 
 // ─── Required-By-Mode matrix (Phase 5, Decision #8 Option B) ─────────────────
@@ -278,12 +277,12 @@ export async function render(container) {
   bar.appendChild(printBtn);
   container.appendChild(bar);
 
-  // ── findings + change history panels (Feature #9) ─────────────
-  // These live above the report area so they're tab-independent.
+  // ── findings panel (Feature #9) ───────────────────────────────
+  // Lives above the report area so it's tab-independent.
+  // Change history is no longer front-and-center — it opens in a modal
+  // from the "🕘 Change history" button in the Supporting Evidence group.
   const qualityPanel = el('div', { className: 'dr-quality-panel' });
-  const cpHistoryPanel = el('div', { className: 'dr-cp-panel' });
   container.appendChild(qualityPanel);
-  container.appendChild(cpHistoryPanel);
 
   // ── report area ───────────────────────────────────────────────
   const reportArea = el('div', { id: 'dr-report-area' });
@@ -310,7 +309,6 @@ export async function render(container) {
         await loadReport(_currentReportArea, pid, _currentScope);
       }
       await renderQualityPanel(qualityPanel, pid);
-      await renderCpHistoryPanel(cpHistoryPanel, pid);
     } catch (err) {
       showToast('Audit failed: ' + err.message, 'error');
     } finally {
@@ -319,9 +317,8 @@ export async function render(container) {
     }
   });
 
-  // Stash the panels on the module so loadReport can refresh them
+  // Stash the panel on the module so loadReport can refresh it
   _qualityPanel = qualityPanel;
-  _cpHistoryPanel = cpHistoryPanel;
 
   // ── build scope tabs (11 tabs, 3 visual groups) ──────────────
   const SCOPES = [
@@ -372,6 +369,24 @@ export async function render(container) {
     btnRow.appendChild(btn);
   });
 
+  // ── 🕘 Change history button (Supporting Evidence group) ──────
+  // Project-wide change log lives behind a button (opens a modal) rather
+  // than front-and-center on the page.
+  const evidenceRow = scopeNav.querySelector('[data-group="evidence"] .dr-scope-btn-row');
+  if (evidenceRow) {
+    const histBtn = el('button', {
+      className: 'dr-scope-btn dr-history-btn',
+      title: 'View the change history for this application',
+      type: 'button',
+    }, '🕘 Change history');
+    histBtn.addEventListener('click', () => {
+      const pid = getCurrentProjectId();
+      if (!pid) { showToast('Choose an application first.', 'warning'); return; }
+      openCpHistoryModal(pid);
+    });
+    evidenceRow.appendChild(histBtn);
+  }
+
   // ── initial load — driven by the global application selector ──
   const activeId = getCurrentProjectId();
   if (activeId) {
@@ -421,9 +436,8 @@ async function loadReport(area, projectId, scope) {
     // Apply slug autolinking AFTER the DOM is built. Walks text nodes and
     // turns slug patterns (UC-###, WF-###, etc.) into drill-down links.
     applySlugLinks(area, slugMap);
-    // Feature #9: refresh tab-independent panels
+    // Feature #9: refresh tab-independent findings panel
     if (_qualityPanel)   renderQualityPanel(_qualityPanel, projectId).catch(err => console.warn('quality panel:', err));
-    if (_cpHistoryPanel) renderCpHistoryPanel(_cpHistoryPanel, projectId).catch(err => console.warn('cp panel:', err));
   } catch (err) {
     area.innerHTML = `<div class="error-state"><strong>Error:</strong> ${escHtml(err.message)}</div>`;
   }
@@ -3926,6 +3940,42 @@ function openEditModal(entityType, entity) {
 
   modal.appendChild(body);
 
+  // ── Requirements traceability (FR / NFR) ──────────────────────────────────
+  // If the entity being edited is a functional or non-functional requirement and
+  // has ac_count / tc_count returned by the enriched GET endpoint, show a quick
+  // link to the Testing module so the reviewer can navigate directly to the ACs
+  // and TCs that trace back to this requirement.
+  if ((entityType === 'functional_req' || entityType === 'nonfunctional_req') &&
+      (entity.ac_count > 0 || entity.tc_count > 0)) {
+    const traceLink = el('div', {
+      style: 'margin:0 0 12px 0;padding:10px 14px;background:var(--surface-alt,#f8fafc);' +
+             'border:1px solid var(--border,#e2e8f0);border-radius:8px;display:flex;' +
+             'align-items:center;gap:10px;font-size:13px;'
+    });
+    const counts = [];
+    if (entity.ac_count > 0) counts.push(`${entity.ac_count} acceptance criteri${entity.ac_count === 1 ? 'on' : 'a'}`);
+    if (entity.tc_count  > 0) counts.push(`${entity.tc_count} test case${entity.tc_count === 1 ? '' : 's'}`);
+    traceLink.appendChild(el('span', { style: 'color:var(--text-muted,#64748b)' },
+      `Linked in Testing: ${counts.join(' · ')}`));
+    const viewBtn = el('a', { style: 'margin-left:auto;font-size:12px;font-weight:600;color:var(--accent,#2563eb);cursor:pointer;text-decoration:none;white-space:nowrap' },
+      '→ View in Testing');
+    viewBtn.addEventListener('click', () => {
+      overlay.remove();
+      document.querySelector('[data-module="testing"]')?.click();
+    });
+    traceLink.appendChild(viewBtn);
+    modal.appendChild(traceLink);
+  }
+
+  // ── Requirement ↔ element traceability links ──────────────────────────────
+  // Shown for requirements (their implementers) and for derived elements (the
+  // requirements they implement). AI-proposed links are confirmable/editable here.
+  if (['functional_req','nonfunctional_req','use_case','workflow','workflow_step','agent','tool'].includes(entityType)) {
+    const tracePanel = el('div', { className: 'dr-trace-panel', style: 'margin:0 0 12px 0;' });
+    modal.appendChild(tracePanel);
+    renderTraceabilityPanel(tracePanel, entityType, entityId, _currentProjectId).catch(() => {});
+  }
+
   // Error area
   const errorArea = el('div', { className: 'dr-edit-error', style: { display: 'none' } });
   modal.appendChild(errorArea);
@@ -4045,9 +4095,10 @@ function openEditModal(entityType, entity) {
 
       // Show success toast using app.js showToast
       const { showToast } = await import('../app.js');
+      const reviewNote = result._review_queued ? ' · AI review queued' : '';
       showToast(
         cpCode
-          ? `✓ ${cfg.label} saved — Change Packet ${cpCode} created`
+          ? `✓ ${cfg.label} saved — Change Packet ${cpCode} created${reviewNote}`
           : `✓ ${cfg.label} saved (no changes detected)`,
         'success'
       );
@@ -4063,6 +4114,136 @@ function openEditModal(entityType, entity) {
       saveBtn.textContent = 'Save Changes';
     }
   });
+}
+
+// ─── Requirement ↔ element traceability panel ──────────────────────────────
+// Renders the links for the entity being edited and lets the reviewer confirm /
+// reject AI-proposed links, remove links, and add new ones. Used for both
+// requirements (their implementing elements) and derived elements (the
+// requirements they implement). Backed by /api/v1/projects/:id/requirement-links.
+const TRACE_REQ_TYPE_OF = { functional_req: 'functional', nonfunctional_req: 'nonfunctional' };
+const TRACE_LINK_ENTITY_TYPE = { agent: 'agent_spec' }; // route label → link enum
+
+function traceStatusBadge(status) {
+  const colors = {
+    proposed:  'background:#fef3c7;color:#92400e',
+    confirmed: 'background:#dcfce7;color:#166534',
+    rejected:  'background:#fee2e2;color:#991b1b',
+  };
+  return el('span', {
+    style: `font-size:10px;font-weight:700;text-transform:uppercase;padding:2px 6px;border-radius:4px;${colors[status] || ''}`,
+  }, status);
+}
+
+async function renderTraceabilityPanel(container, entityType, entityId, pid) {
+  if (!pid || !entityId) return;
+  const isReq = !!TRACE_REQ_TYPE_OF[entityType];
+  const linkEntityType = TRACE_LINK_ENTITY_TYPE[entityType] || entityType;
+
+  const heading = isReq ? 'Implemented by (traceability)' : 'Implements requirements (traceability)';
+  const wrap = el('div', {
+    style: 'padding:10px 14px;background:var(--surface-alt,#f8fafc);border:1px solid var(--border,#e2e8f0);border-radius:8px;font-size:13px;',
+  });
+  wrap.appendChild(el('div', { style: 'font-weight:600;margin-bottom:8px;color:var(--text,#1e293b)' }, heading));
+  const list = el('div', { style: 'display:flex;flex-direction:column;gap:6px;' });
+  wrap.appendChild(list);
+  container.appendChild(wrap);
+
+  const query = isReq
+    ? `req_type=${TRACE_REQ_TYPE_OF[entityType]}&req_id=${encodeURIComponent(entityId)}`
+    : `entity_type=${encodeURIComponent(linkEntityType)}&entity_id=${encodeURIComponent(entityId)}`;
+
+  async function reload() {
+    list.textContent = '';
+    let links = [];
+    try { links = await apiFetch(`/projects/${pid}/requirement-links?${query}&include_rejected=1`); } catch { /* ignore */ }
+    if (!links || links.length === 0) {
+      list.appendChild(el('div', { style: 'color:var(--text-muted,#64748b);font-style:italic' }, 'No links yet.'));
+    }
+    for (const link of (links || [])) {
+      const row = el('div', { style: 'display:flex;align-items:center;gap:8px;' });
+      const label = isReq
+        ? `${link.entity_slug || '?'} · ${link.entity_label || link.entity_type}`
+        : `${link.req_slug || '?'} · ${link.req_title || ''}`;
+      row.appendChild(el('span', { style: 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, label));
+      if (link.source === 'agent_ingest') row.appendChild(el('span', { style: 'font-size:10px;color:#64748b' }, '🤖'));
+      row.appendChild(traceStatusBadge(link.status));
+
+      const mkBtn = (txt, title, onClick) => {
+        const b = el('button', { className: 'btn btn-ghost', style: 'font-size:11px;padding:2px 8px;', title }, txt);
+        b.addEventListener('click', async () => {
+          b.disabled = true;
+          try { await onClick(); await reload(); }
+          catch (err) { showToast('Link update failed: ' + err.message, 'error'); b.disabled = false; }
+        });
+        return b;
+      };
+      if (link.status === 'proposed') {
+        row.appendChild(mkBtn('✓', 'Confirm link', () =>
+          apiFetch(`/projects/${pid}/requirement-links/${link.link_id}`, { method: 'PUT', body: JSON.stringify({ status: 'confirmed' }) })));
+        row.appendChild(mkBtn('✕', 'Reject link', () =>
+          apiFetch(`/projects/${pid}/requirement-links/${link.link_id}`, { method: 'PUT', body: JSON.stringify({ status: 'rejected' }) })));
+      }
+      row.appendChild(mkBtn('🗑', 'Remove link', () =>
+        apiFetch(`/projects/${pid}/requirement-links/${link.link_id}`, { method: 'DELETE' })));
+      list.appendChild(row);
+    }
+  }
+
+  // ── Add-link control ──────────────────────────────────────────────────────
+  const addRow = el('div', { style: 'display:flex;gap:6px;margin-top:10px;align-items:center;' });
+  const targetSel = el('select', { className: 'form-select', style: 'flex:1;font-size:12px;padding:4px;' });
+  targetSel.appendChild(el('option', { value: '' }, 'Add a link…'));
+  const addBtn = el('button', { className: 'btn btn-ghost', style: 'font-size:12px;padding:4px 10px;' }, '+ Add');
+  addRow.appendChild(targetSel);
+  addRow.appendChild(addBtn);
+  wrap.appendChild(addRow);
+
+  // Populate candidate targets.
+  try {
+    if (isReq) {
+      // Requirement → elements: workflows, agents, tools.
+      const [wfs, agents, tools] = await Promise.all([
+        apiFetch(`/projects/${pid}/workflows`).catch(() => []),
+        apiFetch(`/projects/${pid}/agent-specs`).catch(() => []),
+        apiFetch(`/projects/${pid}/tools`).catch(() => []),
+      ]);
+      const addOpts = (rows, type, idKey, nameKey) => (rows || []).forEach(r =>
+        targetSel.appendChild(el('option', { value: `${type}:${r[idKey]}` }, `${r.slug || ''} ${r[nameKey] || ''} (${type})`)));
+      addOpts(wfs, 'workflow', 'workflow_id', 'name');
+      addOpts(agents, 'agent_spec', 'agent_spec_id', 'name');
+      addOpts(tools, 'tool', 'tool_id', 'name');
+    } else {
+      // Element → requirements: FR + NFR.
+      const [frs, nfrs] = await Promise.all([
+        apiFetch(`/projects/${pid}/functional-reqs`).catch(() => []),
+        apiFetch(`/projects/${pid}/nonfunctional-reqs`).catch(() => []),
+      ]);
+      (frs || []).forEach(r => targetSel.appendChild(el('option', { value: `functional:${r.fr_id}` }, `${r.slug || ''} ${r.title || ''} (FR)`)));
+      (nfrs || []).forEach(r => targetSel.appendChild(el('option', { value: `nonfunctional:${r.nfr_id}` }, `${r.slug || ''} ${r.title || ''} (NFR)`)));
+    }
+  } catch { /* candidate population is best-effort */ }
+
+  addBtn.addEventListener('click', async () => {
+    const val = targetSel.value;
+    if (!val) return;
+    const [type, id] = val.split(/:(.+)/);
+    addBtn.disabled = true;
+    try {
+      const bodyObj = isReq
+        ? { req_type: TRACE_REQ_TYPE_OF[entityType], req_id: entityId, entity_type: type, entity_id: id, status: 'confirmed', source: 'manual' }
+        : { req_type: type, req_id: id, entity_type: linkEntityType, entity_id: entityId, status: 'confirmed', source: 'manual' };
+      await apiFetch(`/projects/${pid}/requirement-links`, { method: 'POST', body: JSON.stringify(bodyObj) });
+      targetSel.value = '';
+      await reload();
+    } catch (err) {
+      showToast('Add link failed: ' + err.message, 'error');
+    } finally {
+      addBtn.disabled = false;
+    }
+  });
+
+  await reload();
 }
 
 // ─── Required-By-Mode guidance panel (Phase 5) ─────────────────────────────
@@ -4220,6 +4401,18 @@ function injectStyles() {
   border-color: var(--color-accent);
 }
 .dr-print-btn { margin-left: auto; }
+
+/* Change-history button sits in the Supporting Evidence row but is an action,
+   not a scope tab — set it apart with a dashed border and muted look. */
+.dr-history-btn {
+  border-style: dashed;
+  color: var(--color-text-secondary);
+  margin-left: 8px;
+}
+.dr-history-btn:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
 
 /* ── miller columns (Relationships tab) ──────────────────── */
 .dr-mc {
@@ -5367,7 +5560,6 @@ function buildAuditBtn(entityType, entityId, reload) {
         result.source === 'claude' ? 'success' : 'info');
       if (reload) reload();
       if (_qualityPanel && _currentProjectId)   await renderQualityPanel(_qualityPanel, _currentProjectId);
-      if (_cpHistoryPanel && _currentProjectId) await renderCpHistoryPanel(_cpHistoryPanel, _currentProjectId);
     } catch (err) {
       showToast('Audit failed: ' + err.message, 'error');
     } finally {
@@ -5505,6 +5697,30 @@ async function renderQualityPanel(container, projectId) {
   filterRow.appendChild(resolvedChip);
 
   await reload();
+}
+
+// ─── Change history modal ───────────────────────────────────────────────────
+// Opened from the "🕘 Change history" button in the Supporting Evidence group.
+// Hosts the change-history panel in an overlay so it stays out of the way.
+function openCpHistoryModal(projectId) {
+  const overlay = el('div', { className: 'dr-edit-overlay' });
+  const modal = el('div', { className: 'dr-edit-modal', style: 'max-width:780px' });
+  const hdr = el('div', { className: 'dr-edit-header' });
+  hdr.appendChild(el('h3', { className: 'dr-edit-title' }, 'Change history'));
+  const closeBtn = el('button', { className: 'dr-edit-close' }, '×');
+  closeBtn.addEventListener('click', () => overlay.remove());
+  hdr.appendChild(closeBtn);
+  modal.appendChild(hdr);
+
+  const panel = el('div', { className: 'dr-cp-panel' });
+  modal.appendChild(panel);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+  overlay.addEventListener('mousedown', e => { if (e.target === overlay) overlay.remove(); });
+
+  renderCpHistoryPanel(panel, projectId).catch(err => {
+    panel.innerHTML = `<div style="color:#c62828;font-size:12px">Failed to load: ${escHtml(err.message)}</div>`;
+  });
 }
 
 // ─── Feature #9: Change history panel ───────────────────────────────────────

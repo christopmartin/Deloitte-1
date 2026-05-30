@@ -9,6 +9,7 @@ const express = require('express');
 const { db, generateId, auditLog, nextSlug, getSetting, setSetting } = require('./db');
 const registry = require('./agent/entity-registry');
 const aiConfig = require('./agent/ai-config');
+const reviewQueue = require('./agent/review-queue');
 
 // Phase 1 enum constants (Decisions #2, #16, #17, #18) — used for validation
 // in PUT endpoints. SQLite CHECK constraints back-stop these, but validating
@@ -619,6 +620,39 @@ function mtCreate(entity, data, projectId, uid, idMap, item) {
   }
   for (const [c, v] of Object.entries(mapped)) { cols.push(c); vals.push(v); }
 
+  // staticColumns: registry-declared columns that always get the same value (e.g. parent_type, source).
+  for (const [c, v] of Object.entries(entity.staticColumns || {})) {
+    if (!cols.includes(c)) { cols.push(c); vals.push(v); }
+  }
+
+  // scopeResolution: test_case needs scope_entity_id resolved from scope + scope_entity_name
+  // because the parent table varies by scope value (use_case/workflow/agent/tool).
+  if (entity.scopeResolution && data.scope && data.scope_entity_name) {
+    const SCOPE_MAP = {
+      use_case: { table: 'asdlc_use_case',   pk: 'use_case_id',   nameCol: 'title' },
+      workflow:  { table: 'asdlc_workflow',   pk: 'workflow_id',   nameCol: 'name'  },
+      agent:     { table: 'asdlc_agent_spec', pk: 'agent_spec_id', nameCol: 'name'  },
+      tool:      { table: 'asdlc_tool',       pk: 'tool_id',       nameCol: 'name'  },
+    };
+    const st = SCOPE_MAP[data.scope];
+    if (st && !cols.includes('scope_entity_id')) {
+      // Try DB first, then same-packet idMap
+      const dbRow = db.prepare(
+        `SELECT ${st.pk} AS id FROM ${st.table}
+         WHERE project_id=? AND ${st.nameCol}=?
+           AND (lifecycle_status IS NULL OR lifecycle_status!='retired')
+         LIMIT 1`
+      ).get(projectId, data.scope_entity_name);
+      const resolvedId = (dbRow && dbRow.id) ||
+        idMap[`${data.scope}::${data.scope_entity_name}`] || null;
+      if (resolvedId) { cols.push('scope_entity_id'); vals.push(resolvedId); }
+      else throw new SoftSkip(
+        `test_case: cannot resolve scope_entity_id for ${data.scope} "${data.scope_entity_name}" — ` +
+        `ensure the parent entity exists or is being created in the same Change Packet`
+      );
+    }
+  }
+
   cols.push('created_by', 'updated_by'); vals.push(uid, uid);
 
   db.prepare(`INSERT INTO ${entity.table} (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).run(...vals);
@@ -670,6 +704,47 @@ function markItemApplied(itemId, note) {
   }
 }
 
+// Derived entity types whose ingest extractions can carry implements_requirements.
+const INGEST_LINK_ENTITY_TYPES = new Set(['workflow', 'workflow_step', 'agent_spec', 'tool']);
+
+/**
+ * Materialize requirement→element traceability links from an entity's
+ * `implements_requirements` slug list (AI ingest). Resolves each FR/NFR slug to a
+ * real requirement in the same project and inserts a 'proposed' link (source
+ * 'agent_ingest'). Best-effort: slugs that don't resolve — e.g. a requirement
+ * created later, or a hallucinated slug — are skipped; the /traceability/infer
+ * backfill can pick them up afterward. Never throws into the apply loop.
+ */
+function materializeRequirementLinks(entityType, entityId, data, projectId, uid) {
+  if (!INGEST_LINK_ENTITY_TYPES.has(entityType) || !entityId) return;
+  const slugs = Array.isArray(data && data.implements_requirements) ? data.implements_requirements : [];
+  if (slugs.length === 0) return;
+  const conf = (typeof data.confidence === 'number') ? data.confidence : null;
+  for (const raw of slugs) {
+    const slug = String(raw || '').trim();
+    if (!slug) continue;
+    let req_type = null, req_id = null;
+    const fr = db.prepare('SELECT fr_id AS id FROM asdlc_functional_req WHERE project_id=? AND slug=?').get(projectId, slug);
+    if (fr) { req_type = 'functional'; req_id = fr.id; }
+    else {
+      const nfr = db.prepare('SELECT nfr_id AS id FROM asdlc_nonfunctional_req WHERE project_id=? AND slug=?').get(projectId, slug);
+      if (nfr) { req_type = 'nonfunctional'; req_id = nfr.id; }
+    }
+    if (!req_id) continue;  // unresolved slug — backfill can catch it later
+    const dup = db.prepare(
+      "SELECT 1 FROM asdlc_requirement_link WHERE project_id=? AND req_type=? AND req_id=? AND entity_type=? AND entity_id=? AND lifecycle_status='active'"
+    ).get(projectId, req_type, req_id, entityType, entityId);
+    if (dup) continue;
+    const id = generateId();
+    db.prepare(`INSERT INTO asdlc_requirement_link
+      (link_id, project_id, req_type, req_id, entity_type, entity_id, relationship, confidence, status, source, created_by, updated_by)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, projectId, req_type, req_id, entityType, entityId, 'implements', conf, 'proposed', 'agent_ingest', uid, uid);
+    auditLog('asdlc_requirement_link', id, 'INSERT', null,
+      db.prepare('SELECT * FROM asdlc_requirement_link WHERE link_id=?').get(id), uid);
+  }
+}
+
 /**
  * Apply all items of an approved change packet to the real design tables.
  * @returns {{applied:number, updated:number, deleted:number, skipped:number, errors:Array}}
@@ -717,8 +792,10 @@ function applyChangePacket(cpId, uid) {
         result.deleted++;
       } else if (op === 'update') {
         mtUpdate(entity, data, item, uid); result.updated++;
+        materializeRequirementLinks(entity.entity_type, item.entity_id, data, projectId, uid);
       } else {
-        mtCreate(entity, data, projectId, uid, idMap, item); result.applied++;
+        const newId = mtCreate(entity, data, projectId, uid, idMap, item); result.applied++;
+        materializeRequirementLinks(entity.entity_type, newId, data, projectId, uid);
       }
       markItemApplied(item.change_packet_item_id, null);
     } catch (err) {
@@ -1316,6 +1393,46 @@ app.post('/api/v1/projects/:id/quality-review/full', async (req, res) => {
   }
 });
 
+// Backfill requirement→element traceability links via AI inference. Proposes
+// links (status='proposed', source='agent_ingest') that don't already exist.
+app.post('/api/v1/projects/:id/traceability/infer', async (req, res) => {
+  const projectId = req.params.id;
+  const uid = userId(req);
+  try {
+    const { inferLinks } = require('./agent/traceability');
+    const result = await inferLinks({ projectId, db });
+    let created = 0, skipped = 0;
+    for (const l of result.links) {
+      const em = LINK_ENTITY_META[l.entity_type];
+      if (!em) { skipped++; continue; }
+      // Derive requirement type from the slug prefix (NFR-### vs FR-###).
+      const isNfr = l.req_slug.toUpperCase().startsWith('NFR');
+      const reqTable = isNfr ? 'asdlc_nonfunctional_req' : 'asdlc_functional_req';
+      const reqType  = isNfr ? 'nonfunctional' : 'functional';
+      const reqIdCol = isNfr ? 'nfr_id' : 'fr_id';
+      const reqRow = db.prepare(`SELECT ${reqIdCol} AS id FROM ${reqTable} WHERE project_id=? AND slug=?`).get(projectId, l.req_slug);
+      const entRow = db.prepare(`SELECT ${em.idCol} AS id FROM ${em.table} WHERE project_id=? AND slug=?`).get(projectId, l.entity_slug);
+      if (!reqRow || !entRow) { skipped++; continue; }
+      const dup = db.prepare(
+        "SELECT 1 FROM asdlc_requirement_link WHERE project_id=? AND req_type=? AND req_id=? AND entity_type=? AND entity_id=? AND lifecycle_status='active'"
+      ).get(projectId, reqType, reqRow.id, l.entity_type, entRow.id);
+      if (dup) { skipped++; continue; }
+      const linkId = generateId();
+      db.prepare(`INSERT INTO asdlc_requirement_link
+        (link_id, project_id, req_type, req_id, entity_type, entity_id, relationship, confidence, status, source, created_by, updated_by)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(linkId, projectId, reqType, reqRow.id, l.entity_type, entRow.id, 'implements', l.confidence, 'proposed', 'agent_ingest', uid, uid);
+      auditLog('asdlc_requirement_link', linkId, 'INSERT', null,
+        db.prepare('SELECT * FROM asdlc_requirement_link WHERE link_id=?').get(linkId), uid);
+      created++;
+    }
+    res.json({ proposed: result.links.length, created, skipped, model: result.model, source: result.source, error: result.error });
+  } catch (err) {
+    console.error('[traceability/infer]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ──────────────────────────────────────────────
 // CHANGE PACKETS — audit trail UI endpoints (Feature #9)
 // ──────────────────────────────────────────────
@@ -1597,7 +1714,12 @@ app.put('/api/v1/projects/:id/use-cases/:ucId', (req, res) => {
       existing.title, diff, uid);
   }
 
-  res.json({ ...parseRow(after), _cp: cpResult, _propagated_workflows: propagatedWorkflows });
+  const reviewQueued = reviewQueue.maybeEnqueueReview({
+    projectId: req.params.id, entityType: 'use_case', entityId: req.params.ucId,
+    changedFields: diff.map(d => d.field),
+  });
+
+  res.json({ ...parseRow(after), _cp: cpResult, _propagated_workflows: propagatedWorkflows, _review_queued: reviewQueued });
 });
 
 // ──────────────────────────────────────────────
@@ -1668,7 +1790,12 @@ app.put('/api/v1/projects/:id/workflows/:wfId', (req, res) => {
       existing.name, diff, uid);
   }
 
-  res.json({ ...parseRow(after), _cp: cpResult });
+  const reviewQueued = reviewQueue.maybeEnqueueReview({
+    projectId: req.params.id, entityType: 'workflow', entityId: req.params.wfId,
+    changedFields: diff.map(d => d.field),
+  });
+
+  res.json({ ...parseRow(after), _cp: cpResult, _review_queued: reviewQueued });
 });
 
 // PUT /api/v1/projects/:id/workflows/:wfId/steps/:stepId
@@ -1716,7 +1843,12 @@ app.put('/api/v1/projects/:id/workflows/:wfId/steps/:stepId', (req, res) => {
       `Step "${existing.name}"`, diff, uid);
   }
 
-  res.json({ ...updated, decisions: parseJson(updated.decisions_list) || [], _cp: cpResult });
+  const reviewQueued = reviewQueue.maybeEnqueueReview({
+    projectId: req.params.id, entityType: 'workflow_step', entityId: req.params.stepId,
+    changedFields: diff.map(d => d.field),
+  });
+
+  res.json({ ...updated, decisions: parseJson(updated.decisions_list) || [], _cp: cpResult, _review_queued: reviewQueued });
 });
 
 // ──────────────────────────────────────────────
@@ -1777,7 +1909,12 @@ app.put('/api/v1/projects/:id/agent-specs/:agentId', (req, res) => {
       existing.name, diff, uid);
   }
 
-  res.json({ ...parseRow(after), _cp: cpResult });
+  const reviewQueued = reviewQueue.maybeEnqueueReview({
+    projectId: req.params.id, entityType: 'agent_spec', entityId: req.params.agentId,
+    changedFields: diff.map(d => d.field),
+  });
+
+  res.json({ ...parseRow(after), _cp: cpResult, _review_queued: reviewQueued });
 });
 
 // POST /api/v1/projects/:id/agent-specs/:agentId/draft-prompt
@@ -2428,7 +2565,12 @@ app.put('/api/v1/projects/:id/tools/:toolId', (req, res) => {
       existing.name, diff, uid);
   }
 
-  res.json({ ...parseRow(after), _cp: cpResult });
+  const reviewQueued = reviewQueue.maybeEnqueueReview({
+    projectId: req.params.id, entityType: 'tool', entityId: req.params.toolId,
+    changedFields: diff.map(d => d.field),
+  });
+
+  res.json({ ...parseRow(after), _cp: cpResult, _review_queued: reviewQueued });
 });
 
 // ──────────────────────────────────────────────
@@ -2740,7 +2882,7 @@ app.get('/api/v1/projects/:id/acceptance-criteria', (req, res) => {
 // Create
 app.post('/api/v1/projects/:id/acceptance-criteria', (req, res) => {
   const uid = userId(req);
-  const { parent_type, parent_id, text, source, status } = req.body || {};
+  const { parent_type, parent_id, text, source, status, req_slug } = req.body || {};
   if (!parent_type || !parent_id || !text) {
     return res.status(400).json({ error: 'parent_type, parent_id, and text are required' });
   }
@@ -2750,10 +2892,10 @@ app.post('/api/v1/projects/:id/acceptance-criteria', (req, res) => {
   const id = generateId();
   db.prepare(`
     INSERT INTO asdlc_acceptance_criterion
-      (acceptance_criterion_id, project_id, parent_type, parent_id, text,
+      (acceptance_criterion_id, project_id, parent_type, parent_id, req_slug, text,
        source, status, created_by, updated_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, req.params.id, parent_type, parent_id, text,
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, req.params.id, parent_type, parent_id, req_slug || null, text,
          source || 'user_added', status || 'draft', uid, uid);
   const row = db.prepare('SELECT * FROM asdlc_acceptance_criterion WHERE acceptance_criterion_id = ?').get(id);
   auditLog('asdlc_acceptance_criterion', id, 'INSERT', null, row, uid);
@@ -2768,7 +2910,7 @@ app.put('/api/v1/projects/:id/acceptance-criteria/:acId', (req, res) => {
   ).get(req.params.acId, req.params.id);
   if (!existing) return res.status(404).json({ error: 'Acceptance criterion not found' });
 
-  const ALLOWED = ['text', 'status', 'source'];
+  const ALLOWED = ['text', 'status', 'source', 'req_slug'];
   const updates = {};
   ALLOWED.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
   // PO edits flip source to user_edited unless caller is the auto-generator.
@@ -2827,22 +2969,26 @@ app.get('/api/v1/projects/:id/test-cases', (req, res) => {
 app.post('/api/v1/projects/:id/test-cases', (req, res) => {
   const uid = userId(req);
   const { scope, scope_entity_id, title, test_action, test_input, expected_result,
-          case_type, source, status } = req.body || {};
+          case_type, source, status, requirement_ids } = req.body || {};
   if (!scope || !scope_entity_id || !title) {
     return res.status(400).json({ error: 'scope, scope_entity_id, and title are required' });
   }
   if (!['agent', 'workflow', 'tool', 'use_case'].includes(scope)) {
     return res.status(400).json({ error: "scope must be 'agent', 'workflow', 'tool', or 'use_case'" });
   }
+  const reqIds = requirement_ids
+    ? (Array.isArray(requirement_ids) ? JSON.stringify(requirement_ids) : String(requirement_ids))
+    : '[]';
   const id = generateId();
   db.prepare(`
     INSERT INTO asdlc_test_case
       (test_case_id, project_id, scope, scope_entity_id, title, test_action,
-       test_input, expected_result, case_type, source, status, created_by, updated_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       test_input, expected_result, case_type, source, status, requirement_ids,
+       created_by, updated_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(id, req.params.id, scope, scope_entity_id, title,
          test_action || '', test_input || '', expected_result || '',
-         case_type || 'happy_path', source || 'user_added', status || 'draft', uid, uid);
+         case_type || 'happy_path', source || 'user_added', status || 'draft', reqIds, uid, uid);
   const row = db.prepare('SELECT * FROM asdlc_test_case WHERE test_case_id = ?').get(id);
   auditLog('asdlc_test_case', id, 'INSERT', null, row, uid);
   res.status(201).json(row);
@@ -2856,9 +3002,13 @@ app.put('/api/v1/projects/:id/test-cases/:tcId', (req, res) => {
   if (!existing) return res.status(404).json({ error: 'Test case not found' });
 
   const ALLOWED = ['title', 'test_action', 'test_input', 'expected_result',
-                   'case_type', 'status', 'source'];
+                   'case_type', 'status', 'source', 'requirement_ids'];
   const updates = {};
   ALLOWED.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
+  // Normalise requirement_ids to a JSON string
+  if (updates.requirement_ids !== undefined && Array.isArray(updates.requirement_ids)) {
+    updates.requirement_ids = JSON.stringify(updates.requirement_ids);
+  }
   // User edits flip source to user_edited (unless caller explicitly sets source).
   const userEditedFields = ['title', 'test_action', 'test_input', 'expected_result', 'case_type'];
   if (userEditedFields.some(f => updates[f] !== undefined) && existing.source === 'generated' && !req.body.source) {
@@ -2893,6 +3043,102 @@ app.delete('/api/v1/projects/:id/test-cases/:tcId', (req, res) => {
     WHERE test_case_id = ?`).run(uid, req.params.tcId);
   auditLog('asdlc_test_case', req.params.tcId, 'DELETE', existing, null, uid);
   res.status(204).end();
+});
+
+// ── Test coverage matrix: requirement × case_type ─────────────────
+// Surfaces test traceability + gaps. Counts active test cases per requirement
+// (via the loose requirement_ids slug array) broken out by case_type.
+const TC_CASE_TYPES = ['happy_path', 'edge_case', 'negative', 'regression', 'performance'];
+function tcParseIds(v) { try { return Array.isArray(v) ? v : JSON.parse(v || '[]'); } catch { return []; } }
+
+app.get('/api/v1/projects/:id/test-coverage', (req, res) => {
+  const projectId = req.params.id;
+  const frs = db.prepare(
+    "SELECT fr_id AS id, slug, title FROM asdlc_functional_req WHERE project_id=? AND status!='deleted' AND slug IS NOT NULL ORDER BY slug"
+  ).all(projectId);
+  const nfrs = db.prepare(
+    "SELECT nfr_id AS id, slug, title FROM asdlc_nonfunctional_req WHERE project_id=? AND status!='deleted' AND slug IS NOT NULL ORDER BY slug"
+  ).all(projectId);
+  const tcs = db.prepare(
+    "SELECT test_case_id, case_type, requirement_ids FROM asdlc_test_case WHERE project_id=? AND lifecycle_status='active'"
+  ).all(projectId);
+
+  // slug → { case_type: [tcId,...] }
+  const bySlug = {};
+  let linkedTcCount = 0;
+  for (const tc of tcs) {
+    const slugs = tcParseIds(tc.requirement_ids);
+    if (slugs.length) linkedTcCount++;
+    const ct = TC_CASE_TYPES.includes(tc.case_type) ? tc.case_type : 'happy_path';
+    for (const slug of slugs) {
+      (bySlug[slug] ||= {});
+      (bySlug[slug][ct] ||= []).push(tc.test_case_id);
+    }
+  }
+
+  const buildRow = (r, req_type) => {
+    const cell = bySlug[r.slug] || {};
+    const counts = {}; let total = 0; const tcIds = [];
+    for (const ct of TC_CASE_TYPES) {
+      const ids = cell[ct] || [];
+      counts[ct] = ids.length; total += ids.length; tcIds.push(...ids);
+    }
+    return { req_type, id: r.id, slug: r.slug, title: r.title, counts, total, linked_tc_ids: tcIds };
+  };
+
+  const requirements = [
+    ...frs.map(r => buildRow(r, 'functional')),
+    ...nfrs.map(r => buildRow(r, 'nonfunctional')),
+  ];
+  res.json({
+    case_types: TC_CASE_TYPES,
+    requirements,
+    summary: {
+      total_requirements: requirements.length,
+      requirements_with_any_tc: requirements.filter(r => r.total > 0).length,
+      total_test_cases: tcs.length,
+      test_cases_with_link: linkedTcCount,
+    },
+  });
+});
+
+// AI: suggest test→requirement links and apply them (additive, deduped).
+app.post('/api/v1/projects/:id/test-coverage/infer', async (req, res) => {
+  const projectId = req.params.id;
+  const uid = userId(req);
+  const onlyUnlinked = req.body && req.body.only_unlinked === false ? false : true;
+  try {
+    const { inferTestLinks } = require('./agent/test-coverage');
+    const result = await inferTestLinks({ projectId, db, onlyUnlinked });
+
+    // Valid requirement slugs for this project (so we never write a hallucinated slug).
+    const validSlugs = new Set([
+      ...db.prepare("SELECT slug FROM asdlc_functional_req WHERE project_id=? AND slug IS NOT NULL").all(projectId).map(r => r.slug),
+      ...db.prepare("SELECT slug FROM asdlc_nonfunctional_req WHERE project_id=? AND slug IS NOT NULL").all(projectId).map(r => r.slug),
+    ]);
+
+    let updated = 0, linksAdded = 0;
+    for (const s of result.suggestions) {
+      const tc = db.prepare("SELECT * FROM asdlc_test_case WHERE test_case_id=? AND project_id=? AND lifecycle_status='active'").get(s.test_case_id, projectId);
+      if (!tc) continue;
+      const current = tcParseIds(tc.requirement_ids);
+      const merged = [...current];
+      for (const slug of s.requirement_slugs) {
+        if (validSlugs.has(slug) && !merged.includes(slug)) { merged.push(slug); linksAdded++; }
+      }
+      if (merged.length !== current.length) {
+        db.prepare("UPDATE asdlc_test_case SET requirement_ids=?, updated_at=datetime('now'), updated_by=? WHERE test_case_id=?")
+          .run(JSON.stringify(merged), uid, s.test_case_id);
+        auditLog('asdlc_test_case', s.test_case_id, 'UPDATE', tc,
+          db.prepare("SELECT * FROM asdlc_test_case WHERE test_case_id=?").get(s.test_case_id), uid);
+        updated++;
+      }
+    }
+    res.json({ suggested: result.suggestions.length, test_cases_updated: updated, links_added: linksAdded, model: result.model, source: result.source, error: result.error });
+  } catch (err) {
+    console.error('[test-coverage/infer]', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ──────────────────────────────────────────────
@@ -4954,8 +5200,15 @@ app.post('/api/v1/ingest-documents/:id/promote', (req, res) => {
   let worstRank = 0;
   let hasChange = false;   // any update/delete present
   for (const ex of extractions) {
-    const data   = ex.entity_data || {};
+    let   data   = ex.entity_data || {};
     const entity = registry.byEntityType[ex.entity_type];
+    // Inject ingest_id server-side for entity types that have an ingest_id column
+    // (FR, NFR). The AI never emits it — we stamp it from the source document here
+    // so it ends up in new_value and gets written to the DB column at materialization.
+    if (entity && entity.injectsIngestId && doc.ingest_id) {
+      data = { ...data, ingest_id: doc.ingest_id };
+      ex = { ...ex, entity_data: data };   // keep ex in sync for new_value below
+    }
     let op        = data.operation || 'create';
     let entityId  = ex.extraction_id;            // placeholder until materialized
     let fieldPath = `${ex.entity_type}.new_record`;
@@ -5303,7 +5556,14 @@ app.get('/api/v1/projects/:id/functional-reqs/:frId', (req, res) => {
   const changeLog = db.prepare(
     "SELECT * FROM asdlc_requirement_change_log WHERE req_type='functional' AND req_id=? ORDER BY created_at ASC"
   ).all(req.params.frId);
-  res.json({ ...parseReqRow(row), change_log: changeLog });
+  // AC/TC counts for traceability links in the Requirements UI
+  const acCount = db.prepare(
+    "SELECT COUNT(*) AS c FROM asdlc_acceptance_criterion WHERE req_slug=? AND project_id=? AND lifecycle_status='active'"
+  ).get(row.slug, req.params.id).c || 0;
+  const tcCount = db.prepare(
+    "SELECT COUNT(*) AS c FROM asdlc_test_case WHERE requirement_ids LIKE ? AND project_id=? AND lifecycle_status='active'"
+  ).get(`%${row.slug}%`, req.params.id).c || 0;
+  res.json({ ...parseReqRow(row), change_log: changeLog, ac_count: acCount, tc_count: tcCount });
 });
 
 function createFunctionalReq(projectId, body, uid) {
@@ -5408,10 +5668,16 @@ app.put('/api/v1/projects/:id/functional-reqs/:frId', (req, res) => {
   const logNote   = req.body.change_note || (isDeleting ? `Marked deleted` : `Updated fields: ${Object.keys(regularUpdates).join(', ')}`);
   insertReqChangeLog('functional', req.params.frId, req.params.id, logAction, logNote, uid);
 
+  // Trigger an AI quality review (debounced, gated on material-field changes).
+  const reviewQueued = !isDeleting && reviewQueue.maybeEnqueueReview({
+    projectId: req.params.id, entityType: 'functional_req', entityId: req.params.frId,
+    changedFields: Object.keys(regularUpdates),
+  });
+
   const changeLog = db.prepare(
     "SELECT * FROM asdlc_requirement_change_log WHERE req_type='functional' AND req_id=? ORDER BY created_at ASC"
   ).all(req.params.frId);
-  res.json({ ...parseReqRow(after), change_log: changeLog });
+  res.json({ ...parseReqRow(after), change_log: changeLog, _review_queued: reviewQueued });
 });
 
 // ── Non-Functional Requirements ──────────────────────────────────
@@ -5442,7 +5708,13 @@ app.get('/api/v1/projects/:id/nonfunctional-reqs/:nfrId', (req, res) => {
   const changeLog = db.prepare(
     "SELECT * FROM asdlc_requirement_change_log WHERE req_type='nonfunctional' AND req_id=? ORDER BY created_at ASC"
   ).all(req.params.nfrId);
-  res.json({ ...parseReqRow(row), change_log: changeLog });
+  const acCount = db.prepare(
+    "SELECT COUNT(*) AS c FROM asdlc_acceptance_criterion WHERE req_slug=? AND project_id=? AND lifecycle_status='active'"
+  ).get(row.slug, req.params.id).c || 0;
+  const tcCount = db.prepare(
+    "SELECT COUNT(*) AS c FROM asdlc_test_case WHERE requirement_ids LIKE ? AND project_id=? AND lifecycle_status='active'"
+  ).get(`%${row.slug}%`, req.params.id).c || 0;
+  res.json({ ...parseReqRow(row), change_log: changeLog, ac_count: acCount, tc_count: tcCount });
 });
 
 function createNonfunctionalReq(projectId, body, uid) {
@@ -5544,10 +5816,147 @@ app.put('/api/v1/projects/:id/nonfunctional-reqs/:nfrId', (req, res) => {
   const logNote   = req.body.change_note || (isDeleting ? `Marked deleted` : `Updated fields: ${Object.keys(regularUpdates).join(', ')}`);
   insertReqChangeLog('nonfunctional', req.params.nfrId, req.params.id, logAction, logNote, uid);
 
+  const reviewQueued = !isDeleting && reviewQueue.maybeEnqueueReview({
+    projectId: req.params.id, entityType: 'nonfunctional_req', entityId: req.params.nfrId,
+    changedFields: Object.keys(regularUpdates),
+  });
+
   const changeLog = db.prepare(
     "SELECT * FROM asdlc_requirement_change_log WHERE req_type='nonfunctional' AND req_id=? ORDER BY created_at ASC"
   ).all(req.params.nfrId);
-  res.json({ ...parseReqRow(after), change_log: changeLog });
+  res.json({ ...parseReqRow(after), change_log: changeLog, _review_queued: reviewQueued });
+});
+
+// ── Requirement → element traceability links ─────────────────────
+// Soft-FK junction (asdlc_requirement_link). Links are AI-proposed during
+// ingest (status='proposed', source='agent_ingest') and human-confirmed/edited
+// here; manually-created links default to status='confirmed', source='manual'.
+
+// Maps the polymorphic entity_type/req_type to their table + id/display columns
+// so a link can be enriched with slugs + human labels for the UI.
+const LINK_ENTITY_META = {
+  use_case:      { table: 'asdlc_use_case',      idCol: 'use_case_id',      label: 'title' },
+  workflow:      { table: 'asdlc_workflow',      idCol: 'workflow_id',      label: 'name'  },
+  workflow_step: { table: 'asdlc_workflow_step', idCol: 'workflow_step_id', label: 'name'  },
+  agent_spec:    { table: 'asdlc_agent_spec',    idCol: 'agent_spec_id',    label: 'name'  },
+  tool:          { table: 'asdlc_tool',          idCol: 'tool_id',          label: 'name'  },
+};
+const LINK_REQ_META = {
+  functional:    { table: 'asdlc_functional_req',    idCol: 'fr_id'  },
+  nonfunctional: { table: 'asdlc_nonfunctional_req', idCol: 'nfr_id' },
+};
+const LINK_STATUS_VALS = ['proposed', 'confirmed', 'rejected'];
+
+function enrichLink(link) {
+  if (!link) return link;
+  const em = LINK_ENTITY_META[link.entity_type];
+  const rm = LINK_REQ_META[link.req_type];
+  let entity_slug = null, entity_label = null, req_slug = null, req_title = null;
+  if (em) {
+    const row = db.prepare(`SELECT slug, ${em.label} AS label FROM ${em.table} WHERE ${em.idCol} = ?`).get(link.entity_id);
+    if (row) { entity_slug = row.slug; entity_label = row.label; }
+  }
+  if (rm) {
+    const row = db.prepare(`SELECT slug, title FROM ${rm.table} WHERE ${rm.idCol} = ?`).get(link.req_id);
+    if (row) { req_slug = row.slug; req_title = row.title; }
+  }
+  return { ...link, entity_slug, entity_label, req_slug, req_title };
+}
+
+// List links, filterable by requirement (req_type+req_id) and/or entity
+// (entity_type+entity_id) and/or status. Defaults to active links only.
+app.get('/api/v1/projects/:id/requirement-links', (req, res) => {
+  const { req_type, req_id, entity_type, entity_id, status, include_rejected } = req.query;
+  let sql = "SELECT * FROM asdlc_requirement_link WHERE project_id = ? AND lifecycle_status = 'active'";
+  const params = [req.params.id];
+  if (req_type)    { sql += ' AND req_type = ?';    params.push(req_type); }
+  if (req_id)      { sql += ' AND req_id = ?';       params.push(req_id); }
+  if (entity_type) { sql += ' AND entity_type = ?';  params.push(entity_type); }
+  if (entity_id)   { sql += ' AND entity_id = ?';    params.push(entity_id); }
+  if (status)      { sql += ' AND status = ?';       params.push(status); }
+  else if (include_rejected !== '1') { sql += " AND status != 'rejected'"; }
+  sql += ' ORDER BY created_at ASC';
+  const rows = db.prepare(sql).all(...params);
+  res.json(rows.map(enrichLink));
+});
+
+app.post('/api/v1/projects/:id/requirement-links', (req, res) => {
+  const uid = userId(req);
+  const projectId = req.params.id;
+  const { req_type, req_id, entity_type, entity_id, relationship, confidence, status, source } = req.body || {};
+  const rm = LINK_REQ_META[req_type];
+  const em = LINK_ENTITY_META[entity_type];
+  if (!rm) return res.status(400).json({ error: `req_type must be one of: ${Object.keys(LINK_REQ_META).join(', ')}` });
+  if (!em) return res.status(400).json({ error: `entity_type must be one of: ${Object.keys(LINK_ENTITY_META).join(', ')}` });
+  if (!req_id || !entity_id) return res.status(400).json({ error: 'req_id and entity_id are required' });
+
+  // Validate both endpoints exist and belong to this project.
+  const reqRow = db.prepare(`SELECT 1 FROM ${rm.table} WHERE ${rm.idCol} = ? AND project_id = ?`).get(req_id, projectId);
+  if (!reqRow) return res.status(404).json({ error: 'Requirement not found in this project' });
+  const entRow = db.prepare(`SELECT 1 FROM ${em.table} WHERE ${em.idCol} = ? AND project_id = ?`).get(entity_id, projectId);
+  if (!entRow) return res.status(404).json({ error: 'Linked entity not found in this project' });
+
+  if (status && !LINK_STATUS_VALS.includes(status))
+    return res.status(400).json({ error: `status must be one of: ${LINK_STATUS_VALS.join(', ')}` });
+
+  // Idempotent: if an active link already exists for this triple, return it.
+  const dup = db.prepare(
+    "SELECT * FROM asdlc_requirement_link WHERE project_id = ? AND req_type = ? AND req_id = ? AND entity_type = ? AND entity_id = ? AND lifecycle_status = 'active'"
+  ).get(projectId, req_type, req_id, entity_type, entity_id);
+  if (dup) return res.status(200).json(enrichLink(dup));
+
+  const id = generateId();
+  db.prepare(`INSERT INTO asdlc_requirement_link
+    (link_id, project_id, req_type, req_id, entity_type, entity_id,
+     relationship, confidence, status, source, created_by, updated_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(
+      id, projectId, req_type, req_id, entity_type, entity_id,
+      relationship || 'implements',
+      (typeof confidence === 'number' ? confidence : null),
+      status || 'confirmed',
+      source === 'agent_ingest' ? 'agent_ingest' : 'manual',
+      uid, uid
+    );
+  const created = db.prepare('SELECT * FROM asdlc_requirement_link WHERE link_id = ?').get(id);
+  auditLog('asdlc_requirement_link', id, 'INSERT', null, created, uid);
+  res.status(201).json(enrichLink(created));
+});
+
+app.put('/api/v1/projects/:id/requirement-links/:linkId', (req, res) => {
+  const uid = userId(req);
+  const existing = db.prepare('SELECT * FROM asdlc_requirement_link WHERE link_id = ? AND project_id = ?')
+    .get(req.params.linkId, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Link not found' });
+
+  const ALLOWED = ['status', 'relationship', 'confidence'];
+  const updates = {};
+  for (const f of ALLOWED) { if (req.body[f] !== undefined) updates[f] = req.body[f]; }
+  if (updates.status && !LINK_STATUS_VALS.includes(updates.status))
+    return res.status(400).json({ error: `status must be one of: ${LINK_STATUS_VALS.join(', ')}` });
+  if (Object.keys(updates).length === 0) return res.json(enrichLink(existing));
+
+  const setClauses = Object.keys(updates).map(f => `${f} = ?`).join(', ');
+  db.prepare(`UPDATE asdlc_requirement_link SET ${setClauses},
+    updated_at = datetime('now'), updated_by = ?, version = version + 1
+    WHERE link_id = ?`)
+    .run(...Object.values(updates), uid, req.params.linkId);
+  const after = db.prepare('SELECT * FROM asdlc_requirement_link WHERE link_id = ?').get(req.params.linkId);
+  auditLog('asdlc_requirement_link', req.params.linkId, 'UPDATE', existing, after, uid);
+  res.json(enrichLink(after));
+});
+
+// Soft-delete (lifecycle_status='cancelled'), consistent with other reversible deletes.
+app.delete('/api/v1/projects/:id/requirement-links/:linkId', (req, res) => {
+  const uid = userId(req);
+  const existing = db.prepare('SELECT * FROM asdlc_requirement_link WHERE link_id = ? AND project_id = ?')
+    .get(req.params.linkId, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Link not found' });
+  db.prepare(`UPDATE asdlc_requirement_link SET lifecycle_status = 'cancelled',
+    updated_at = datetime('now'), updated_by = ?, version = version + 1 WHERE link_id = ?`)
+    .run(uid, req.params.linkId);
+  auditLog('asdlc_requirement_link', req.params.linkId, 'DELETE', existing, { ...existing, lifecycle_status: 'cancelled' }, uid);
+  res.json({ deleted: true, link_id: req.params.linkId });
 });
 
 // ── Requirements design-report ───────────────────────────────────

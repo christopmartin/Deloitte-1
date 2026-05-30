@@ -99,6 +99,24 @@ function loadTool(db, toolId) {
   return row || null;
 }
 
+function loadFunctionalReq(db, frId) {
+  const row = db.prepare(`SELECT * FROM asdlc_functional_req WHERE fr_id = ?`).get(frId);
+  if (!row) return null;
+  return inflateJsonCols(row, ['actors', 'acceptance_criteria', 'dependencies']);
+}
+
+function loadNonfunctionalReq(db, nfrId) {
+  const row = db.prepare(`SELECT * FROM asdlc_nonfunctional_req WHERE nfr_id = ?`).get(nfrId);
+  if (!row) return null;
+  return inflateJsonCols(row, ['dependencies']);
+}
+
+function loadWorkflowStep(db, stepId) {
+  const row = db.prepare(`SELECT * FROM asdlc_workflow_step WHERE workflow_step_id = ?`).get(stepId);
+  if (!row) return null;
+  return inflateJsonCols(row, ['inputs', 'outputs', 'decisions_list']);
+}
+
 // ── Neighbor loaders (one hop) ────────────────────────────────────────────────
 function loadAgentNeighbors(db, agent) {
   // Linked use cases (M:N)
@@ -165,6 +183,110 @@ function loadToolNeighbors(db, tool) {
   return { consuming_agents: consumers };
 }
 
+// ── Traceability-link helpers (asdlc_requirement_link) ────────────────────────
+// The reviewer normalizes 'agent' → 'agent_spec' to match the link table enum.
+function normalizeLinkEntityType(entityType) {
+  return entityType === 'agent' ? 'agent_spec' : entityType;
+}
+
+const LINK_REQ_TABLE = {
+  functional:    { table: 'asdlc_functional_req',    idCol: 'fr_id' },
+  nonfunctional: { table: 'asdlc_nonfunctional_req', idCol: 'nfr_id' },
+};
+
+// Requirements that an element implements — feeds Tier-B (element-vs-requirement)
+// conflict detection when reviewing a derived element.
+function loadRequirementsForEntity(db, entityType, entityId) {
+  const links = db.prepare(
+    `SELECT req_type, req_id, status FROM asdlc_requirement_link
+      WHERE entity_type = ? AND entity_id = ? AND lifecycle_status = 'active' AND status != 'rejected'`
+  ).all(normalizeLinkEntityType(entityType), entityId);
+  const out = [];
+  for (const l of links) {
+    const m = LINK_REQ_TABLE[l.req_type];
+    if (!m) continue;
+    const r = db.prepare(`SELECT slug, title, description FROM ${m.table} WHERE ${m.idCol} = ?`).get(l.req_id);
+    if (r) out.push({ slug: r.slug, title: r.title, description: r.description, req_type: l.req_type, link_status: l.status });
+  }
+  return out;
+}
+
+// Elements that implement a requirement — feeds Tier-B when reviewing a requirement.
+function loadEntitiesForRequirement(db, reqType, reqId) {
+  const links = db.prepare(
+    `SELECT entity_type, entity_id, status FROM asdlc_requirement_link
+      WHERE req_type = ? AND req_id = ? AND lifecycle_status = 'active' AND status != 'rejected'`
+  ).all(reqType, reqId);
+  const META = {
+    use_case:      { table: 'asdlc_use_case',      idCol: 'use_case_id',      label: 'title' },
+    workflow:      { table: 'asdlc_workflow',      idCol: 'workflow_id',      label: 'name'  },
+    workflow_step: { table: 'asdlc_workflow_step', idCol: 'workflow_step_id', label: 'name'  },
+    agent_spec:    { table: 'asdlc_agent_spec',    idCol: 'agent_spec_id',    label: 'name'  },
+    tool:          { table: 'asdlc_tool',          idCol: 'tool_id',          label: 'name'  },
+  };
+  const out = [];
+  for (const l of links) {
+    const m = META[l.entity_type];
+    if (!m) continue;
+    const r = db.prepare(`SELECT slug, ${m.label} AS label FROM ${m.table} WHERE ${m.idCol} = ?`).get(l.entity_id);
+    if (r) out.push({ entity_type: l.entity_type, slug: r.slug, name: r.label, link_status: l.status });
+  }
+  return out;
+}
+
+// Sibling requirements (same use case if set, else same project, capped) — the
+// substrate for requirement↔requirement (Tier-A) conflict detection.
+function loadSiblingRequirements(db, projectId, useCaseId, excludeReqId) {
+  const scopeClause = useCaseId ? 'use_case_id = ?' : 'project_id = ?';
+  const scopeVal = useCaseId || projectId;
+  const frs = db.prepare(
+    `SELECT slug, title, description FROM asdlc_functional_req
+      WHERE ${scopeClause} AND project_id = ? AND status != 'deleted' AND fr_id != ? LIMIT 40`
+  ).all(scopeVal, projectId, excludeReqId || '');
+  const nfrs = db.prepare(
+    `SELECT slug, title, measurable_target FROM asdlc_nonfunctional_req
+      WHERE ${scopeClause} AND project_id = ? AND status != 'deleted' AND nfr_id != ? LIMIT 40`
+  ).all(scopeVal, projectId, excludeReqId || '');
+  return { functional: frs, nonfunctional: nfrs };
+}
+
+function lightUseCase(db, ucId) {
+  return db.prepare(
+    `SELECT use_case_id, slug, title, summary, supervision_model FROM asdlc_use_case WHERE use_case_id = ?`
+  ).get(ucId) || null;
+}
+
+function loadFunctionalReqNeighbors(db, fr) {
+  return {
+    use_case: fr.use_case_id ? lightUseCase(db, fr.use_case_id) : null,
+    sibling_requirements: loadSiblingRequirements(db, fr.project_id, fr.use_case_id, fr.fr_id),
+    implemented_by: loadEntitiesForRequirement(db, 'functional', fr.fr_id),
+  };
+}
+
+function loadNonfunctionalReqNeighbors(db, nfr) {
+  return {
+    use_case: nfr.use_case_id ? lightUseCase(db, nfr.use_case_id) : null,
+    sibling_requirements: loadSiblingRequirements(db, nfr.project_id, nfr.use_case_id, nfr.nfr_id),
+    implemented_by: loadEntitiesForRequirement(db, 'nonfunctional', nfr.nfr_id),
+  };
+}
+
+function loadWorkflowStepNeighbors(db, step) {
+  const workflow = db.prepare(
+    `SELECT workflow_id, slug, name, use_case_id FROM asdlc_workflow WHERE workflow_id = ?`
+  ).get(step.workflow_id) || null;
+  const siblings = db.prepare(
+    `SELECT workflow_step_id, step_number, name, step_type FROM asdlc_workflow_step
+      WHERE workflow_id = ? AND workflow_step_id != ? ORDER BY step_number`
+  ).all(step.workflow_id, step.workflow_step_id);
+  return {
+    workflow,
+    sibling_steps: siblings,
+    implements_requirements: loadRequirementsForEntity(db, 'workflow_step', step.workflow_step_id),
+  };
+}
+
 // Dispatcher
 function loadEntityWithNeighbors(db, entityType, entityId) {
   switch (entityType) {
@@ -172,27 +294,52 @@ function loadEntityWithNeighbors(db, entityType, entityId) {
     case 'agent_spec': {
       const entity = loadAgent(db, entityId);
       if (!entity) return null;
-      return { entity, neighbors: loadAgentNeighbors(db, entity) };
+      const neighbors = loadAgentNeighbors(db, entity);
+      neighbors.implements_requirements = loadRequirementsForEntity(db, 'agent_spec', entityId);
+      return { entity, neighbors };
     }
     case 'use_case': {
       const entity = loadUseCase(db, entityId);
       if (!entity) return null;
-      return { entity, neighbors: loadUseCaseNeighbors(db, entity) };
+      const neighbors = loadUseCaseNeighbors(db, entity);
+      neighbors.implements_requirements = loadRequirementsForEntity(db, 'use_case', entityId);
+      return { entity, neighbors };
     }
     case 'workflow': {
       const entity = loadWorkflow(db, entityId);
       if (!entity) return null;
-      return { entity, neighbors: loadWorkflowNeighbors(db, entity) };
+      const neighbors = loadWorkflowNeighbors(db, entity);
+      neighbors.implements_requirements = loadRequirementsForEntity(db, 'workflow', entityId);
+      return { entity, neighbors };
     }
     case 'tool': {
       const entity = loadTool(db, entityId);
       if (!entity) return null;
-      return { entity, neighbors: loadToolNeighbors(db, entity) };
+      const neighbors = loadToolNeighbors(db, entity);
+      neighbors.implements_requirements = loadRequirementsForEntity(db, 'tool', entityId);
+      return { entity, neighbors };
+    }
+    case 'functional_req': {
+      const entity = loadFunctionalReq(db, entityId);
+      if (!entity) return null;
+      return { entity, neighbors: loadFunctionalReqNeighbors(db, entity) };
+    }
+    case 'nonfunctional_req': {
+      const entity = loadNonfunctionalReq(db, entityId);
+      if (!entity) return null;
+      return { entity, neighbors: loadNonfunctionalReqNeighbors(db, entity) };
+    }
+    case 'workflow_step': {
+      const entity = loadWorkflowStep(db, entityId);
+      if (!entity) return null;
+      return { entity, neighbors: loadWorkflowStepNeighbors(db, entity) };
     }
     default:
       return null;
   }
 }
+
+const REQUIREMENT_TYPES = new Set(['functional_req', 'nonfunctional_req']);
 
 // ── Field-emptiness heuristics ────────────────────────────────────────────────
 function isEmpty(val) {
@@ -269,6 +416,40 @@ function stubReview(entityType, entity /* , neighbors */) {
     }
   }
 
+  // Requirements: objective gaps only — never judge the requirement's intrinsic
+  // "quality" or intent. (Conflict/inconsistency detection needs the AI reviewer.)
+  if (entityType === 'functional_req') {
+    if (isEmpty(entity.description)) {
+      findings.push({ severity: 'high', category: 'missing', field_name: 'description',
+        description: 'Functional requirement has no description — the need it states is not captured.',
+        suggested_action: 'Describe what the system must do to fulfil this requirement.' });
+    }
+    if (isEmpty(entity.acceptance_criteria)) {
+      findings.push({ severity: 'med', category: 'incomplete', field_name: 'acceptance_criteria',
+        description: 'No acceptance criteria — the requirement cannot be objectively verified.',
+        suggested_action: 'Add at least one verifiable acceptance criterion.' });
+    }
+  }
+  if (entityType === 'nonfunctional_req') {
+    if (isEmpty(entity.measurable_target)) {
+      findings.push({ severity: 'high', category: 'missing', field_name: 'measurable_target',
+        description: 'Non-functional requirement has no measurable target — it cannot be verified.',
+        suggested_action: 'Add a concrete, measurable target (e.g. "p95 < 2s", "99.9% uptime").' });
+    }
+    if (isEmpty(entity.verification_method)) {
+      findings.push({ severity: 'low', category: 'incomplete', field_name: 'verification_method',
+        description: 'No verification method specified for this NFR.',
+        suggested_action: 'State how the target will be verified — load test, audit, etc.' });
+    }
+  }
+  if (entityType === 'workflow_step') {
+    if (isEmpty(entity.actor_role)) {
+      findings.push({ severity: 'med', category: 'missing', field_name: 'actor_role',
+        description: 'Workflow step has no actor/role responsible for executing it.',
+        suggested_action: 'Assign the role or system that performs this step.' });
+    }
+  }
+
   return findings;
 }
 
@@ -314,11 +495,52 @@ If you find nothing, return { "findings": [] }. Do not invent issues to fill spa
   parts.push(JSON.stringify(neighbors || {}, null, 2));
   parts.push('```');
 
+  if (Array.isArray(opts.bestPractices) && opts.bestPractices.length) {
+    parts.push('');
+    parts.push('# Design best practices / house rules (JUDGE THE ENTITY AGAINST THESE)');
+    parts.push(opts.bestPractices.map(bp => `- ${bp.title ? bp.title + ': ' : ''}${bp.rule_text}`).join('\n'));
+  }
+
   if (opts.extraGuidance) {
     parts.push('');
     parts.push(opts.extraGuidance);
   }
 
+  return parts.join('\n');
+}
+
+// Requirements are statements of NEED, not derived artifacts — so we judge them
+// only for conflicts/inconsistencies with their neighbors and for objective gaps.
+// We deliberately do NOT critique a requirement's intrinsic "quality" or intent.
+function buildRequirementReviewPrompt(entityType, entity, neighbors) {
+  const label = entityType === 'nonfunctional_req' ? 'non-functional requirement' : 'functional requirement';
+  const parts = [];
+  parts.push(`You are an **independent requirements auditor** reviewing one ${label} from a Design Repository. A requirement states a NEED — do NOT judge whether the need is "good", "worth doing", or well-written prose. Do NOT invent missing fields beyond the objective ones listed below.
+
+Find issues in these categories ONLY:
+- **conflicting** — this requirement directly contradicts a sibling requirement, or contradicts a design element that is supposed to implement it (see neighbors).
+- **inconsistent** — this requirement uses a term, value, or definition that disagrees with how a sibling requirement or an implementing element uses it.
+- **missing** — ONLY for objectively required fields: a functional requirement with no description or no acceptance_criteria; a non-functional requirement with no measurable_target.
+
+Output strictly as JSON (no Markdown, no prose):
+{
+  "findings": [
+    { "severity": "low|med|high", "category": "conflicting|inconsistent|missing",
+      "field_name": "field_key_or_null", "description": "...", "suggested_action": "..." }
+  ]
+}
+If you find nothing, return { "findings": [] }. Be specific — name the sibling requirement slug or implementing element slug that conflicts.`);
+
+  parts.push('');
+  parts.push(`# Requirement under review`);
+  parts.push('```json');
+  parts.push(JSON.stringify(entity, null, 2));
+  parts.push('```');
+  parts.push('');
+  parts.push(`# Neighbors — sibling requirements (Tier-A conflicts) and implementing design elements (Tier-B conflicts)`);
+  parts.push('```json');
+  parts.push(JSON.stringify(neighbors || {}, null, 2));
+  parts.push('```');
   return parts.join('\n');
 }
 
@@ -345,14 +567,29 @@ function extractFindings(rawText) {
   })).filter(f => f.description !== '');
 }
 
-async function claudeReview(entityType, entity, neighbors, opts) {
+async function claudeReview(entityType, entity, neighbors, opts = {}) {
   const client = getClient();
-  const userPrompt = buildClaudeReviewPrompt(entityType, entity, neighbors, opts);
+  const model = aiConfig.resolveModel('quality_reviewer');
+
+  let userPrompt;
+  if (REQUIREMENT_TYPES.has(entityType)) {
+    // Requirements: conflict + objective-gap mode (no best-practice quality judgment).
+    userPrompt = buildRequirementReviewPrompt(entityType, entity, neighbors);
+  } else {
+    // Derived elements: full validity review against design best practices.
+    const scopes = [entityType];
+    if (entityType === 'agent' || entityType === 'agent_spec') { scopes.push('agent', 'agent_spec'); }
+    const bestPractices = aiConfig.getActiveBestPractices(scopes);
+    userPrompt = buildClaudeReviewPrompt(entityType, entity, neighbors, { ...opts, bestPractices });
+  }
+
   const response = await client.messages.create({
-    model: aiConfig.resolveModel('quality_reviewer'),
+    model,
     max_tokens: MAX_TOKENS,
     messages: [{ role: 'user', content: userPrompt }],
   });
+  // Cost parity with the ingest pipeline — best-effort, never throws.
+  aiConfig.logUsage({ projectId: opts.projectId, source: 'quality_review', refId: opts.refId, model, usage: response.usage });
   const text = (response.content || [])
     .filter(b => b.type === 'text')
     .map(b => b.text)
@@ -376,7 +613,7 @@ async function reviewEntity({ projectId, entityType, entityId, db }) {
     return { findings: stubReview(entityType, entity, neighbors), model: 'stub', source: 'stub' };
   }
   try {
-    const findings = await claudeReview(entityType, entity, neighbors);
+    const findings = await claudeReview(entityType, entity, neighbors, { projectId, refId: entityId });
     return { findings, model: aiConfig.resolveModel('quality_reviewer'), source: 'claude' };
   } catch (err) {
     console.error('[quality-reviewer] Claude call failed, falling back to stub:', err.message);
@@ -402,6 +639,16 @@ async function reviewApplication({ projectId, db }) {
   }
   for (const r of db.prepare(`SELECT tool_id FROM asdlc_tool WHERE project_id = ?`).all(projectId)) {
     targets.push({ entityType: 'tool', entityId: r.tool_id });
+  }
+  // Requirements + workflow steps — previously never audited by any path.
+  for (const r of db.prepare(`SELECT fr_id FROM asdlc_functional_req WHERE project_id = ? AND status != 'deleted'`).all(projectId)) {
+    targets.push({ entityType: 'functional_req', entityId: r.fr_id });
+  }
+  for (const r of db.prepare(`SELECT nfr_id FROM asdlc_nonfunctional_req WHERE project_id = ? AND status != 'deleted'`).all(projectId)) {
+    targets.push({ entityType: 'nonfunctional_req', entityId: r.nfr_id });
+  }
+  for (const r of db.prepare(`SELECT workflow_step_id FROM asdlc_workflow_step WHERE project_id = ? AND (lifecycle_status IS NULL OR lifecycle_status != 'retired')`).all(projectId)) {
+    targets.push({ entityType: 'workflow_step', entityId: r.workflow_step_id });
   }
 
   const allFindings = [];

@@ -64,8 +64,21 @@ const COMMON_TOOL_FIELDS = {
   },
 };
 
+// Optional traceability field merged into the DERIVED-entity tools (workflow,
+// workflow_step, agent_spec, tool). Names the FR/NFR slugs the entity implements
+// so /promote can materialize requirement→element links for conflict detection.
+// It is NOT in any fieldMap, so it rides in entity_data only (never a column).
+const IMPLEMENTS_REQ_FIELD = {
+  type: 'array',
+  items: { type: 'string' },
+  description: 'FR/NFR slugs from the "existing design" list that this entity implements or ' +
+    'satisfies, e.g. ["FR-003","NFR-001"]. Only use slugs shown in the existing design — ' +
+    'never invent one. These become traceability links used for requirement-vs-design conflict detection.',
+};
+
 // Meta keys present in entity_data that must NEVER be written to entity columns.
-const META_KEYS = Object.keys(COMMON_TOOL_FIELDS);
+// Includes implements_requirements (traceability hint, materialized as links, not a column).
+const META_KEYS = [...Object.keys(COMMON_TOOL_FIELDS), 'implements_requirements'];
 
 // ── Value transforms for materialization ──────────────────────────────────────
 const j = (v, fallback) => JSON.stringify(v === undefined || v === null ? fallback : v);
@@ -83,6 +96,99 @@ const wrapModel = (v) => j(typeof v === 'string' ? { model: v } : v, {});
 // `nameKeys` derive the entity's display name + the in-packet id-map key.
 // ─────────────────────────────────────────────────────────────────────────────
 const REGISTRY = [
+
+  // ── Requirements (order 0 — materialize BEFORE design entities) ───────────────
+  // FR and NFR are the source of truth; use cases / workflows are derived from them.
+  // `injectsIngestId:true` tells the /promote endpoint to stamp the source document's
+  // ingest_id into entity_data so the materializer writes it to the ingest_id column.
+  {
+    entity_type: 'functional_req',
+    order: 0,
+    materializable: true,
+    summarizable: true,       // include in existing-design summary so AI can detect updates
+    injectsIngestId: true,    // /promote injects doc.ingest_id before storing new_value
+    table: 'asdlc_functional_req',
+    pk: 'fr_id',
+    slugPrefix: 'FR',
+    nameKeys: ['title'],
+    tool: {
+      name: 'extract_functional_req',
+      description: 'Extract a functional requirement — an explicit user need, system capability, or ' +
+        'business rule the system must fulfil. Maps to asdlc_functional_req. ' +
+        'Extract BEFORE extracting use cases and workflows — requirements are the source.',
+      properties: {
+        title:           { type: 'string',  description: 'Short declarative title, e.g. "Invoice retrieval must support multi-company lookup"' },
+        description:     { type: 'string',  description: 'Full plain-English description of what the system must do' },
+        actors:          { type: 'array',   items: { type: 'string' }, description: 'Roles, teams, or systems that interact with this requirement' },
+        preconditions:   { type: 'string',  description: 'What must be true before this requirement can be exercised' },
+        postconditions:  { type: 'string',  description: 'What is guaranteed to be true after successful fulfilment' },
+        priority:        { type: 'string',  enum: ['must_have','should_have','could_have','wont_have'], description: 'MoSCoW priority' },
+        source:          { type: 'string',  description: 'Citation — person name, meeting date, document section, etc.' },
+        use_case_title:  { type: 'string',  description: 'Title of the Use Case this requirement belongs to, if one is identifiable' },
+        dependencies:    { type: 'array',   items: { type: 'string' }, description: 'FR or NFR slugs this requirement depends on, e.g. ["FR-002","NFR-001"]' },
+      },
+      required: ['title', 'description'],
+    },
+    fieldMap: {
+      title:          { col: 'title' },
+      description:    { col: 'description' },
+      actors:         { col: 'actors', json: true },
+      preconditions:  { col: 'preconditions' },
+      postconditions: { col: 'postconditions' },
+      priority:       { col: 'priority' },
+      source:         { col: 'source' },
+      dependencies:   { col: 'dependencies', json: true },
+      ingest_id:      { col: 'ingest_id' },   // populated at promote time, not by AI
+    },
+    parentLinks: [
+      { col: 'use_case_id', parentType: 'use_case', nameKeyInData: 'use_case_title', required: false },
+    ],
+  },
+
+  {
+    entity_type: 'nonfunctional_req',
+    order: 0,
+    materializable: true,
+    summarizable: true,
+    injectsIngestId: true,
+    table: 'asdlc_nonfunctional_req',
+    pk: 'nfr_id',
+    slugPrefix: 'NFR',
+    nameKeys: ['title'],
+    tool: {
+      name: 'extract_nonfunctional_req',
+      description: 'Extract a non-functional requirement — a quality attribute or constraint such as ' +
+        'performance, security, scalability, availability, or compliance. ' +
+        'Must include a measurable target so the requirement can be verified. Maps to asdlc_nonfunctional_req.',
+      properties: {
+        title:               { type: 'string', description: 'Short declarative title, e.g. "Invoice API p95 response < 2 s"' },
+        category:            { type: 'string', description: 'Type of NFR: Performance, Security, Scalability, Availability, Compliance, Usability, etc.' },
+        description:         { type: 'string', description: 'Full description of the quality constraint or attribute' },
+        measurable_target:   { type: 'string', description: 'Concrete, measurable target, e.g. "p95 latency < 2 s", "99.9% uptime/month"' },
+        verification_method: { type: 'string', description: 'How this NFR will be verified — load test, audit, penetration test, etc.' },
+        priority:            { type: 'string', enum: ['must_have','should_have','could_have','wont_have'], description: 'MoSCoW priority' },
+        source:              { type: 'string', description: 'Citation — person name, meeting date, document section, etc.' },
+        use_case_title:      { type: 'string', description: 'Title of the Use Case this NFR constrains, if identifiable' },
+        dependencies:        { type: 'array',  items: { type: 'string' }, description: 'FR or NFR slugs this requirement depends on' },
+      },
+      required: ['title', 'category', 'description', 'measurable_target'],
+    },
+    fieldMap: {
+      title:               { col: 'title' },
+      category:            { col: 'category' },
+      description:         { col: 'description' },
+      measurable_target:   { col: 'measurable_target' },
+      verification_method: { col: 'verification_method' },
+      priority:            { col: 'priority' },
+      source:              { col: 'source' },
+      dependencies:        { col: 'dependencies', json: true },
+      ingest_id:           { col: 'ingest_id' },
+    },
+    parentLinks: [
+      { col: 'use_case_id', parentType: 'use_case', nameKeyInData: 'use_case_title', required: false },
+    ],
+  },
+
   {
     entity_type: 'use_case',
     order: 1,
@@ -142,6 +248,7 @@ const REGISTRY = [
         handoffs:       { type: 'array', items: { type: 'string' }, description: 'Hand-off points where work moves between roles or systems' },
         decisions:      { type: 'array', items: { type: 'string' }, description: 'Key decision points in the workflow' },
         fallback_paths: { type: 'array', items: { type: 'string' }, description: 'Alternative paths when the happy path fails or branches' },
+        implements_requirements: IMPLEMENTS_REQ_FIELD,
       },
       required: ['name', 'trigger'],
     },
@@ -178,6 +285,7 @@ const REGISTRY = [
         inputs:         { type: 'array',   items: { type: 'string' }, description: 'Inputs required to begin this step' },
         outputs:        { type: 'array',   items: { type: 'string' }, description: 'Outputs produced when this step completes' },
         decisions_list: { type: 'array',   items: { type: 'string' }, description: 'Decisions made at this step' },
+        implements_requirements: IMPLEMENTS_REQ_FIELD,
       },
       required: ['name', 'step_number'],
     },
@@ -253,6 +361,7 @@ const REGISTRY = [
         memory_strategy:  { type: 'string', description: 'How this agent retains context — none, session, or persistent' },
         design_risks:     { type: 'array',  items: { type: 'string' }, description: 'Known risks or failure modes in this agent\'s design' },
         model_preference: { type: 'string', description: 'Preferred AI model (e.g. claude-sonnet, claude-opus)' },
+        implements_requirements: IMPLEMENTS_REQ_FIELD,
       },
       required: ['name', 'scope'],
     },
@@ -304,6 +413,7 @@ const REGISTRY = [
         boundaries:          { type: 'array',  items: { type: 'string' }, description: 'Limits / boundaries on what the tool may do' },
         execution_mode:      { type: 'string', enum: ['sync', 'async'], description: 'Whether the tool runs synchronously or asynchronously' },
         dev_status:          { type: 'string', enum: ['Existing', 'To be built'], description: 'Whether the tool already exists or must be built' },
+        implements_requirements: IMPLEMENTS_REQ_FIELD,
       },
       required: ['name'],
     },
@@ -320,6 +430,88 @@ const REGISTRY = [
       dev_status:          { col: 'dev_status' },
     },
     parentLinks: [],
+  },
+
+  // ── Acceptance Criteria (order 7 — after design entities, requires UC parent) ──
+  // Kept in the Testing module. AI only extracts AC when a Use Case can be named.
+  // `staticColumns` are injected by mtCreate alongside the fieldMap columns.
+  // `req_slug` links the AC back to the FR or NFR it satisfies (loose FK via slug).
+  {
+    entity_type: 'acceptance_criterion',
+    order: 7,
+    materializable: true,
+    summarizable: false,          // too many to enumerate in the existing-design context
+    staticColumns: { parent_type: 'use_case', source: 'generated' },
+    table: 'asdlc_acceptance_criterion',
+    pk: 'acceptance_criterion_id',
+    slugPrefix: 'AC',
+    nameKeys: ['text'],
+    tool: {
+      name: 'extract_acceptance_criterion',
+      description: 'Extract one acceptance criterion — a single verifiable condition that confirms a ' +
+        'requirement or use case is met. Use Given/When/Then format where possible. ' +
+        'ONLY extract when you can name the parent Use Case. If no UC is identifiable, ' +
+        'raise a clarification instead of guessing. Maps to asdlc_acceptance_criterion.',
+      properties: {
+        text:           { type: 'string', description: 'The criterion text, ideally in Given/When/Then form. One criterion per call.' },
+        use_case_title: { type: 'string', description: 'Title of the Use Case this AC verifies — must match a UC being extracted or already in the design' },
+        req_slug:       { type: 'string', description: 'FR-### or NFR-### slug this AC satisfies, e.g. "FR-003". Leave blank if no specific requirement is identified.' },
+        case_type_hint: { type: 'string', enum: ['happy_path','edge_case','negative','regression'], description: 'Scenario type — informational only, used when generating linked test cases' },
+      },
+      required: ['text', 'use_case_title'],
+    },
+    fieldMap: {
+      text:     { col: 'text' },
+      req_slug: { col: 'req_slug' },
+    },
+    parentLinks: [
+      // Resolves use_case_title → parent_id (the use_case_id UUID).
+      // parent_type is always 'use_case' — set via staticColumns above.
+      { col: 'parent_id', parentType: 'use_case', nameKeyInData: 'use_case_title', required: true },
+    ],
+  },
+
+  // ── Test Cases (order 8 — after AC, requires a scope entity) ─────────────────
+  // `scopeResolution:true` triggers special scope-conditional parent lookup in mtCreate.
+  // `requirement_refs` maps to the existing `requirement_ids` JSON column.
+  {
+    entity_type: 'test_case',
+    order: 8,
+    materializable: true,
+    summarizable: false,
+    staticColumns: { source: 'generated' },
+    scopeResolution: true,    // mtCreate handles scope-conditional parent lookup
+    table: 'asdlc_test_case',
+    pk: 'test_case_id',
+    slugPrefix: 'TC',
+    nameKeys: ['title'],
+    tool: {
+      name: 'extract_test_case',
+      description: 'Extract one test case — a single scenario that validates system behaviour. ' +
+        'Link it to the Use Case, Workflow, Agent, or Tool being tested via scope + scope_entity_name. ' +
+        'Include the FR/NFR slugs it validates in requirement_refs. Maps to asdlc_test_case.',
+      properties: {
+        title:             { type: 'string', description: 'Short descriptive title of the test case' },
+        test_action:       { type: 'string', description: 'What the tester or system does — the action being tested' },
+        test_input:        { type: 'string', description: 'Input data, state, or preconditions for this test' },
+        expected_result:   { type: 'string', description: 'What the correct outcome is — what success looks like' },
+        case_type:         { type: 'string', enum: ['happy_path','edge_case','negative','regression'], description: 'Type of scenario' },
+        scope:             { type: 'string', enum: ['use_case','workflow','agent','tool'], description: 'The level at which this test operates' },
+        scope_entity_name: { type: 'string', description: 'Exact name of the entity being tested (use case title, workflow name, agent name, or tool name)' },
+        requirement_refs:  { type: 'array',  items: { type: 'string' }, description: 'FR and NFR slugs this test validates, e.g. ["FR-003","NFR-001"]. Use slugs from the existing design or from this extraction.' },
+      },
+      required: ['title', 'test_action', 'expected_result', 'scope', 'scope_entity_name'],
+    },
+    fieldMap: {
+      title:           { col: 'title' },
+      test_action:     { col: 'test_action' },
+      test_input:      { col: 'test_input' },
+      expected_result: { col: 'expected_result' },
+      case_type:       { col: 'case_type' },
+      scope:           { col: 'scope' },
+      requirement_refs:{ col: 'requirement_ids', json: true },
+    },
+    parentLinks: [],     // scope_entity_id resolved via scopeResolution path in mtCreate
   },
 
   // ── Types WITHOUT a dedicated table (v1): extracted + promoted for review, but

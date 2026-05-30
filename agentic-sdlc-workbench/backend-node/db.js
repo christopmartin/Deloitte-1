@@ -99,6 +99,9 @@ const MIGRATIONS = [
   "ALTER TABLE asdlc_test_case ADD COLUMN requirement_ids TEXT NOT NULL DEFAULT '[]'",
   // AI ingestion pipeline: create/update/delete operation on change-packet items
   "ALTER TABLE asdlc_change_packet_item ADD COLUMN operation TEXT NOT NULL DEFAULT 'create'",
+  // Requirements-first ingestion: AC req_slug traceability link
+  "ALTER TABLE asdlc_acceptance_criterion ADD COLUMN req_slug TEXT",
+
   // Ingest document soft-cancel / archive (reversible; never hard-deleted)
   "ALTER TABLE asdlc_ingest_document ADD COLUMN lifecycle_status TEXT NOT NULL DEFAULT 'active'",
   "ALTER TABLE asdlc_ingest_document ADD COLUMN cancelled_at TEXT",
