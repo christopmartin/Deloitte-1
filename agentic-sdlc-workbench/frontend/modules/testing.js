@@ -436,9 +436,35 @@ function buildTcBlock({ parentLabel, parentSubtitle, scope, scopeEntityId, items
     block.appendChild(tbl);
   }
 
+  const actions = el('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;' });
   const addBtn = el('button', { className: 'btn btn-ghost btn-sm tst-add-btn' }, '+ Add Test Case');
   addBtn.addEventListener('click', () => addTc(scope, scopeEntityId, block));
-  block.appendChild(addBtn);
+  actions.appendChild(addBtn);
+
+  const genBtn = el('button', { className: 'btn btn-ghost btn-sm' }, '✨ Generate tests (AI)');
+  genBtn.title = 'Let AI draft test cases across scenario types for this ' + scopeNoun(scope);
+  genBtn.addEventListener('click', async () => {
+    genBtn.disabled = true; const orig = genBtn.textContent; genBtn.textContent = '✨ Generating…';
+    try {
+      const r = await apiFetch(`/projects/${_projectId}/test-cases/generate`, {
+        method: 'POST',
+        body: JSON.stringify({ scope, scope_entity_id: scopeEntityId }),
+      });
+      if (!r.created) {
+        showToast(r.source === 'stub'
+          ? 'AI key not configured — no tests generated (set ANTHROPIC_API_KEY).'
+          : 'No new test cases generated (coverage may already exist).', 'warning');
+      } else {
+        showToast(`Generated ${r.created} draft test case${r.created === 1 ? '' : 's'} — review & approve.`, 'success');
+      }
+      renderTcView();
+    } catch (err) {
+      showToast(`Generate failed: ${err.message}`, 'error');
+      genBtn.disabled = false; genBtn.textContent = orig;
+    }
+  });
+  actions.appendChild(genBtn);
+  block.appendChild(actions);
 
   return block;
 }

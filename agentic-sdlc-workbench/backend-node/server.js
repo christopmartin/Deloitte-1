@@ -489,6 +489,18 @@ function transitionCp(req, res, newStatus) {
     const updated = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(req.params.id);
     auditLog('asdlc_change_packet', req.params.id, 'UPDATE', existing, updated, uid);
     try { recordFeedbackForCp(updated, 'accepted_asis', uid); } catch (e) { console.error('[feedback]', e.message); }
+
+    // Auto-generate test coverage for newly-materialized testable entities.
+    // Fire-and-forget AFTER commit — Claude calls must not run inside the txn,
+    // and no separate approval gate is required for the generated drafts.
+    const toGenerate = (applyResult && applyResult.createdTestable) || [];
+    if (toGenerate.length) {
+      Promise.allSettled(toGenerate.map(e => generateAndInsertTests(existing.project_id, e.scope, e.entityId, uid)))
+        .then(rs => {
+          const n = rs.reduce((a, r) => a + (r.status === 'fulfilled' ? (r.value.created || 0) : 0), 0);
+          if (n) console.log(`[test-gen] materialize: generated ${n} test case(s) across ${toGenerate.length} entit(ies) for CP ${updated.packet_code}`);
+        });
+    }
     return res.json({ ...updated, apply_result: applyResult });
   }
 
@@ -704,6 +716,50 @@ function markItemApplied(itemId, note) {
   }
 }
 
+// Registry entity_type → test_case.scope (the entities tests can target).
+const TESTABLE_SCOPE_OF = { use_case: 'use_case', workflow: 'workflow', agent_spec: 'agent', tool: 'tool' };
+
+// Insert AI-generated test cases for one entity (draft, source='generated').
+// Used both at materialize time and on demand. Dedupes by title per entity so
+// re-running doesn't pile up copies. Never throws; returns the count inserted.
+async function generateAndInsertTests(projectId, scope, entityId, uid) {
+  try {
+    const { generateTestCases } = require('./agent/test-generator');
+    const result = await generateTestCases({ projectId, scope, entityId, db });
+    if (!result.tests || !result.tests.length) return { created: 0, source: result.source };
+
+    const validSlugs = new Set([
+      ...db.prepare("SELECT slug FROM asdlc_functional_req WHERE project_id=? AND slug IS NOT NULL").all(projectId).map(r => r.slug),
+      ...db.prepare("SELECT slug FROM asdlc_nonfunctional_req WHERE project_id=? AND slug IS NOT NULL").all(projectId).map(r => r.slug),
+    ]);
+    const existingTitles = new Set(
+      db.prepare("SELECT title FROM asdlc_test_case WHERE project_id=? AND scope=? AND scope_entity_id=? AND lifecycle_status='active'")
+        .all(projectId, scope, entityId).map(r => (r.title || '').toLowerCase())
+    );
+
+    let created = 0;
+    for (const t of result.tests) {
+      if (existingTitles.has((t.title || '').toLowerCase())) continue;
+      const refs = (t.requirement_refs || []).filter(s => validSlugs.has(s));
+      const id = generateId();
+      db.prepare(`INSERT INTO asdlc_test_case
+        (test_case_id, project_id, scope, scope_entity_id, title, test_action,
+         test_input, expected_result, case_type, source, status, requirement_ids, created_by, updated_by)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(id, projectId, scope, entityId, t.title, t.test_action || '', t.test_input || '',
+          t.expected_result || '', t.case_type || 'happy_path', 'generated', 'draft',
+          JSON.stringify(refs), uid, uid);
+      auditLog('asdlc_test_case', id, 'INSERT', null,
+        db.prepare('SELECT * FROM asdlc_test_case WHERE test_case_id=?').get(id), uid);
+      created++;
+    }
+    return { created, source: result.source };
+  } catch (err) {
+    console.error('[generateAndInsertTests]', err.message);
+    return { created: 0, error: err.message };
+  }
+}
+
 // Derived entity types whose ingest extractions can carry implements_requirements.
 const INGEST_LINK_ENTITY_TYPES = new Set(['workflow', 'workflow_step', 'agent_spec', 'tool']);
 
@@ -760,7 +816,7 @@ function applyChangePacket(cpId, uid) {
   );
 
   const idMap = {};
-  const result = { applied: 0, updated: 0, deleted: 0, skipped: 0, errors: [] };
+  const result = { applied: 0, updated: 0, deleted: 0, skipped: 0, errors: [], createdTestable: [] };
 
   for (const item of ordered) {
     if (item.applied_at) { result.skipped++; continue; }
@@ -796,6 +852,11 @@ function applyChangePacket(cpId, uid) {
       } else {
         const newId = mtCreate(entity, data, projectId, uid, idMap, item); result.applied++;
         materializeRequirementLinks(entity.entity_type, newId, data, projectId, uid);
+        // Record newly-created testable entities so the caller can auto-generate
+        // test coverage AFTER the transaction commits (Claude calls must not run
+        // inside the DB transaction).
+        const scope = TESTABLE_SCOPE_OF[entity.entity_type];
+        if (scope) result.createdTestable.push({ scope, entityId: newId });
       }
       markItemApplied(item.change_packet_item_id, null);
     } catch (err) {
@@ -3137,6 +3198,22 @@ app.post('/api/v1/projects/:id/test-coverage/infer', async (req, res) => {
     res.json({ suggested: result.suggestions.length, test_cases_updated: updated, links_added: linksAdded, model: result.model, source: result.source, error: result.error });
   } catch (err) {
     console.error('[test-coverage/infer]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// On-demand: AI-generate test cases for one entity (fills gaps for entities that
+// were materialized without tests, e.g. an agent ingested from a design-only doc).
+const TC_SCOPE_VALS = ['use_case', 'workflow', 'agent', 'tool'];
+app.post('/api/v1/projects/:id/test-cases/generate', async (req, res) => {
+  const { scope, scope_entity_id } = req.body || {};
+  if (!TC_SCOPE_VALS.includes(scope)) return res.status(400).json({ error: `scope must be one of: ${TC_SCOPE_VALS.join(', ')}` });
+  if (!scope_entity_id) return res.status(400).json({ error: 'scope_entity_id is required' });
+  try {
+    const r = await generateAndInsertTests(req.params.id, scope, scope_entity_id, userId(req));
+    res.json(r);
+  } catch (err) {
+    console.error('[test-cases/generate]', err);
     res.status(500).json({ error: err.message });
   }
 });
