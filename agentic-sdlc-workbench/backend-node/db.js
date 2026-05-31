@@ -102,6 +102,9 @@ const MIGRATIONS = [
   // Requirements-first ingestion: AC req_slug traceability link
   "ALTER TABLE asdlc_acceptance_criterion ADD COLUMN req_slug TEXT",
 
+  // Ingest cross-check: per-project ripple-scan scope ('project' = whole design,
+  // 'workflow' = restrict the workflow-bound corpus to connected workflows).
+  "ALTER TABLE asdlc_project ADD COLUMN ripple_scan_scope TEXT NOT NULL DEFAULT 'project'",
   // Ingest document soft-cancel / archive (reversible; never hard-deleted)
   "ALTER TABLE asdlc_ingest_document ADD COLUMN lifecycle_status TEXT NOT NULL DEFAULT 'active'",
   "ALTER TABLE asdlc_ingest_document ADD COLUMN cancelled_at TEXT",

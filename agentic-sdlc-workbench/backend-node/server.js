@@ -188,12 +188,18 @@ app.get('/api/v1/dashboard', (req, res) => {
     LIMIT 10
   `).all();
 
+  // "Missing owner" = a step with no owning participant/lane (person role, AI agent,
+  // or supporting system). owner_participant_id is the canonical owner; owner_member_id
+  // is only the optional *specific human* for human-role participants, so it is NOT the
+  // signal here (it is null on every agent/system step). This matches the swimlane's
+  // own missing-owner definition (swimlane.js).
   const missingOwners = db.prepare(`
     SELECT ws.*, wf.name AS workflow_name, p.project_code
     FROM asdlc_workflow_step ws
     LEFT JOIN asdlc_workflow wf ON wf.workflow_id = ws.workflow_id
     LEFT JOIN asdlc_project p ON p.project_id = ws.project_id
-    WHERE ws.owner_member_id IS NULL
+    WHERE ws.owner_participant_id IS NULL
+      AND (ws.lifecycle_status IS NULL OR ws.lifecycle_status NOT IN ('retired', 'deleted'))
     LIMIT 6
   `).all();
 
@@ -277,7 +283,9 @@ app.put('/api/v1/projects/:id', (req, res) => {
   const existing = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Project not found' });
   const uid = userId(req);
-  const { project_name, project_code, stage, lifecycle_status, confidence_threshold } = req.body;
+  const { project_name, project_code, stage, lifecycle_status, confidence_threshold, ripple_scan_scope } = req.body;
+  // Guard the scope enum so the cross-check only ever sees a known value.
+  const scope = (ripple_scan_scope === 'project' || ripple_scan_scope === 'workflow') ? ripple_scan_scope : null;
   db.prepare(`
     UPDATE asdlc_project
     SET project_name         = COALESCE(?, project_name),
@@ -285,12 +293,14 @@ app.put('/api/v1/projects/:id', (req, res) => {
         stage                = COALESCE(?, stage),
         lifecycle_status     = COALESCE(?, lifecycle_status),
         confidence_threshold = COALESCE(?, confidence_threshold),
+        ripple_scan_scope    = COALESCE(?, ripple_scan_scope),
         updated_by           = ?,
         updated_at           = datetime('now'),
         version              = version + 1
     WHERE project_id = ?
-  `).run(project_name, project_code, stage, lifecycle_status,
+  `).run(project_name ?? null, project_code ?? null, stage ?? null, lifecycle_status ?? null,
          confidence_threshold != null ? Number(confidence_threshold) : null,
+         scope,
          uid, req.params.id);
   const updated = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(req.params.id);
   auditLog('asdlc_project', req.params.id, 'UPDATE', existing, updated, uid);
@@ -1417,6 +1427,81 @@ app.put('/api/v1/exceptions/:id', (req, res) => {
 });
 
 // ──────────────────────────────────────────────
+// MISSING-OWNER VALIDATOR
+// ──────────────────────────────────────────────
+// Deterministic detector that keeps `missing_owner` exceptions in sync with the
+// design. A step's owner is its participant/lane (person role, AI agent, or
+// supporting system) = owner_participant_id. The Validation & Exception Queue
+// already has a missing_owner type/KPI/filter but nothing populated it, and the
+// AI quality-reviewer writes category-typed findings (missing/incomplete/…), not
+// the missing_owner type — so this fills that gap. detected_by='owner-validator'
+// namespaces these rows so we never disturb manual or quality-reviewer exceptions.
+function syncOwnerExceptions(db, projectId, uid) {
+  const now = new Date().toISOString();
+  let inserted = 0, resolved = 0;
+
+  // Steps that SHOULD have an owner but don't (active steps only).
+  const orphanSteps = db.prepare(`
+    SELECT s.workflow_step_id, s.slug, s.name, s.step_number, w.name AS workflow_name, w.slug AS workflow_slug
+    FROM asdlc_workflow_step s
+    LEFT JOIN asdlc_workflow w ON w.workflow_id = s.workflow_id
+    WHERE s.project_id = ?
+      AND s.owner_participant_id IS NULL
+      AND (s.lifecycle_status IS NULL OR s.lifecycle_status NOT IN ('retired', 'deleted'))
+  `).all(projectId);
+  const orphanIds = new Set(orphanSteps.map(s => s.workflow_step_id));
+
+  // Existing open missing_owner exceptions this validator owns.
+  const existing = db.prepare(`
+    SELECT exception_id, related_entity_id FROM asdlc_exception
+    WHERE project_id = ? AND exception_type = 'missing_owner'
+      AND detected_by = 'owner-validator' AND status = 'open'
+  `).all(projectId);
+  const existingByStep = new Map(existing.map(e => [e.related_entity_id, e.exception_id]));
+
+  // 1) Open/refresh an exception for every current orphan.
+  const ins = db.prepare(`INSERT INTO asdlc_exception
+      (exception_id, project_id, exception_type, severity, description,
+       related_entity_type, related_entity_id, suggested_action, status,
+       detected_by, field_name, finding_category, created_by, updated_by, created_at, updated_at)
+    VALUES (?,?,?,?,?,?,?,?, 'open', 'owner-validator', 'owner_participant_id', 'missing', ?,?,?,?)`);
+  for (const s of orphanSteps) {
+    if (existingByStep.has(s.workflow_step_id)) continue; // already open — leave as-is
+    const id = generateId();
+    const where = `${s.workflow_slug || s.workflow_name || 'workflow'} step ${s.slug || ('#' + s.step_number)} "${s.name}"`;
+    ins.run(
+      id, projectId, 'missing_owner', 'med',
+      `${where} has no owning participant (person role, AI agent, or supporting system). It cannot be placed in a swimlane lane or held accountable in RACI.`,
+      'workflow_step', s.workflow_step_id,
+      'Assign an owner_participant_id — a person role, AI agent, or the supporting system that performs/serves this step.',
+      uid || 'owner-validator', uid || 'owner-validator', now, now
+    );
+    inserted++;
+  }
+
+  // 2) Auto-resolve exceptions whose step now has an owner (or was removed).
+  const resolveStmt = db.prepare(`UPDATE asdlc_exception
+      SET status = 'resolved', resolution_summary = 'auto: owner assigned', updated_at = ?
+    WHERE exception_id = ?`);
+  for (const e of existing) {
+    if (!orphanIds.has(e.related_entity_id)) { resolveStmt.run(now, e.exception_id); resolved++; }
+  }
+
+  return { inserted, resolved, open: orphanSteps.length };
+}
+
+// Standalone on-demand run (mirrors the quality-reviewer's on-demand philosophy).
+app.post('/api/v1/projects/:id/validate/owners', (req, res) => {
+  try {
+    const counts = syncOwnerExceptions(db, req.params.id, userId(req));
+    res.json({ ok: true, ...counts });
+  } catch (err) {
+    console.error('[validate/owners]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ──────────────────────────────────────────────
 // QUALITY REVIEWER (Feature #9)
 // ──────────────────────────────────────────────
 // Reviewer is on-demand only. Two entry points:
@@ -1447,7 +1532,10 @@ app.post('/api/v1/projects/:id/quality-review/full', async (req, res) => {
   try {
     const { reviewApplication } = require('./agent/quality-reviewer');
     const result = await reviewApplication({ projectId, db });
-    res.json(result);
+    // Deterministic owner check runs alongside the AI review (the AI emits
+    // category-typed findings, not the missing_owner type the queue filters on).
+    const owners = syncOwnerExceptions(db, projectId, userId(req));
+    res.json({ ...result, missing_owners: owners });
   } catch (err) {
     console.error('[quality-review/full]', err);
     res.status(500).json({ error: err.message });
@@ -5262,6 +5350,20 @@ app.post('/api/v1/ingest-documents/:id/promote', (req, res) => {
 
   if (extractions.length === 0) return res.status(400).json({ error: 'No staged extractions to promote' });
 
+  // Clarify-before-promote: block while the cross-check has unresolved conflict
+  // ('conflict:') clarifications. The user must answer them (which re-runs extraction)
+  // so ripple/requirement conflicts are reconciled before any change is applied.
+  const { hasOpenConflicts } = require('./agent/cross-check');
+  if (hasOpenConflicts(req.params.id)) {
+    const open = db.prepare(
+      "SELECT clarification_id, question_text, target_entity_type, target_field FROM asdlc_ingest_clarification WHERE ingest_id=? AND answer_text IS NULL AND target_field LIKE 'conflict:%'"
+    ).all(req.params.id);
+    return res.status(409).json({
+      error: 'Unresolved conflict clarifications must be answered before promoting.',
+      conflict_clarifications: open,
+    });
+  }
+
   // ONE CP per ingest iteration. Each extraction becomes a change_packet_item
   // carrying its operation (create/update/delete), the resolved target for
   // update/delete, the prior value (old_value) and a conflict classification.
@@ -5276,7 +5378,7 @@ app.post('/api/v1/ingest-documents/:id/promote', (req, res) => {
   const itemSpecs = [];
   let worstRank = 0;
   let hasChange = false;   // any update/delete present
-  for (const ex of extractions) {
+  for (let ex of extractions) {
     let   data   = ex.entity_data || {};
     const entity = registry.byEntityType[ex.entity_type];
     // Inject ingest_id server-side for entity types that have an ingest_id column

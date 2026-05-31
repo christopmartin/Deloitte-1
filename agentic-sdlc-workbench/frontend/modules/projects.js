@@ -162,6 +162,8 @@ function renderDetail(p, pane) {
     { key: 'created_at', label: 'Created', type: 'date' },
     { key: 'owner', label: 'Owner' },
     { key: 'confidence_threshold', label: 'Agent Confidence Threshold (0–1)', type: 'number' },
+    { key: 'ripple_scan_scope', label: 'Ingest Ripple-Scan Scope', type: 'select',
+      options: [['project', 'Whole project (default)'], ['workflow', 'Workflow + linked use case']] },
     { key: 'description', label: 'Description', wide: true },
   ];
 
@@ -180,6 +182,16 @@ function renderDetail(p, pane) {
       const input = el('input', { type: 'number', className: 'form-input',
         min: '0', max: '1', step: '0.05' });
       input.value = p[f.key] != null ? p[f.key] : '0.75';
+      inputs[f.key] = input;
+      wrap.appendChild(input);
+    } else if (f.type === 'select') {
+      wrap.appendChild(el('div', { className: 'meta-key' }, f.label));
+      const input = el('select', { className: 'form-input' });
+      (f.options || []).forEach(([val, lbl]) => {
+        const opt = el('option', { value: val }, lbl);
+        if ((p[f.key] || f.options[0][0]) === val) opt.selected = true;
+        input.appendChild(opt);
+      });
       inputs[f.key] = input;
       wrap.appendChild(input);
     } else {

@@ -713,9 +713,15 @@ function buildClarificationForm(doc, questions, round, pane) {
   const answerMap = {}; // clarification_id → textarea
 
   questions.forEach((q, i) => {
+    // Cross-check clarifications are namespaced in target_field: 'conflict:' = blocking
+    // ripple/requirement conflict (blocks promote), 'fyi:' = non-blocking heads-up.
+    const isConflict = typeof q.target_field === 'string' && q.target_field.startsWith('conflict:');
+    const isFyi      = typeof q.target_field === 'string' && q.target_field.startsWith('fyi:');
+
     const qBlock = el('div', { style: {
       background: 'var(--color-bg)',
-      border: '1px solid var(--color-border)',
+      border: isConflict ? '1px solid var(--color-danger, #C62828)' : '1px solid var(--color-border)',
+      borderLeft: isConflict ? '3px solid var(--color-danger, #C62828)' : '1px solid var(--color-border)',
       borderRadius: 'var(--radius)',
       padding: '12px',
       marginBottom: '12px',
@@ -724,14 +730,19 @@ function buildClarificationForm(doc, questions, round, pane) {
     // Question header
     const qHdr = el('div', { style: { display: 'flex', alignItems: 'flex-start', gap: '10px', marginBottom: '8px' } });
     qHdr.appendChild(el('span', { style: {
-      background: 'var(--color-accent)',
+      background: isConflict ? 'var(--color-danger, #C62828)' : 'var(--color-accent)',
       color: '#fff',
       borderRadius: '50%',
       width: '20px', height: '20px', minWidth: '20px',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       fontSize: '11px', fontWeight: '700',
     }}, String(i + 1)));
-    qHdr.appendChild(el('span', { style: { fontSize: '13px', fontWeight: '500', lineHeight: '1.5' } }, q.question_text));
+    const qText = el('span', { style: { fontSize: '13px', fontWeight: '500', lineHeight: '1.5' } });
+    if (isConflict) qText.appendChild(tag('⚠ Conflict', 'danger'));
+    else if (isFyi) qText.appendChild(tag('ℹ FYI', 'muted'));
+    if (isConflict || isFyi) qText.appendChild(el('span', { style: { marginRight: '6px' } }, ' '));
+    qText.appendChild(document.createTextNode(q.question_text));
+    qHdr.appendChild(qText);
     qBlock.appendChild(qHdr);
 
     // Context snippet
