@@ -414,5 +414,56 @@ async function runCrossCheck({ doc, round }) {
   }
 }
 
-module.exports = { runCrossCheck, hasOpenConflicts, CONFLICT_PREFIX, FYI_PREFIX,
+// ── Plan D — post-apply consistency check ──────────────────────────────────────
+// Runs AFTER a change packet is approved+applied (transitionCp). Deterministic
+// (Tier-0 only — no LLM, cheap enough to run on every apply). For each applied
+// update/delete item it derives the salient OLD token(s) from old_value→new_value
+// and scans the now-current design + requirements for residual references. Writes
+// post_apply_status ('clean'|'flagged') + findings JSON to the CP, which drive the
+// advisory banners on the CP detail + project dashboard. Best-effort; never throws.
+// Note: token-based, so a system that legitimately still exists (e.g. SAP kept for a
+// different purpose) may show as a residual reference — the banner is advisory.
+function runPostApplyCheck(cpId) {
+  try {
+    const cp = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id=?').get(cpId);
+    if (!cp) return { status: 'clean', findings: [] };
+    const items = db.prepare('SELECT * FROM asdlc_change_packet_item WHERE change_packet_id=?').all(cpId);
+
+    const changes = [];
+    for (const it of items) {
+      if (it.operation !== 'update' && it.operation !== 'delete') continue;
+      const oldRow  = tryParse(it.old_value);   // full prior DB row (has slug)
+      const newData = tryParse(it.new_value) || {};
+      if (!oldRow || typeof oldRow !== 'object') continue;
+      const slug = oldRow.slug || newData.target_slug;
+      if (!slug) continue;
+      const tokens = salientTokens(it.entity_type, oldRow, newData);
+      if (tokens.length === 0) continue;
+      changes.push({ entityType: it.entity_type, slug, current: oldRow, proposed: newData, tokens });
+    }
+
+    let findings = [];
+    if (changes.length) {
+      const proj  = db.prepare('SELECT ripple_scan_scope FROM asdlc_project WHERE project_id=?').get(cp.project_id);
+      const scope = (proj && proj.ripple_scan_scope) || 'project';
+      const t0 = scanDesignDrift(cp.project_id, changes, scope);
+      findings = [
+        ...t0.driftTargets.map(d => ({ kind: 'design', entity_type: d.entity_type, slug: d.slug || d.id,
+          field: d.field, token: d.token, change_slug: d.change_slug, snippet: d.snippet })),
+        ...t0.requirementDrift.map(r => ({ kind: 'requirement', req_slug: r.req_slug, token: r.token, change_slug: r.change_slug })),
+      ];
+    }
+
+    const status = findings.length ? 'flagged' : 'clean';
+    db.prepare("UPDATE asdlc_change_packet SET post_apply_status=?, post_apply_findings=?, updated_at=datetime('now') WHERE change_packet_id=?")
+      .run(status, JSON.stringify(findings), cpId);
+    if (findings.length) console.log(`[post-apply] CP ${cp.packet_code || cpId}: ${findings.length} residual reference(s) flagged`);
+    return { status, findings };
+  } catch (err) {
+    console.error('[post-apply] failed (non-fatal):', err.message);
+    return { status: 'clean', findings: [] };
+  }
+}
+
+module.exports = { runCrossCheck, hasOpenConflicts, runPostApplyCheck, CONFLICT_PREFIX, FYI_PREFIX,
   _internal: { salientTokens, scanDesignDrift, synthesiseFollowups, loadDesignCorpus } };

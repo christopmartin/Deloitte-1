@@ -1,7 +1,7 @@
 /**
  * modules/home.js — Dashboard module
  */
-import { apiFetch, tag, statusTag, formatDateTime, renderTable, el, escHtml, showToast } from '../app.js';
+import { apiFetch, tag, statusTag, formatDateTime, renderTable, el, escHtml, showToast, navigate } from '../app.js';
 
 export async function render(container) {
   container.innerHTML = '';
@@ -11,6 +11,10 @@ export async function render(container) {
     el('p', { className: 'purpose-text' }, 'Overview of repository health, recent changes, and items requiring attention.')
   );
   container.appendChild(header);
+
+  // Plan D — post-apply banner (populated once dashboard data loads)
+  const bannerSection = el('div');
+  container.appendChild(bannerSection);
 
   // Loading placeholder
   const kpiSection = el('div', { className: 'kpi-grid' });
@@ -22,6 +26,7 @@ export async function render(container) {
   // Fetch dashboard data
   try {
     const data = await apiFetch('/dashboard');
+    renderPostApplyBanner(bannerSection, data);
     renderKPIs(kpiSection, data);
     renderRecentChanges(grid, data);
     renderSideLists(grid, data);
@@ -32,6 +37,28 @@ export async function render(container) {
       el('strong', {}, 'Dashboard error: '), err.message
     ));
   }
+}
+
+// Plan D — banner when a recently-applied change packet has unresolved post-apply
+// findings (residual references to a term it changed). Names the packets so they're
+// findable even though approved CPs are hidden from the default Change Packets view.
+function renderPostApplyBanner(container, data) {
+  container.innerHTML = '';
+  const changes = data.recent_changes || data.recent_repository_changes || [];
+  const flagged = changes.filter(c => c.post_apply_status === 'flagged');
+  if (flagged.length === 0) return;
+
+  const banner = el('div', { style: 'border:1px solid var(--color-danger);border-left:3px solid var(--color-danger);background:var(--color-danger-bg);border-radius:8px;padding:12px 14px;margin-bottom:16px;cursor:pointer' });
+  banner.appendChild(el('div', { style: 'font-weight:600;color:var(--color-danger);margin-bottom:4px' },
+    `⚠ ${flagged.length} recently-applied change packet${flagged.length !== 1 ? 's' : ''} need a post-apply review`));
+  banner.appendChild(el('div', { style: 'font-size:12px;color:var(--color-text-muted);margin-bottom:6px' },
+    'A change was applied but other design elements may still reference the old term. Open the packet to review residual references.'));
+  flagged.slice(0, 5).forEach(c => banner.appendChild(
+    el('div', { style: 'font-size:12px;color:var(--color-text)' },
+      `• ${c.packet_code || c.change_packet_id}${c.project_name ? ' — ' + c.project_name : ''}`)));
+  banner.appendChild(el('div', { style: 'font-size:11px;color:var(--color-accent);margin-top:6px;font-weight:600' }, 'Open Change Packets →'));
+  banner.addEventListener('click', () => navigate('change_packets'));
+  container.appendChild(banner);
 }
 
 function renderKPIs(container, data) {

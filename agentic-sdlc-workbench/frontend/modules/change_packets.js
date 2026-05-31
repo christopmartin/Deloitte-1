@@ -784,6 +784,28 @@ function renderDetail(p, pane) {
 
   const body = el('div', { className: 'pane-body' });
 
+  // Plan D — post-apply consistency banner (advisory). Shows when, after this packet
+  // was applied, other design elements / requirements still reference a term this
+  // packet changed (residual drift). May include intentional cases — it's advisory.
+  if (p.post_apply_status === 'flagged') {
+    const findings = parseItemJson(p.post_apply_findings) || [];
+    if (findings.length) {
+      const banner = el('div', { style: 'border:1px solid var(--color-danger);border-left:3px solid var(--color-danger);background:var(--color-danger-bg);border-radius:6px;padding:10px 12px;margin-bottom:14px' });
+      banner.appendChild(el('div', { style: 'font-weight:600;color:var(--color-danger);font-size:13px;margin-bottom:4px' },
+        `⚠ Post-apply check — ${findings.length} place(s) still reference a term this packet changed`));
+      banner.appendChild(el('div', { style: 'font-size:11px;color:var(--color-text-muted);margin-bottom:8px' },
+        'These may be intentional (e.g. a system kept for another purpose). Review and reconcile any that should have changed too.'));
+      findings.slice(0, 8).forEach(f => {
+        const line = f.kind === 'requirement'
+          ? `requirement ${f.req_slug} still mentions "${f.token}"`
+          : `${f.entity_type} ${f.slug} .${f.field} still mentions "${f.token}": "${(f.snippet || '').slice(0, 90)}"`;
+        banner.appendChild(el('div', { style: 'font-size:12px;color:var(--color-text);margin-bottom:2px' }, '• ' + line));
+      });
+      if (findings.length > 8) banner.appendChild(el('div', { style: 'font-size:11px;color:var(--color-text-muted);margin-top:4px' }, `…and ${findings.length - 8} more`));
+      body.appendChild(banner);
+    }
+  }
+
   // Meta table
   const metaSection = el('div', { className: 'detail-section' });
   metaSection.appendChild(el('h4', {}, 'Metadata'));

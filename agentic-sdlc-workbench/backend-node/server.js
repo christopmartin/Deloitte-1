@@ -500,6 +500,13 @@ function transitionCp(req, res, newStatus) {
     auditLog('asdlc_change_packet', req.params.id, 'UPDATE', existing, updated, uid);
     try { recordFeedbackForCp(updated, 'accepted_asis', uid); } catch (e) { console.error('[feedback]', e.message); }
 
+    // Plan D — post-apply consistency check (deterministic, cheap). Scans the now-current
+    // design for residual references to terms this packet changed; writes post_apply_status
+    // + findings to the CP, surfaced as an advisory banner on the CP detail + dashboard.
+    let postApply = null;
+    try { postApply = require('./agent/cross-check').runPostApplyCheck(req.params.id); }
+    catch (e) { console.error('[post-apply]', e.message); }
+
     // Auto-generate test coverage for newly-materialized testable entities.
     // Fire-and-forget AFTER commit — Claude calls must not run inside the txn,
     // and no separate approval gate is required for the generated drafts.
@@ -511,7 +518,13 @@ function transitionCp(req, res, newStatus) {
           if (n) console.log(`[test-gen] materialize: generated ${n} test case(s) across ${toGenerate.length} entit(ies) for CP ${updated.packet_code}`);
         });
     }
-    return res.json({ ...updated, apply_result: applyResult });
+    return res.json({
+      ...updated,
+      post_apply_status:   postApply ? postApply.status : updated.post_apply_status,
+      post_apply_findings: postApply ? JSON.stringify(postApply.findings) : updated.post_apply_findings,
+      apply_result: applyResult,
+      post_apply: postApply,
+    });
   }
 
   // ── Reject / send-back: simple status update ───────────────────────────────
