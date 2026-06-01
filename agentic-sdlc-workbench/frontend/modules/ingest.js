@@ -539,7 +539,12 @@ async function renderDetail(doc, pane) {
   }
   body.appendChild(infoSec);
 
-  // ── 2. Status-dependent content ────────────────────────────────────────────
+  // ── 2. Source document (collapsible) ───────────────────────────────────────
+  if (fresh.raw_text || fresh.file_path) {
+    body.appendChild(buildSourceSection(fresh));
+  }
+
+  // ── 3. Status-dependent content ────────────────────────────────────────────
   // A cancelled doc is on hold: hide all action sections, show the cancelled
   // banner + restore instead.
   if (fresh.lifecycle_status === 'cancelled') {
@@ -887,6 +892,60 @@ function buildExtractionsSection(extractions, showPromote, doc, pane) {
     sec.appendChild(promoteBtn);
   }
 
+  return sec;
+}
+
+function buildSourceSection(doc) {
+  const sec = el('div', { className: 'detail-section' });
+  const toggle = el('details');
+  const label = doc.file_name ? `▸ Source document — ${doc.file_name}` : '▸ Source document';
+  const summary = el('summary', { style: {
+    cursor: 'pointer', fontSize: '13px', fontWeight: '500',
+    color: 'var(--color-text-muted)', userSelect: 'none', padding: '4px 0',
+  }}, label);
+  toggle.appendChild(summary);
+
+  const content = el('div', { style: { marginTop: '10px' } });
+  toggle.appendChild(content);
+
+  let loaded = false;
+  toggle.addEventListener('toggle', async () => {
+    if (!toggle.open || loaded) return;
+    loaded = true;
+    content.textContent = 'Loading…';
+    try {
+      const text = doc.raw_text
+        ? doc.raw_text
+        : (await apiFetch(`/ingest-documents/${doc.ingest_id}/content`)).content;
+      const pre = el('pre', { style: {
+        fontSize: '12px', lineHeight: '1.5',
+        background: 'var(--color-bg-subtle, #f5f5f5)',
+        border: '1px solid var(--color-border)',
+        borderRadius: '4px', padding: '12px',
+        overflow: 'auto', maxHeight: '400px',
+        whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+        margin: '0',
+      }});
+      pre.textContent = text;
+      content.innerHTML = '';
+      content.appendChild(pre);
+    } catch (err) {
+      content.innerHTML = '';
+      const msg = el('p', { style: { fontSize: '13px', color: 'var(--color-text-muted)', margin: '0 0 8px' } },
+        `Could not load source text: ${err.message}`);
+      content.appendChild(msg);
+      if (doc.file_path || doc.file_name) {
+        const a = el('a', {
+          href: `/api/v1/ingest-documents/${doc.ingest_id}/download`,
+          download: doc.file_name || true,
+          style: { fontSize: '13px' },
+        }, `⬇ Download ${doc.file_name || 'file'}`);
+        content.appendChild(a);
+      }
+    }
+  });
+
+  sec.appendChild(toggle);
   return sec;
 }
 

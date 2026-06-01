@@ -5682,6 +5682,18 @@ app.get('/api/v1/ingest-documents/:id/content', (req, res) => {
   });
 });
 
+// Stream the original uploaded file as an attachment (fallback for binary docs).
+app.get('/api/v1/ingest-documents/:id/download', (req, res) => {
+  const doc = db.prepare('SELECT * FROM asdlc_ingest_document WHERE ingest_id = ?').get(req.params.id);
+  if (!doc) return res.status(404).json({ error: 'Not found' });
+  if (!doc.file_path) return res.status(404).json({ error: 'No file attached to this document' });
+  const fileName = doc.file_name || path.basename(doc.file_path);
+  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+  res.sendFile(path.resolve(doc.file_path), err => {
+    if (err && !res.headersSent) res.status(404).json({ error: `File not readable: ${err.message}` });
+  });
+});
+
 // POST supports both JSON (metadata only) and multipart/form-data (with file).
 // The frontend sends multipart when a file is attached.
 app.post('/api/v1/ingest-documents', upload.single('file'), (req, res) => {
