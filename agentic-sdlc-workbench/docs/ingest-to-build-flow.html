@@ -42,8 +42,8 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>From New Requirement → Design Spec</h1>
-  <div class="sub">Agentic SDLC Workbench · who performs each step, and the three loop-backs that make the path iterative.</div>
+  <h1>From New Requirement → Build Spec</h1>
+  <div class="sub">Agentic SDLC Workbench · who performs each step, and the four review / update loops that make the path iterative. Requirements (FR/NFR) are extracted <b>first</b>, then design entities, then Acceptance Criteria &amp; Test Cases — all cross-linked.</div>
   <div class="sub" style="margin-top:-16px;margin-bottom:24px"><a href="main-flow.html" style="color:#2563eb;font-weight:600;text-decoration:none">← Back to the detailed main flow diagram</a></div>
 
   <div class="legend">
@@ -107,6 +107,11 @@
     <text x="85" y="640" font-size="12" fill="#dc2626" font-weight="700" text-anchor="middle"
           transform="rotate(-90 85 640)">Loop C · new / changed requirement</text>
 
+    <!-- ===== Loop D: S8 self-loop (AI re-review on each edit) ===== -->
+    <path d="M620,964 C700,944 760,944 760,976 C760,1008 700,1008 622,990" fill="none"
+          stroke="#dc2626" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrR)"/>
+    <text x="775" y="980" font-size="12" fill="#dc2626" font-weight="700" text-anchor="start">Loop D ·<tspan x="775" dy="15">AI re-review</tspan><tspan x="775" dy="15">on each edit</tspan></text>
+
     <!-- ===== NODES ===== -->
     <!-- helper: each box centered at x=470, width 300 -->
     <!-- S1 -->
@@ -119,8 +124,8 @@
       <text x="470" y="282" text-anchor="middle" font-size="11.5" fill="#2563eb">Functional Owner</text></g>
     <!-- S3 -->
     <g><rect x="320" y="330" width="300" height="52" rx="9" fill="#e2e8f0" stroke="#475569" stroke-width="2"/>
-      <text x="470" y="354" text-anchor="middle" font-size="14" font-weight="700" fill="#334155">3 · Process — extract entities</text>
-      <text x="470" y="372" text-anchor="middle" font-size="11.5" fill="#475569">🤖 AI Extraction Agent</text></g>
+      <text x="470" y="354" text-anchor="middle" font-size="14" font-weight="700" fill="#334155">3 · Process — extract Requirements first</text>
+      <text x="470" y="372" text-anchor="middle" font-size="11.5" fill="#475569">🤖 AI Agent · FR/NFR → entities → AC → TC</text></g>
     <!-- D1 diamond -->
     <g><polygon points="470,400 545,431 470,462 395,431" fill="#fff" stroke="#475569" stroke-width="2"/>
       <text x="470" y="436" text-anchor="middle" font-size="12.5" font-weight="700" fill="#334155">Clarifications?</text></g>
@@ -146,12 +151,12 @@
       <text x="470" y="810" text-anchor="middle" font-size="11.5" fill="#dc2626">Reviewer / Methodology Owner</text></g>
     <!-- M -->
     <g><rect x="320" y="860" width="300" height="52" rx="9" fill="#e2e8f0" stroke="#475569" stroke-width="2"/>
-      <text x="470" y="884" text-anchor="middle" font-size="14" font-weight="700" fill="#334155">✍ Materialize → real design tables</text>
-      <text x="470" y="902" text-anchor="middle" font-size="11.5" fill="#475569">🤖 System · only step that writes design</text></g>
+      <text x="470" y="884" text-anchor="middle" font-size="14" font-weight="700" fill="#334155">✍ Materialize + auto-generate Test Cases</text>
+      <text x="470" y="902" text-anchor="middle" font-size="11.5" fill="#475569">🤖 System · writes design + TC, links AC↔FR/NFR</text></g>
     <!-- S8 -->
     <g><rect x="320" y="950" width="300" height="52" rx="9" fill="#e0e7ff" stroke="#4f46e5" stroke-width="2"/>
       <text x="470" y="974" text-anchor="middle" font-size="14" font-weight="700" fill="#3730a3">8 · Design Review — inspect / edit</text>
-      <text x="470" y="992" text-anchor="middle" font-size="11.5" fill="#4f46e5">Functional Owner + Technical</text></g>
+      <text x="470" y="992" text-anchor="middle" font-size="11.5" fill="#4f46e5">Functional + Technical · AI reviews each edit</text></g>
     <!-- G2 gate -->
     <g><rect x="320" y="1040" width="300" height="54" rx="9" fill="#fee2e2" stroke="#dc2626" stroke-width="2.5"/>
       <text x="470" y="1063" text-anchor="middle" font-size="14" font-weight="800" fill="#991b1b">9 · Baseline  ⛔ GATE 2</text>
@@ -165,12 +170,13 @@
 
   <div class="tables">
     <div class="tbl">
-      <h3>The three loop-backs</h3>
+      <h3>The four review / update loops</h3>
       <table>
         <tr><th>Loop</th><th>Path</th><th>Trigger</th></tr>
-        <tr><td><span class="pill pA">A</span></td><td>4 → 3</td><td>AI needs clarification — answer &amp; re-process</td></tr>
+        <tr><td><span class="pill pA">A</span></td><td>4 → 3</td><td>AI needs clarification — answer &amp; re-process (answers flow back into the Requirements)</td></tr>
         <tr><td><span class="pill pA">B</span></td><td>7 → 2</td><td>Reviewer rejects the Change Packet</td></tr>
         <tr><td><span class="pill pA">C</span></td><td>8 → 2</td><td>A new or changed requirement arrives</td></tr>
+        <tr><td><span class="pill pA">D</span></td><td>8 → 8</td><td>Each design edit triggers an AI design review</td></tr>
       </table>
     </div>
     <div class="tbl">
@@ -181,7 +187,7 @@
         <tr><td>Functional Owner</td><td>2, 4, 8</td></tr>
         <tr><td>Reviewer</td><td>5, 6, 7</td></tr>
         <tr><td>Technical</td><td>8, 10</td></tr>
-        <tr><td>System / AI</td><td>3, reconciliation, materialize</td></tr>
+        <tr><td>System / AI</td><td>3 (extract), 4½ (reconcile), materialize + test-gen, 8 (review edits)</td></tr>
       </table>
     </div>
   </div>
