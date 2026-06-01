@@ -105,6 +105,9 @@ const MIGRATIONS = [
   // Ingest cross-check: per-project ripple-scan scope ('project' = whole design,
   // 'workflow' = restrict the workflow-bound corpus to connected workflows).
   "ALTER TABLE asdlc_project ADD COLUMN ripple_scan_scope TEXT NOT NULL DEFAULT 'project'",
+  // Backlog #2 — link a change packet back to its originating ingest document so
+  // Send Back can route the reviewer's reason back as a clarification and re-run extraction.
+  "ALTER TABLE asdlc_change_packet ADD COLUMN ingest_id TEXT",
   // Plan D — post-apply consistency check on a change packet: 'clean' | 'flagged' | null
   // (not yet run), with the residual-reference findings JSON for the CP/dashboard banner.
   "ALTER TABLE asdlc_change_packet ADD COLUMN post_apply_status TEXT",

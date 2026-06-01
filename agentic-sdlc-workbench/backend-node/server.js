@@ -920,7 +920,93 @@ function recordFeedbackForCp(cp, outcome, uid) {
 
 app.post('/api/v1/change-packets/:id/approve',    (req, res) => transitionCp(req, res, 'approved'));
 app.post('/api/v1/change-packets/:id/reject',     (req, res) => transitionCp(req, res, 'rejected'));
-app.post('/api/v1/change-packets/:id/send-back',  (req, res) => transitionCp(req, res, 'sent_back'));
+
+// Send Back — sets status=sent_back, stores the reviewer's reason as decision_notes,
+// and — when the CP has a linked ingest_id — routes that reason back to the ingest doc
+// as a pre-answered clarification, resets the doc so it can be re-processed, and
+// re-runs extraction immediately so a corrected CP can be promoted without re-uploading.
+app.post('/api/v1/change-packets/:id/send-back', async (req, res) => {
+  const cp = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(req.params.id);
+  if (!cp) return res.status(404).json({ error: 'Change packet not found' });
+  const uid = userId(req);
+  const reason = (req.body && (req.body.reason || req.body.decision_notes || '')).toString().trim();
+
+  // 1. Update the CP: status + decision_notes
+  db.prepare(`
+    UPDATE asdlc_change_packet
+    SET status = 'sent_back',
+        decision_notes = COALESCE(?, decision_notes),
+        updated_by = ?, updated_at = datetime('now'), version = version + 1
+    WHERE change_packet_id = ?
+  `).run(reason || null, uid, req.params.id);
+  auditLog('asdlc_change_packet', req.params.id, 'UPDATE', cp,
+    db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(req.params.id), uid);
+
+  // 2. If no linked ingest doc, return the simple status update (manual CP — no re-run).
+  if (!cp.ingest_id) {
+    return res.json({
+      change_packet: db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(req.params.id),
+      ingest_result: null,
+      message: 'Packet sent back. No linked ingest document — re-submit manually.',
+    });
+  }
+
+  // 3. Linked ingest doc: write reason as a pre-answered clarification so the next
+  //    extraction round sees it as reviewer context. Uses the existing multi-round flow.
+  const ingestId = cp.ingest_id;
+  const clarText  = reason
+    ? `Reviewer sent back packet ${cp.packet_code}: ${reason}`
+    : `Reviewer sent back packet ${cp.packet_code} — please re-analyse and correct the extraction.`;
+
+  // Use the current round so the clarification is correctly numbered.
+  const roundRow = db.prepare('SELECT MAX(round) AS r FROM asdlc_ingest_clarification WHERE ingest_id = ?').get(ingestId);
+  const nextRound = ((roundRow && roundRow.r) || 0) + 1;
+
+  // Skip if we already wrote a send-back clarification this round (idempotent).
+  const dupCheck = db.prepare(
+    "SELECT 1 FROM asdlc_ingest_clarification WHERE ingest_id=? AND target_field='send_back_reason' AND answer_text IS NOT NULL AND round=?"
+  ).get(ingestId, nextRound);
+  if (!dupCheck) {
+    db.prepare(`
+      INSERT INTO asdlc_ingest_clarification
+        (clarification_id, ingest_id, round, question_text, context_snippet,
+         target_entity_type, target_field, answer_text, answered_at, answered_by, created_at)
+      VALUES (?,?,?,?,?, 'general','send_back_reason',?,datetime('now'),?,datetime('now'))
+    `).run(generateId(), ingestId, nextRound,
+      'Reviewer sent this change packet back. What should be corrected?',
+      cp.summary || '',
+      clarText, uid);
+  }
+
+  // 4. Delete promoted extractions so the new round re-extracts cleanly rather than
+  //    treating all items as "already promoted and no changes needed".
+  db.prepare("DELETE FROM asdlc_ingest_extraction WHERE ingest_id = ? AND status = 'promoted'").run(ingestId);
+
+  // 5. Reset the ingest doc so it can be re-processed and re-promoted.
+  db.prepare(`
+    UPDATE asdlc_ingest_document
+    SET ingest_status = 'staged', change_packets_generated = 0, updated_at = datetime('now')
+    WHERE ingest_id = ?
+  `).run(ingestId);
+
+  // 6. Re-run extraction immediately with the new clarification context.
+  //    Non-fatal: if it fails, the doc is still in a re-processable state.
+  let ingestResult = null;
+  try {
+    const { processDocument } = require('./agent/processor');
+    ingestResult = await processDocument(ingestId);
+  } catch (err) {
+    console.error('[send-back] re-run failed — doc left in staged state:', err.message);
+    ingestResult = { error: err.message, note: 'Re-run failed — open the Ingest window to process manually.' };
+  }
+
+  return res.json({
+    change_packet: db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(req.params.id),
+    ingest_id: ingestId,
+    ingest_result: ingestResult,
+    message: 'Packet sent back. Extraction re-running — check the Ingest window to review and promote the corrected version.',
+  });
+});
 
 // ──────────────────────────────────────────────
 // ADMIN — AI SETTINGS (global model / thinking / tokens)
@@ -1168,30 +1254,49 @@ app.post('/api/v1/projects/:id/mass-approve', (req, res) => {
   });
 });
 
+// Split: creates a sibling CP and copies all items into it (pending, not yet applied).
+// The reviewer can then approve/reject each sibling independently — e.g. approve one
+// half while rejecting the other, or edit items in one before approving.
 app.post('/api/v1/change-packets/:id/split', (req, res) => {
   const existing = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Change packet not found' });
-  const uid = userId(req);
-  const newId = generateId();
+  const uid  = userId(req);
+  const newId   = generateId();
   const newCode = existing.packet_code + '-SPLIT';
+
   db.prepare(`
     INSERT INTO asdlc_change_packet
       (change_packet_id, project_id, packet_code, status, summary,
-       source_evidence_id, risk_level, conflict_classification,
+       source_evidence_id, ingest_id, risk_level, conflict_classification,
        baseline_impacting, created_by, updated_by)
-    VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, 'pending_review', ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     newId, existing.project_id, newCode,
     (req.body && req.body.summary) ? req.body.summary : existing.summary + ' (split)',
-    existing.source_evidence_id,
+    existing.source_evidence_id ?? null,
+    existing.ingest_id ?? null,
     existing.risk_level,
     existing.conflict_classification,
     existing.baseline_impacting,
     uid, uid
   );
+
+  // Copy all change items into the new CP. Items are unapplied (applied_at=null).
+  const items = db.prepare('SELECT * FROM asdlc_change_packet_item WHERE change_packet_id = ?').all(req.params.id);
+  const insItem = db.prepare(`
+    INSERT INTO asdlc_change_packet_item
+      (change_packet_item_id, change_packet_id, entity_type, entity_id, operation,
+       field_path, old_value, new_value, rationale, created_at, updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))
+  `);
+  for (const it of items) {
+    insItem.run(generateId(), newId, it.entity_type, it.entity_id, it.operation,
+      it.field_path, it.old_value, it.new_value, it.rationale);
+  }
+
   const created = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(newId);
   auditLog('asdlc_change_packet', newId, 'INSERT', null, created, uid);
-  res.status(201).json({ new_id: newId, change_packet: created });
+  res.status(201).json({ new_id: newId, item_count: items.length, change_packet: created });
 });
 
 // ──────────────────────────────────────────────
@@ -5435,9 +5540,10 @@ app.post('/api/v1/ingest-documents/:id/promote', (req, res) => {
     INSERT INTO asdlc_change_packet
       (change_packet_id, project_id, packet_code, status, summary,
        source_timestamp, conflict_classification, risk_level, recommended_action,
-       visibility_scope, created_by, created_at, updated_at)
-    VALUES (?,?,?,'pending_review',?,datetime('now'),?,?,'review','PROJECT',?,datetime('now'),datetime('now'))
-  `).run(cpId, doc.project_id, cpCode, summary, CONFLICT_BY_RANK[worstRank] || 'net_new', hasChange ? 'med' : 'low', uid);
+       ingest_id, visibility_scope, created_by, created_at, updated_at)
+    VALUES (?,?,?,'pending_review',?,datetime('now'),?,?,'review',?,'PROJECT',?,datetime('now'),datetime('now'))
+  `).run(cpId, doc.project_id, cpCode, summary, CONFLICT_BY_RANK[worstRank] || 'net_new', hasChange ? 'med' : 'low',
+         req.params.id, uid);
 
   const insertItem = db.prepare(`
     INSERT INTO asdlc_change_packet_item

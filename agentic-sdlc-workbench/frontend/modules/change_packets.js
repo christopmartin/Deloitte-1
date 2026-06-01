@@ -932,17 +932,118 @@ function renderDetail(p, pane) {
   };
 
   if (p.status !== 'approved') btnGroup.appendChild(makeActionBtn('Approve', 'btn-success', 'approve'));
-  if (p.status !== 'rejected') btnGroup.appendChild(makeActionBtn('Reject', 'btn-danger', 'reject'));
-  btnGroup.appendChild(makeActionBtn('Send Back', 'btn-ghost', 'send-back'));
 
+  // Reject — optional notes textarea in the confirm area
+  if (p.status !== 'rejected') {
+    const rejectBtn = el('button', { className: 'btn btn-danger' }, 'Reject');
+    rejectBtn.addEventListener('click', () => {
+      confirmArea.innerHTML = '';
+      const notesInput = el('textarea', { className: 'form-input', rows: '2', placeholder: 'Reason for rejecting (optional)…', style: 'width:100%;margin-bottom:8px;resize:vertical;min-height:48px' });
+      const conf = el('div', { className: 'confirm-inline' });
+      conf.appendChild(el('span', {}, `Reject packet ${p.packet_code || p.change_packet_id}?`));
+      conf.appendChild(notesInput);
+      conf.appendChild(el('div', { className: 'btn-group' },
+        buildConfirmBtn('Yes, Reject', 'btn-danger', async () => {
+          rejectBtn.disabled = true;
+          try {
+            await apiFetch(`/change-packets/${p.change_packet_id}/reject`, {
+              method: 'POST', body: JSON.stringify({ decision_notes: notesInput.value.trim() || undefined }),
+            });
+            p.status = 'rejected';
+            const idx = allPackets.findIndex(x => x.change_packet_id === p.change_packet_id);
+            if (idx >= 0) allPackets[idx].status = 'rejected';
+            const statusEl = pane.querySelector('.pane-header .tag');
+            if (statusEl) statusEl.replaceWith(statusTag('rejected'));
+            confirmArea.innerHTML = '';
+            showToast('Packet rejected.', 'success');
+          } catch (err) { showToast(`Error: ${err.message}`, 'error'); }
+          finally { rejectBtn.disabled = false; }
+        }),
+        buildCancelBtn(() => { confirmArea.innerHTML = ''; })
+      ));
+      confirmArea.appendChild(conf);
+    });
+    btnGroup.appendChild(rejectBtn);
+  }
+
+  // Send Back — required reason textarea; re-runs extraction if a linked ingest doc exists
+  const sendBackBtn = el('button', { className: 'btn btn-ghost' }, 'Send Back');
+  sendBackBtn.addEventListener('click', () => {
+    confirmArea.innerHTML = '';
+    const reasonInput = el('textarea', { className: 'form-input', rows: '3',
+      placeholder: 'Describe what needs to be corrected or clarified (required)…',
+      style: 'width:100%;margin-bottom:8px;resize:vertical;min-height:64px' });
+    const conf = el('div', { className: 'confirm-inline' });
+    conf.appendChild(el('span', {}, `Send back ${p.packet_code || p.change_packet_id} for correction?`));
+    conf.appendChild(el('div', { style: 'font-size:12px;color:var(--color-text-muted);margin-bottom:6px' },
+      p.ingest_id
+        ? 'Your reason will be written as a clarification note on the source document and extraction will re-run immediately.'
+        : 'No linked ingest document — packet will be marked sent_back; re-submit manually.'));
+    conf.appendChild(reasonInput);
+    conf.appendChild(el('div', { className: 'btn-group' },
+      buildConfirmBtn('Yes, Send Back', 'btn-ghost', async () => {
+        const reason = reasonInput.value.trim();
+        if (!reason) { showToast('Please enter a reason before sending back.', 'warn'); return; }
+        sendBackBtn.disabled = true;
+        confirmArea.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><span style="margin-left:8px">Sending back and re-running extraction…</span></div>';
+        try {
+          const result = await apiFetch(`/change-packets/${p.change_packet_id}/send-back`, {
+            method: 'POST', body: JSON.stringify({ reason }),
+          });
+          p.status = 'sent_back';
+          const idx = allPackets.findIndex(x => x.change_packet_id === p.change_packet_id);
+          if (idx >= 0) allPackets[idx].status = 'sent_back';
+          const statusEl = pane.querySelector('.pane-header .tag');
+          if (statusEl) statusEl.replaceWith(statusTag('sent_back'));
+
+          confirmArea.innerHTML = '';
+          const resultDiv = el('div', { style: 'margin-top:10px;padding:10px 12px;background:var(--color-bg);border:1px solid var(--color-border);border-radius:6px;font-size:12px' });
+          if (result.ingest_result && !result.ingest_result.error) {
+            const ir = result.ingest_result;
+            resultDiv.appendChild(el('div', { style: 'font-weight:600;color:var(--color-accent);margin-bottom:4px' }, '↩ Extraction re-ran with your feedback'));
+            resultDiv.appendChild(el('div', {}, `${ir.extractions_staged ?? 0} staged · ${ir.clarifications_raised ?? 0} clarifications · status: ${ir.new_status || '—'}`));
+            resultDiv.appendChild(el('div', { style: 'margin-top:4px;color:var(--color-text-muted)' }, 'Open the Ingest window to review and promote the corrected version.'));
+          } else {
+            resultDiv.appendChild(el('div', { style: 'font-weight:600;margin-bottom:4px' }, '↩ Packet sent back'));
+            resultDiv.appendChild(el('div', { style: 'color:var(--color-text-muted)' }, result.message || ''));
+            if (result.ingest_result && result.ingest_result.error) {
+              resultDiv.appendChild(el('div', { style: 'color:var(--color-danger);margin-top:4px' }, `Re-run error: ${result.ingest_result.error}`));
+            }
+          }
+          actionSection.appendChild(resultDiv);
+          showToast('Packet sent back.', 'success');
+        } catch (err) {
+          confirmArea.innerHTML = '';
+          showToast(`Error: ${err.message}`, 'error');
+        } finally { sendBackBtn.disabled = false; }
+      }),
+      buildCancelBtn(() => { confirmArea.innerHTML = ''; })
+    ));
+    confirmArea.appendChild(conf);
+  });
+  btnGroup.appendChild(sendBackBtn);
+
+  // Split — copies all items to a new sibling CP for independent review
   const splitBtn = el('button', { className: 'btn btn-ghost' }, 'Split');
-  splitBtn.addEventListener('click', async () => {
-    try {
-      await apiFetch(`/change-packets/${p.change_packet_id}/split`, { method: 'POST' });
-      showToast('Split request submitted.', 'success');
-    } catch (err) {
-      showToast(`Error: ${err.message}`, 'error');
-    }
+  splitBtn.addEventListener('click', () => {
+    confirmArea.innerHTML = '';
+    const itemCount = (p.items || p.change_packet_items || []).length;
+    const conf = el('div', { className: 'confirm-inline' },
+      el('span', {}, `Create a copy of ${p.packet_code || p.change_packet_id} with all ${itemCount} item${itemCount !== 1 ? 's' : ''}?`),
+      el('div', { style: 'font-size:12px;color:var(--color-text-muted);margin-bottom:8px' },
+        'Both packets will be pending. Approve or reject each independently.'),
+      el('div', { className: 'btn-group' },
+        buildConfirmBtn('Yes, Split', 'btn-ghost', async () => {
+          try {
+            const result = await apiFetch(`/change-packets/${p.change_packet_id}/split`, { method: 'POST' });
+            confirmArea.innerHTML = '';
+            showToast(`Split created: ${result.change_packet?.packet_code || result.new_id} (${result.item_count} items).`, 'success');
+          } catch (err) { showToast(`Error: ${err.message}`, 'error'); }
+        }),
+        buildCancelBtn(() => { confirmArea.innerHTML = ''; })
+      )
+    );
+    confirmArea.appendChild(conf);
   });
   btnGroup.appendChild(splitBtn);
 
