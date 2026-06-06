@@ -349,6 +349,141 @@ CREATE TABLE IF NOT EXISTS asdlc_tool (
     version             INTEGER NOT NULL DEFAULT 1
 );
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- ServiceNow round-trip: Level-1 design tables (business/functional altitude).
+-- Populated by ingesting a ServiceNow app's transformed Fluent source. Each
+-- carries hidden Level-2 "provenance" columns (source_*) = the construct/Fluent
+-- representation + sys_id identity needed to regenerate & redeploy. Provenance
+-- columns are NEVER surfaced to non-technical Level-1 editors.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- DB schema/design — one row per ServiceNow table (sys_db_object + dictionary).
+CREATE TABLE IF NOT EXISTS asdlc_data_model (
+    data_model_id    TEXT PRIMARY KEY,
+    project_id       TEXT REFERENCES asdlc_project(project_id),
+    slug             TEXT,                          -- DM-### per project
+    name             TEXT NOT NULL,                 -- business label for the table
+    purpose          TEXT,                          -- what business object it represents
+    physical_name    TEXT,                          -- ServiceNow table name, e.g. x_dnllp_airport_ca_flight
+    extends_table    TEXT,                          -- parent table (e.g. task), if extended
+    fields           TEXT NOT NULL DEFAULT '[]',    -- JSON [{label, meaning, type_business, mandatory, choices?, references?}]
+    relationships    TEXT NOT NULL DEFAULT '[]',    -- JSON [{kind, target, description}]
+    audited          INTEGER NOT NULL DEFAULT 0,
+    -- ── Level-2 provenance (hidden) ──
+    source_system    TEXT NOT NULL DEFAULT 'servicenow',
+    source_sys_id    TEXT,
+    source_table     TEXT,
+    source_scope     TEXT,
+    source_fluent    TEXT,
+    source_hash      TEXT,
+    visibility_scope TEXT NOT NULL DEFAULT 'PROJECT',
+    lifecycle_status TEXT NOT NULL DEFAULT 'active',
+    created_by       TEXT,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by       TEXT,
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    version          INTEGER NOT NULL DEFAULT 1
+);
+
+-- Form & view layout + UI-policy behavior — one row per form/view.
+CREATE TABLE IF NOT EXISTS asdlc_form_design (
+    form_design_id   TEXT PRIMARY KEY,
+    project_id       TEXT REFERENCES asdlc_project(project_id),
+    data_model_id    TEXT REFERENCES asdlc_data_model(data_model_id),  -- table this form is for
+    slug             TEXT,                          -- FORM-### per project
+    name             TEXT NOT NULL,
+    view_name        TEXT,                          -- Default / Mobile / etc.
+    sections         TEXT NOT NULL DEFAULT '[]',    -- JSON [{section_label, fields:[], columns}]
+    related_lists    TEXT NOT NULL DEFAULT '[]',    -- JSON [{label, table}]
+    mandatory_fields TEXT NOT NULL DEFAULT '[]',    -- JSON array of field labels
+    readonly_fields  TEXT NOT NULL DEFAULT '[]',    -- JSON array of field labels
+    behavior_notes   TEXT,                          -- UI-policy behavior in plain English
+    -- ── Level-2 provenance (hidden) ──
+    source_system    TEXT NOT NULL DEFAULT 'servicenow',
+    source_sys_id    TEXT,
+    source_table     TEXT,
+    source_scope     TEXT,
+    source_fluent    TEXT,
+    source_hash      TEXT,
+    visibility_scope TEXT NOT NULL DEFAULT 'PROJECT',
+    lifecycle_status TEXT NOT NULL DEFAULT 'active',
+    created_by       TEXT,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by       TEXT,
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    version          INTEGER NOT NULL DEFAULT 1
+);
+
+-- Business logic — one row per server/client logic artifact, in plain English.
+-- The actual script body lives in source_fluent (provenance), never as a Level-1 field.
+CREATE TABLE IF NOT EXISTS asdlc_business_logic (
+    business_logic_id TEXT PRIMARY KEY,
+    project_id        TEXT REFERENCES asdlc_project(project_id),
+    data_model_id     TEXT REFERENCES asdlc_data_model(data_model_id),  -- table it runs on (nullable)
+    slug              TEXT,                         -- BL-### per project
+    name              TEXT NOT NULL,
+    logic_type        TEXT NOT NULL DEFAULT 'business_rule'
+        CHECK (logic_type IN ('business_rule','client_script','script_include','ui_action','scheduled_job','ui_policy')),
+    plain_english     TEXT,                         -- what it does, in business terms
+    when_runs         TEXT,                         -- trigger in business terms (e.g. "after a flight is updated")
+    conditions        TEXT,                         -- when it applies
+    run_order         INTEGER,
+    -- ── Level-2 provenance (hidden) ──
+    source_system     TEXT NOT NULL DEFAULT 'servicenow',
+    source_sys_id     TEXT,
+    source_table      TEXT,
+    source_scope      TEXT,
+    source_fluent     TEXT,
+    source_hash       TEXT,
+    visibility_scope  TEXT NOT NULL DEFAULT 'PROJECT',
+    lifecycle_status  TEXT NOT NULL DEFAULT 'active',
+    created_by        TEXT,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by        TEXT,
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    version           INTEGER NOT NULL DEFAULT 1
+);
+
+-- Catalog item / record producer — one row per catalog item.
+CREATE TABLE IF NOT EXISTS asdlc_catalog_item (
+    catalog_item_id   TEXT PRIMARY KEY,
+    project_id        TEXT REFERENCES asdlc_project(project_id),
+    workflow_id       TEXT REFERENCES asdlc_workflow(workflow_id),  -- fulfillment workflow (nullable)
+    slug              TEXT,                         -- CAT-### per project
+    name              TEXT NOT NULL,
+    short_description TEXT,
+    category          TEXT,
+    variables         TEXT NOT NULL DEFAULT '[]',   -- JSON [{label, type_business, mandatory, choices?, help}]
+    who_can_order     TEXT,                         -- roles / groups
+    delivery_time     TEXT,
+    -- ── Level-2 provenance (hidden) ──
+    source_system     TEXT NOT NULL DEFAULT 'servicenow',
+    source_sys_id     TEXT,
+    source_table      TEXT,
+    source_scope      TEXT,
+    source_fluent     TEXT,
+    source_hash       TEXT,
+    visibility_scope  TEXT NOT NULL DEFAULT 'PROJECT',
+    lifecycle_status  TEXT NOT NULL DEFAULT 'active',
+    created_by        TEXT,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by        TEXT,
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    version           INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_data_model_project   ON asdlc_data_model(project_id);
+CREATE INDEX IF NOT EXISTS idx_form_design_project  ON asdlc_form_design(project_id);
+CREATE INDEX IF NOT EXISTS idx_form_design_dm       ON asdlc_form_design(data_model_id);
+CREATE INDEX IF NOT EXISTS idx_biz_logic_project    ON asdlc_business_logic(project_id);
+CREATE INDEX IF NOT EXISTS idx_biz_logic_dm         ON asdlc_business_logic(data_model_id);
+CREATE INDEX IF NOT EXISTS idx_catalog_item_project ON asdlc_catalog_item(project_id);
+-- Provenance lookup (round-trip identity / drift detection) by source_sys_id.
+CREATE INDEX IF NOT EXISTS idx_data_model_sysid     ON asdlc_data_model(source_sys_id);
+CREATE INDEX IF NOT EXISTS idx_form_design_sysid    ON asdlc_form_design(source_sys_id);
+CREATE INDEX IF NOT EXISTS idx_biz_logic_sysid      ON asdlc_business_logic(source_sys_id);
+CREATE INDEX IF NOT EXISTS idx_catalog_item_sysid   ON asdlc_catalog_item(source_sys_id);
+
 CREATE TABLE IF NOT EXISTS asdlc_knowledge_article (
     knowledge_article_id TEXT PRIMARY KEY,
     project_id          TEXT REFERENCES asdlc_project(project_id),

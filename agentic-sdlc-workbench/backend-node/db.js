@@ -120,6 +120,48 @@ const MIGRATIONS = [
   // Index must come AFTER the column is added (runs post-schema-exec, so it is
   // safe on both fresh and existing databases).
   "CREATE INDEX IF NOT EXISTS idx_ingest_lifecycle ON asdlc_ingest_document(lifecycle_status)",
+
+  // ── ServiceNow round-trip (Round 2): Level-2 provenance on the REUSED design
+  // types so ServiceNow-extracted agents/workflows/tools also carry sys_id
+  // identity. Nullable, no default — existing (transcript-sourced) rows stay NULL
+  // (= not ServiceNow-sourced). SN-sourced records are identified by source_sys_id.
+  "ALTER TABLE asdlc_agent_spec    ADD COLUMN source_system TEXT",
+  "ALTER TABLE asdlc_agent_spec    ADD COLUMN source_sys_id TEXT",
+  "ALTER TABLE asdlc_agent_spec    ADD COLUMN source_table  TEXT",
+  "ALTER TABLE asdlc_agent_spec    ADD COLUMN source_scope  TEXT",
+  "ALTER TABLE asdlc_agent_spec    ADD COLUMN source_fluent TEXT",
+  "ALTER TABLE asdlc_agent_spec    ADD COLUMN source_hash   TEXT",
+  "ALTER TABLE asdlc_tool          ADD COLUMN source_system TEXT",
+  "ALTER TABLE asdlc_tool          ADD COLUMN source_sys_id TEXT",
+  "ALTER TABLE asdlc_tool          ADD COLUMN source_table  TEXT",
+  "ALTER TABLE asdlc_tool          ADD COLUMN source_scope  TEXT",
+  "ALTER TABLE asdlc_tool          ADD COLUMN source_fluent TEXT",
+  "ALTER TABLE asdlc_tool          ADD COLUMN source_hash   TEXT",
+  "ALTER TABLE asdlc_workflow      ADD COLUMN source_system TEXT",
+  "ALTER TABLE asdlc_workflow      ADD COLUMN source_sys_id TEXT",
+  "ALTER TABLE asdlc_workflow      ADD COLUMN source_table  TEXT",
+  "ALTER TABLE asdlc_workflow      ADD COLUMN source_scope  TEXT",
+  "ALTER TABLE asdlc_workflow      ADD COLUMN source_fluent TEXT",
+  "ALTER TABLE asdlc_workflow      ADD COLUMN source_hash   TEXT",
+  "ALTER TABLE asdlc_workflow_step ADD COLUMN source_system TEXT",
+  "ALTER TABLE asdlc_workflow_step ADD COLUMN source_sys_id TEXT",
+  "ALTER TABLE asdlc_workflow_step ADD COLUMN source_table  TEXT",
+  "ALTER TABLE asdlc_workflow_step ADD COLUMN source_scope  TEXT",
+  "ALTER TABLE asdlc_workflow_step ADD COLUMN source_fluent TEXT",
+  "ALTER TABLE asdlc_workflow_step ADD COLUMN source_hash   TEXT",
+  "CREATE INDEX IF NOT EXISTS idx_agent_sysid ON asdlc_agent_spec(source_sys_id)",
+  "CREATE INDEX IF NOT EXISTS idx_tool_sysid  ON asdlc_tool(source_sys_id)",
+  "CREATE INDEX IF NOT EXISTS idx_wf_sysid    ON asdlc_workflow(source_sys_id)",
+  "CREATE INDEX IF NOT EXISTS idx_step_sysid  ON asdlc_workflow_step(source_sys_id)",
+
+  // ── ServiceNow round-trip (Round 2): Application ↔ ServiceNow app link on the
+  // project, so a Workbench Application can be created/linked to a scoped app and
+  // re-synced. sn_last_synced_at is stamped after each successful extraction ingest.
+  "ALTER TABLE asdlc_project ADD COLUMN servicenow_scope TEXT",
+  "ALTER TABLE asdlc_project ADD COLUMN servicenow_sys_app_id TEXT",
+  "ALTER TABLE asdlc_project ADD COLUMN servicenow_instance TEXT",
+  "ALTER TABLE asdlc_project ADD COLUMN sn_last_synced_at TEXT",
+  "CREATE INDEX IF NOT EXISTS idx_project_sn_sysapp ON asdlc_project(servicenow_sys_app_id)",
 ];
 for (const migration of MIGRATIONS) {
   try { db.exec(migration); } catch { /* column already exists — safe to ignore */ }
@@ -141,6 +183,11 @@ const SLUG_INDEXES = [
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_path_slug ON asdlc_workflow_path(project_id, slug)         WHERE slug IS NOT NULL",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_fr_slug  ON asdlc_functional_req(project_id, slug)   WHERE slug IS NOT NULL",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_nfr_slug ON asdlc_nonfunctional_req(project_id, slug) WHERE slug IS NOT NULL",
+  // ServiceNow round-trip: Level-1 design tables
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_dm_slug   ON asdlc_data_model(project_id, slug)      WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_form_slug ON asdlc_form_design(project_id, slug)     WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_bl_slug   ON asdlc_business_logic(project_id, slug)  WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_cat_slug  ON asdlc_catalog_item(project_id, slug)    WHERE slug IS NOT NULL",
 ];
 for (const idx of SLUG_INDEXES) {
   try { db.exec(idx); } catch (err) { console.error('[db] slug index failed:', err.message); }
@@ -173,6 +220,11 @@ const SLUG_TABLES = [
   { table: 'asdlc_workflow_path',        pk: 'workflow_path_id',        prefix: 'PATH' },
   { table: 'asdlc_functional_req',    pk: 'fr_id',   prefix: 'FR'  },
   { table: 'asdlc_nonfunctional_req', pk: 'nfr_id',  prefix: 'NFR' },
+  // ServiceNow round-trip: Level-1 design tables
+  { table: 'asdlc_data_model',        pk: 'data_model_id',     prefix: 'DM'   },
+  { table: 'asdlc_form_design',       pk: 'form_design_id',    prefix: 'FORM' },
+  { table: 'asdlc_business_logic',    pk: 'business_logic_id', prefix: 'BL'   },
+  { table: 'asdlc_catalog_item',      pk: 'catalog_item_id',   prefix: 'CAT'  },
 ];
 
 function backfillSlugsFor(tableSpec) {

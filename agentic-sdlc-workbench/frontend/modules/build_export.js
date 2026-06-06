@@ -11,6 +11,10 @@ const SECTION_GROUPS = [
       { id: 'workflows',  label: 'Workflows'  },
       { id: 'agents',     label: 'Agents'     },
       { id: 'tools',      label: 'Tools'      },
+      { id: 'data_models',    label: 'Data Model (SN)'     },
+      { id: 'form_designs',   label: 'Form Designs (SN)'   },
+      { id: 'business_logic', label: 'Business Logic (SN)' },
+      { id: 'catalog_items',  label: 'Catalog Items (SN)'  },
     ],
   },
   {

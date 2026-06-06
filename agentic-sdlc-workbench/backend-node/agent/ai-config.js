@@ -33,9 +33,21 @@ const ROLE_ENV = {
 };
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
-/** Resolve the model for a role: setting `<role>_model` → env var → default. */
+// ── ServiceNow reconciliation roles (Phase C–E) ──────────────────────────────
+// These do the heavy reverse-engineering / reconciliation / review reasoning, so
+// they default to Opus + extended thinking ON. All still admin-overridable via
+// asdlc_app_setting (`<role>_model`, `<role>_thinking_enabled`, `<role>_thinking_budget`).
+const ROLE_DEFAULTS = {
+  reverse_engineer:   'claude-opus-4-8',
+  reconciler:         'claude-opus-4-8',
+  reconcile_reviewer: 'claude-opus-4-8',
+};
+const ROLE_THINKING_DEFAULT = { reverse_engineer: 'true', reconciler: 'true', reconcile_reviewer: 'true' };
+const ROLE_THINKING_BUDGET  = { reverse_engineer: '8000', reconciler: '8000', reconcile_reviewer: '8000' }; // ≥8000 → effort 'high'
+
+/** Resolve the model for a role: setting `<role>_model` → env var → per-role default → global default. */
 function resolveModel(role) {
-  return getSetting(`${role}_model`, DEFAULT_MODEL, ROLE_ENV[role]);
+  return getSetting(`${role}_model`, ROLE_DEFAULTS[role] || DEFAULT_MODEL, ROLE_ENV[role]);
 }
 
 /** Max output tokens (global setting, default 8192). */
@@ -52,14 +64,14 @@ function getMaxTokens() {
  * The caller must spread both onto the API request.
  */
 function getThinkingConfig(role = 'extraction') {
-  const enabled = String(getSetting(`${role}_thinking_enabled`, 'false')) === 'true';
+  const enabled = String(getSetting(`${role}_thinking_enabled`, ROLE_THINKING_DEFAULT[role] || 'false')) === 'true';
   if (!enabled) return null;
   const model = resolveModel(role);
   // Claude 4 models: 'claude-opus-4-*', 'claude-sonnet-4-*', 'claude-haiku-4-*'
   const isClaude4 = /^claude-[a-z]+-4[-.]/.test(model);
   if (isClaude4) {
     // Map budget tiers to effort levels: <4k→low, <8k→medium, else high
-    let budget = parseInt(getSetting(`${role}_thinking_budget`, '4000'), 10);
+    let budget = parseInt(getSetting(`${role}_thinking_budget`, ROLE_THINKING_BUDGET[role] || '4000'), 10);
     if (!Number.isFinite(budget) || budget < 1024) budget = 4000;
     const effort = budget < 4000 ? 'low' : budget < 8000 ? 'medium' : 'high';
     return { thinking: { type: 'adaptive' }, outputConfig: { effort } };

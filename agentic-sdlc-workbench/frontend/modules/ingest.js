@@ -174,6 +174,10 @@ function buildSubmitPanel() {
     <option value="test_scenarios">Test Scenarios</option>
     <option value="governance">Governance Controls</option>
     <option value="user_stories">User Stories</option>
+    <option value="data_model">Data Model / Schema (ServiceNow)</option>
+    <option value="form_design">Forms &amp; UI (ServiceNow)</option>
+    <option value="business_logic">Business Logic (ServiceNow)</option>
+    <option value="catalog_item">Catalog Items (ServiceNow)</option>
   `;
   scopeGroup.appendChild(scopeSelect);
 

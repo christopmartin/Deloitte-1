@@ -10,6 +10,7 @@ backend-node/asdlc.db-wal
 backend-node/asdlc.db.*-backup
 backend-node/asdlc.db.*-backup-shm
 backend-node/asdlc.db.*-backup-wal
+backend-node/backups/
 
 # Temp / scratch files
 backend-node/Tempcp_response.json

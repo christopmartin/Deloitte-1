@@ -263,7 +263,8 @@ app.get('/api/v1/projects/:id', (req, res) => {
 });
 
 app.post('/api/v1/projects', (req, res) => {
-  const { client_id, project_name, project_code, stage } = req.body;
+  const { client_id, project_name, project_code, stage,
+          servicenow_scope, servicenow_sys_app_id, servicenow_instance } = req.body;
   if (!client_id || !project_name || !project_code) {
     return res.status(400).json({ error: 'client_id, project_name and project_code are required' });
   }
@@ -271,12 +272,61 @@ app.post('/api/v1/projects', (req, res) => {
   const uid = userId(req);
   db.prepare(`
     INSERT INTO asdlc_project
-      (project_id, client_id, project_name, project_code, stage, created_by, updated_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(id, client_id, project_name, project_code, stage || 'draft', uid, uid);
+      (project_id, client_id, project_name, project_code, stage,
+       servicenow_scope, servicenow_sys_app_id, servicenow_instance, created_by, updated_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, client_id, project_name, project_code, stage || 'draft',
+         servicenow_scope || null, servicenow_sys_app_id || null, servicenow_instance || null, uid, uid);
   const created = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(id);
   auditLog('asdlc_project', id, 'INSERT', null, created, uid);
   res.status(201).json(created);
+});
+
+// ── ServiceNow round-trip: link a Workbench Application to a ServiceNow app ──
+// Set/clear the link (scope + sys_app id + instance) on a project.
+app.post('/api/v1/projects/:id/servicenow-link', (req, res) => {
+  const uid = userId(req);
+  const existing = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Project not found' });
+  const { servicenow_scope, servicenow_sys_app_id, servicenow_instance } = req.body || {};
+  db.prepare(`
+    UPDATE asdlc_project
+       SET servicenow_scope = ?, servicenow_sys_app_id = ?, servicenow_instance = ?,
+           updated_by = ?, updated_at = datetime('now')
+     WHERE project_id = ?
+  `).run(servicenow_scope || null, servicenow_sys_app_id || null, servicenow_instance || null, uid, req.params.id);
+  const after = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(req.params.id);
+  auditLog('asdlc_project', req.params.id, 'UPDATE', existing, after, uid);
+  res.json(after);
+});
+
+// Resolve the Workbench project linked to a ServiceNow sys_app id (or scope) —
+// used to target extraction at the right Application. Returns {project:null} if none.
+app.get('/api/v1/servicenow/resolve-project', (req, res) => {
+  const sysApp = req.query.sys_app_id;
+  const scope  = req.query.scope;
+  if (!sysApp && !scope) return res.status(400).json({ error: 'sys_app_id or scope is required' });
+  const row = sysApp
+    ? db.prepare("SELECT project_id, project_name, servicenow_scope, servicenow_sys_app_id, sn_last_synced_at FROM asdlc_project WHERE servicenow_sys_app_id = ? AND (lifecycle_status IS NULL OR lifecycle_status != 'retired') LIMIT 1").get(sysApp)
+    : db.prepare("SELECT project_id, project_name, servicenow_scope, servicenow_sys_app_id, sn_last_synced_at FROM asdlc_project WHERE servicenow_scope = ? AND (lifecycle_status IS NULL OR lifecycle_status != 'retired') LIMIT 1").get(scope);
+  res.json({ project: row || null });
+});
+
+// ── ServiceNow round-trip: sync apply-mode (system setting) ──────────────────
+// Governs how freely SAFE (additive / fill-blank / non-shrinking) sync changes apply.
+// The non-destructive guard is a hard floor under ALL modes — destructive/shrinking
+// changes never auto-apply regardless of mode (consumed by the gate in a later phase).
+const SN_SYNC_APPLY_MODES = ['additive_hitl', 'confidence_gate', 'review_all'];
+app.get('/api/v1/settings/sn-sync-apply-mode', (req, res) => {
+  res.json({ mode: getSetting('sn_sync_apply_mode', 'additive_hitl'), modes: SN_SYNC_APPLY_MODES });
+});
+app.put('/api/v1/settings/sn-sync-apply-mode', (req, res) => {
+  const mode = req.body && req.body.mode;
+  if (!SN_SYNC_APPLY_MODES.includes(mode)) {
+    return res.status(400).json({ error: `mode must be one of: ${SN_SYNC_APPLY_MODES.join(', ')}` });
+  }
+  setSetting('sn_sync_apply_mode', mode, userId(req));
+  res.json({ mode });
 });
 
 app.put('/api/v1/projects/:id', (req, res) => {
@@ -588,6 +638,20 @@ function mapFields(entity, data) {
   return out;
 }
 
+// ── ServiceNow round-trip: non-destructive sync guard ────────────────────────
+// Level-2 provenance columns are identity, not content — always allowed to update.
+const SN_PROVENANCE_COLS = new Set(['source_system','source_sys_id','source_table','source_scope','source_fluent','source_hash']);
+// True if writing `incoming` over `current` would blank or shrink a populated field.
+// Used to protect richer Workbench content from a lossy ServiceNow sync. JSON columns
+// are compared by serialized length as a proxy for "fewer/less-detailed entries".
+function snWouldShrink(current, incoming) {
+  const cur = current == null ? '' : String(current);
+  const inc = incoming == null ? '' : String(incoming);
+  if (cur.trim() === '') return false;   // nothing populated to protect
+  if (inc.trim() === '') return true;    // would blank a populated field
+  return inc.length < cur.length;        // would shrink (lose detail)
+}
+
 /** Resolve a child entity's parent FK columns to real ids (same-packet → DB → fallback). */
 function resolveParents(entity, data, projectId, idMap) {
   const fks = {};
@@ -705,13 +769,24 @@ function mtUpdate(entity, data, item, uid) {
   const before = mtRow(entity.table, entity.pk, id);
   if (!before) throw new SoftSkip(`${entity.entity_type}: update target ${id} no longer exists`);
   const mapped = mapFields(entity, data);
+  // Non-destructive guard (ServiceNow-sourced syncs only): never overwrite a populated
+  // Workbench field with an empty or strictly-smaller value. Protected fields are kept
+  // and reported. Provenance columns always update. Hard floor under ALL apply-modes.
+  const protectedCols = [];
+  if (data && data.source_sys_id) {
+    for (const col of Object.keys(mapped)) {
+      if (SN_PROVENANCE_COLS.has(col)) continue;
+      if (snWouldShrink(before[col], mapped[col])) { delete mapped[col]; protectedCols.push(col); }
+    }
+  }
   const setCols = Object.keys(mapped);
-  if (setCols.length === 0) return;
+  if (setCols.length === 0) return { protected: protectedCols };
   const sql = setCols.map(c => `${c} = ?`).join(', ');
   db.prepare(
     `UPDATE ${entity.table} SET ${sql}, version=version+1, updated_by=?, updated_at=datetime('now') WHERE ${entity.pk}=?`
   ).run(...setCols.map(c => mapped[c]), uid, id);
   auditLog(entity.table, id, 'UPDATE', before, mtRow(entity.table, entity.pk, id), uid);
+  return { protected: protectedCols };
 }
 
 function mtDelete(entity, item, uid) {
@@ -870,7 +945,10 @@ function applyChangePacket(cpId, uid) {
         if (r.blocked) { result.errors.push({ item: item.change_packet_item_id, entity_type: item.entity_type, reason: r.reason }); continue; }
         result.deleted++;
       } else if (op === 'update') {
-        mtUpdate(entity, data, item, uid); result.updated++;
+        const r = mtUpdate(entity, data, item, uid); result.updated++;
+        if (r && r.protected && r.protected.length) {
+          markItemApplied(item.change_packet_item_id, `[non-destructive: kept richer Workbench values for ${r.protected.join(', ')}]`);
+        }
         materializeRequirementLinks(entity.entity_type, item.entity_id, data, projectId, uid);
       } else {
         const newId = mtCreate(entity, data, projectId, uid, idMap, item); result.applied++;
@@ -4024,6 +4102,111 @@ app.get('/api/v1/projects/:id/design-report/test-scenarios', extractionReport('t
 app.get('/api/v1/projects/:id/design-report/user-stories',   extractionReport('user_story',         'user_stories'));
 app.get('/api/v1/projects/:id/design-report/governance',     extractionReport('governance_control', 'governance_controls'));
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ServiceNow round-trip: Level-1 design types — design-report (list) + GET/PUT.
+// These are materialized into real tables, so they read from the table (like
+// tools), not from raw extractions. Provenance columns (source_*) are Level-2
+// and intentionally NOT editable here — hidden from non-technical Level-1 editors.
+// ═══════════════════════════════════════════════════════════════════════════
+const RT_DESIGN = {
+  'data-models':    { table: 'asdlc_data_model',     pk: 'data_model_id',     key: 'data_models',   entity_type: 'data_model',
+                      json: ['fields', 'relationships'],
+                      allowed: ['name', 'purpose', 'physical_name', 'extends_table', 'fields', 'relationships', 'audited'] },
+  'form-designs':   { table: 'asdlc_form_design',    pk: 'form_design_id',    key: 'form_designs',  entity_type: 'form_design',
+                      json: ['sections', 'related_lists', 'mandatory_fields', 'readonly_fields'],
+                      allowed: ['name', 'view_name', 'sections', 'related_lists', 'mandatory_fields', 'readonly_fields', 'behavior_notes'] },
+  'business-logic': { table: 'asdlc_business_logic', pk: 'business_logic_id', key: 'business_logic', entity_type: 'business_logic',
+                      json: [],
+                      allowed: ['name', 'logic_type', 'plain_english', 'when_runs', 'conditions', 'run_order'],
+                      enums: { logic_type: ['business_rule','client_script','script_include','ui_action','scheduled_job','ui_policy'] } },
+  'catalog-items':  { table: 'asdlc_catalog_item',   pk: 'catalog_item_id',   key: 'catalog_items', entity_type: 'catalog_item',
+                      json: ['variables'],
+                      allowed: ['name', 'short_description', 'category', 'variables', 'who_can_order', 'delivery_time'] },
+};
+
+function rtParseRow(row, jsonCols) {
+  if (!row) return row;
+  const out = { ...row };
+  for (const c of jsonCols) if (c in out) out[c] = parseJson(out[c]);
+  return out;
+}
+
+function rtDesignReport(spec) {
+  return (req, res) => {
+    const project = db.prepare(`
+      SELECT p.*, c.client_name FROM asdlc_project p
+      LEFT JOIN asdlc_client c ON c.client_id = p.client_id
+      WHERE p.project_id = ?
+    `).get(req.params.id);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    const rows = db.prepare(
+      `SELECT * FROM ${spec.table} WHERE project_id = ? AND lifecycle_status = 'active' ORDER BY slug`
+    ).all(req.params.id).map(r => rtParseRow(r, spec.json));
+    res.json({
+      project: {
+        project_id: project.project_id, project_name: project.project_name,
+        project_code: project.project_code, client_name: project.client_name, stage: project.stage,
+      },
+      generated_at: new Date().toISOString(),
+      [spec.key]: rows,
+    });
+  };
+}
+
+for (const [scope, spec] of Object.entries(RT_DESIGN)) {
+  // Design Review report (list)
+  app.get(`/api/v1/projects/:id/design-report/${scope}`, rtDesignReport(spec));
+
+  // Single GET — the edit modal loads current values from here.
+  app.get(`/api/v1/projects/:id/${scope}/:eid`, (req, res) => {
+    const row = db.prepare(`SELECT * FROM ${spec.table} WHERE ${spec.pk} = ? AND project_id = ?`)
+      .get(req.params.eid, req.params.id);
+    if (!row) return res.status(404).json({ error: `${spec.entity_type} not found` });
+    res.json(rtParseRow(row, spec.json));
+  });
+
+  // Single PUT — Level-1 edit → direct update + auto-approved CP (history), like
+  // the other design-review edit endpoints. Provenance columns are never in `allowed`.
+  app.put(`/api/v1/projects/:id/${scope}/:eid`, (req, res) => {
+    const uid = userId(req);
+    const existing = db.prepare(`SELECT * FROM ${spec.table} WHERE ${spec.pk} = ? AND project_id = ?`)
+      .get(req.params.eid, req.params.id);
+    if (!existing) return res.status(404).json({ error: `${spec.entity_type} not found` });
+
+    const updates = {};
+    spec.allowed.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
+    if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No updatable fields provided' });
+
+    if (spec.enums) {
+      try {
+        for (const [col, vals] of Object.entries(spec.enums)) {
+          if (updates[col] !== undefined) validateEnum(updates[col], vals, col);
+        }
+      } catch (err) { return res.status(400).json({ error: err.message }); }
+    }
+
+    const toWrite = { ...updates };
+    for (const c of spec.json) if (c in toWrite && typeof toWrite[c] !== 'string') toWrite[c] = JSON.stringify(toWrite[c]);
+
+    const setCols = Object.keys(toWrite);
+    db.prepare(
+      `UPDATE ${spec.table} SET ${setCols.map(c => `${c} = ?`).join(', ')}, version = version + 1,
+        updated_by = ?, updated_at = datetime('now') WHERE ${spec.pk} = ?`
+    ).run(...setCols.map(c => toWrite[c]), uid, req.params.eid);
+
+    const after = db.prepare(`SELECT * FROM ${spec.table} WHERE ${spec.pk} = ?`).get(req.params.eid);
+    auditLog(spec.table, req.params.eid, 'UPDATE', existing, after, uid);
+
+    const diff = diffFields(existing, updates, spec.json);
+    let cpResult = null;
+    if (diff.length > 0) {
+      cpResult = createAutoApprovedCP(req.params.id, spec.entity_type, req.params.eid,
+        existing.name || existing.title || req.params.eid, diff, uid);
+    }
+    res.json({ ...rtParseRow(after, spec.json), _cp: cpResult });
+  });
+}
+
 /**
  * GET /api/v1/projects/:id/slug-map
  * Phase 5: lightweight project-wide slug → {scope, entity_id, label} index.
@@ -4269,7 +4452,8 @@ app.get('/api/v1/projects/:id/build-export', async (req, res) => {
   `).get(req.params.id);
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
-  const allSections = ['use_cases','workflows','agents','tools','guardrails','data_sources','test_scenarios','user_stories','governance','relationships','cost_summary'];
+  const allSections = ['use_cases','workflows','agents','tools','guardrails','data_sources','test_scenarios','user_stories','governance','relationships','cost_summary',
+    'data_models','form_designs','business_logic','catalog_items'];
   const sectionsParam = req.query.sections || 'all';
   const sections = sectionsParam === 'all' ? allSections : sectionsParam.split(',').map(s => s.trim()).filter(s => allSections.includes(s));
 
@@ -4452,6 +4636,25 @@ app.get('/api/v1/projects/:id/build-export', async (req, res) => {
       errors:     parseJson(t.errors)     || [],
       boundaries: parseJson(t.boundaries) || [],
     }));
+  }
+
+  // ── ServiceNow round-trip: Level-1 design (materialized tables) ─────────────
+  const RT_EXPORT = {
+    data_models:    { table: 'asdlc_data_model',     json: ['fields', 'relationships'] },
+    form_designs:   { table: 'asdlc_form_design',    json: ['sections', 'related_lists', 'mandatory_fields', 'readonly_fields'] },
+    business_logic: { table: 'asdlc_business_logic', json: [] },
+    catalog_items:  { table: 'asdlc_catalog_item',   json: ['variables'] },
+  };
+  for (const [sectionKey, spec] of Object.entries(RT_EXPORT)) {
+    if (sections.includes(sectionKey)) {
+      data[sectionKey] = db.prepare(
+        `SELECT * FROM ${spec.table} WHERE project_id = ? AND lifecycle_status = 'active' ORDER BY slug`
+      ).all(req.params.id).map(r => {
+        const o = { ...r };
+        for (const c of spec.json) o[c] = parseJson(o[c]);
+        return o;
+      });
+    }
   }
 
   // ── Extraction-based sections ──────────────────────────────────────────────
@@ -5174,6 +5377,88 @@ function buildExportMarkdown(project, baseline, sections, data) {
     }
   }
 
+  // ── ServiceNow round-trip: Level-1 design sections ──────────────────────────
+  // These INCLUDE Level-2 provenance (source_sys_id / source_table / Fluent): the
+  // Build Spec is the technical handoff to Claude Code + the SN SDK and needs the
+  // identity + construct to regenerate and redeploy safely.
+  const rtFluentDetails = (rec) => {
+    if (!rec.source_fluent) return;
+    lines.push('<details><summary>Fluent (Level-2 construct)</summary>'); lines.push('');
+    lines.push('```typescript'); lines.push(rec.source_fluent); lines.push('```');
+    lines.push('</details>'); lines.push('');
+  };
+  if (sections.includes('data_models') && data.data_models) {
+    lines.push('---'); lines.push('');
+    lines.push('## ServiceNow Data Model'); lines.push('');
+    if (!data.data_models.length) { lines.push('*No data models.*'); lines.push(''); }
+    for (const dm of data.data_models) {
+      lines.push(`### \`${[dm.name, dm.slug].filter(Boolean).join(' — ')}\``); lines.push('');
+      if (dm.source_sys_id) lines.push(`> **Source:** ${dm.source_table || 'sys_db_object'} \`${dm.source_sys_id}\`${dm.source_scope ? ` (scope ${dm.source_scope})` : ''}`);
+      if (dm.physical_name) lines.push(`**ServiceNow Table:** \`${dm.physical_name}\``);
+      if (dm.extends_table) lines.push(`**Extends:** \`${dm.extends_table}\``);
+      if (dm.purpose) lines.push(`**Purpose:** ${dm.purpose}`);
+      lines.push('');
+      const fields = Array.isArray(dm.fields) ? dm.fields : [];
+      if (fields.length) {
+        lines.push('| Field | Type | Required | Meaning |'); lines.push('|---|---|---|---|');
+        fields.forEach(f => lines.push(`| ${f.label || ''} | ${f.type_business || ''} | ${f.mandatory ? 'Yes' : 'No'} | ${(f.meaning || '').replace(/\|/g, '\\|')} |`));
+        lines.push('');
+      }
+      rtFluentDetails(dm);
+    }
+  }
+  if (sections.includes('form_designs') && data.form_designs) {
+    lines.push('---'); lines.push('');
+    lines.push('## ServiceNow Form Designs'); lines.push('');
+    if (!data.form_designs.length) { lines.push('*No form designs.*'); lines.push(''); }
+    for (const fd of data.form_designs) {
+      lines.push(`### \`${[fd.name, fd.slug].filter(Boolean).join(' — ')}\``); lines.push('');
+      if (fd.source_sys_id) lines.push(`> **Source:** ${fd.source_table || 'sys_ui_form'} \`${fd.source_sys_id}\``);
+      if (fd.view_name) lines.push(`**View:** ${fd.view_name}`);
+      if (fd.behavior_notes) lines.push(`**Behavior:** ${fd.behavior_notes}`);
+      lines.push('');
+      const secs = Array.isArray(fd.sections) ? fd.sections : [];
+      secs.forEach(s => lines.push(`- **${s.section_label || 'Section'}**${s.columns != null ? ` (${s.columns} col)` : ''}: ${Array.isArray(s.fields) ? s.fields.join(', ') : ''}`));
+      if (secs.length) lines.push('');
+      rtFluentDetails(fd);
+    }
+  }
+  if (sections.includes('business_logic') && data.business_logic) {
+    lines.push('---'); lines.push('');
+    lines.push('## ServiceNow Business Logic'); lines.push('');
+    if (!data.business_logic.length) { lines.push('*No business logic.*'); lines.push(''); }
+    for (const bl of data.business_logic) {
+      lines.push(`### \`${[bl.name, bl.slug].filter(Boolean).join(' — ')}\` (${bl.logic_type || ''})`); lines.push('');
+      if (bl.source_sys_id) lines.push(`> **Source:** ${bl.source_table || ''} \`${bl.source_sys_id}\``);
+      if (bl.plain_english) lines.push(`**What it does:** ${bl.plain_english}`);
+      if (bl.when_runs) lines.push(`**When:** ${bl.when_runs}`);
+      if (bl.conditions) lines.push(`**Conditions:** ${bl.conditions}`);
+      if (bl.run_order != null) lines.push(`**Order:** ${bl.run_order}`);
+      lines.push('');
+      rtFluentDetails(bl);
+    }
+  }
+  if (sections.includes('catalog_items') && data.catalog_items) {
+    lines.push('---'); lines.push('');
+    lines.push('## ServiceNow Catalog Items'); lines.push('');
+    if (!data.catalog_items.length) { lines.push('*No catalog items.*'); lines.push(''); }
+    for (const ci of data.catalog_items) {
+      lines.push(`### \`${[ci.name, ci.slug].filter(Boolean).join(' — ')}\``); lines.push('');
+      if (ci.source_sys_id) lines.push(`> **Source:** ${ci.source_table || 'sc_cat_item'} \`${ci.source_sys_id}\``);
+      if (ci.short_description) lines.push(`**Description:** ${ci.short_description}`);
+      if (ci.category) lines.push(`**Category:** ${ci.category}`);
+      if (ci.who_can_order) lines.push(`**Who can order:** ${ci.who_can_order}`);
+      lines.push('');
+      const vars = Array.isArray(ci.variables) ? ci.variables : [];
+      if (vars.length) {
+        lines.push('| Variable | Type | Required |'); lines.push('|---|---|---|');
+        vars.forEach(v => lines.push(`| ${v.label || ''} | ${v.type_business || ''} | ${v.mandatory ? 'Yes' : 'No'} |`));
+        lines.push('');
+      }
+      rtFluentDetails(ci);
+    }
+  }
+
   // ── 5. Guardrails ─────────────────────────────────────────────────────────────
   if (sections.includes('guardrails') && data.guardrails) {
     lines.push('---'); lines.push('');
@@ -5487,7 +5772,13 @@ app.post('/api/v1/ingest-documents/:id/promote', (req, res) => {
   // update/delete, the prior value (old_value) and a conflict classification.
   const cpId    = generateId();
   const cpCode  = uniquePacketCode();
-  const summary = `Ingest promotion — ${extractions.length} entities from "${doc.document_title}"`;
+  // ServiceNow-sourced ingests (document_type='fluent', from the Fluent/REST adapter)
+  // are labeled as a "SN to WB synch" in Change History; transcript/doc ingests keep
+  // the generic label.
+  const isSnSync = doc.document_type === 'fluent';
+  const summary = isSnSync
+    ? `SN to WB synch — ${extractions.length} entities from "${doc.document_title}"`
+    : `Ingest promotion — ${extractions.length} entities from "${doc.document_title}"`;
 
   const CONFLICT_RANK    = { net_new: 0, modifies_existing: 1, deletes_existing: 2 };
   const CONFLICT_BY_RANK = ['net_new', 'modifies_existing', 'deletes_existing'];
@@ -5515,7 +5806,29 @@ app.post('/api/v1/ingest-documents/:id/promote', (req, res) => {
     let classification = data.conflict_classification ||
       (op === 'delete' ? 'deletes_existing' : op === 'update' ? 'modifies_existing' : 'net_new');
 
-    if ((op === 'update' || op === 'delete') && entity && entity.materializable && data.target_slug) {
+    // ServiceNow identity coalescing: an extraction carrying a source_sys_id that
+    // matches an already-materialized record is an UPDATE of THAT record, even if
+    // its name/slug changed (survives renames in ServiceNow). Deterministic —
+    // overrides whatever operation the model proposed. Only for entity types that
+    // track provenance (fieldMap.source_sys_id) and have the column.
+    let resolvedBySysId = false;
+    if (entity && entity.materializable && entity.fieldMap && entity.fieldMap.source_sys_id && data.source_sys_id) {
+      try {
+        const hit = db.prepare(
+          `SELECT ${entity.pk} AS id FROM ${entity.table}
+           WHERE source_sys_id = ? AND project_id = ?
+             AND (lifecycle_status IS NULL OR lifecycle_status != 'retired') LIMIT 1`
+        ).get(data.source_sys_id, doc.project_id);
+        if (hit) {
+          op = 'update'; entityId = hit.id; fieldPath = `${ex.entity_type}.update`;
+          const row = mtRow(entity.table, entity.pk, hit.id);
+          oldValue = row ? JSON.stringify(row) : null;
+          hasChange = true; classification = 'modifies_existing'; resolvedBySysId = true;
+        }
+      } catch { /* table lacks source_sys_id — ignore */ }
+    }
+
+    if (!resolvedBySysId && (op === 'update' || op === 'delete') && entity && entity.materializable && data.target_slug) {
       const targetId = resolveSlugToId(entity, doc.project_id, data.target_slug);
       if (targetId) {
         entityId  = targetId;
@@ -5527,7 +5840,7 @@ app.post('/api/v1/ingest-documents/:id/promote', (req, res) => {
         op = 'create';
         rationale = `[auto-downgraded: target ${data.target_slug} not found] ` + rationale;
       }
-    } else if (op === 'update' || op === 'delete') {
+    } else if (!resolvedBySysId && (op === 'update' || op === 'delete')) {
       op = 'create';   // no resolvable target → safe downgrade
     }
     if (op === 'create') classification = 'net_new';

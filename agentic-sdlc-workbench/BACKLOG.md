@@ -43,3 +43,4 @@
 | #16 | Model tiering — Opus for complex work (ingest, full-app audit, conflict detection), Sonnet for lighter tasks; single `model-policy.js` config |
 | #19 | RAG best practices documents — better mechanism for ingesting and managing reference material (standards, guidelines, playbooks) for agent retrieval |
 | #20 | Fix Supporting Evidence functionality — buttons currently do nothing useful; wire up to meaningful actions |
+| #21 | Per-Application Claude/AI cost view — surface AI usage & spend at the Application (project) level, not only in the global Admin AI Settings; roll up `asdlc_ai_usage` by `project_id` so Opus-heavy work (e.g. ServiceNow reconciliation/extraction) is attributable to the right Application |
