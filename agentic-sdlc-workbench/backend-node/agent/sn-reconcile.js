@@ -147,20 +147,20 @@ async function reconcileChanged(item, ctx) {
   const proposal = tu ? tu.input : { action: 'conflict', destructive: true, confidence: 0.2, field_changes: [], rationale: 'model did not call the tool' };
   // Safety net: never let a non-destructive action carry a modify change.
   if ((proposal.field_changes || []).some(c => c.change_kind === 'modify')) { proposal.destructive = true; if (proposal.action !== 'conflict') proposal.action = 'conflict'; }
-  return { source_sys_id: item.source_sys_id, wb_table: item.wb_table, wb_id: item.wb_id, classification: 'changed', proposal, usage: resp.usage, model };
+  return { source_sys_id: item.source_sys_id, wb_table: item.wb_table, wb_id: item.wb_id, classification: 'changed', inferred: item.inferred || {}, proposal, usage: resp.usage, model };
 }
 
 function reconcileNew(item) {
   const inf = item.inferred || {};
   return {
-    source_sys_id: item.source_sys_id, classification: 'new',
+    source_sys_id: item.source_sys_id, classification: 'new', inferred: inf,
     proposal: { action: 'create', design_type: inf.design_type, name: inf.name, confidence: inf.confidence ?? 0.6, destructive: false,
       rationale: 'Net-new in ServiceNow; not present in the Workbench design.' },
   };
 }
 function reconcileDrift(d) {
   return {
-    source_sys_id: d.source_sys_id, wb_table: d.wb_table, wb_id: d.wb_id, classification: 'drift',
+    source_sys_id: d.source_sys_id, wb_table: d.wb_table, wb_id: d.wb_id, classification: 'drift', inferred: d.inferred || {},
     proposal: { action: 'flag_drift', destructive: false, confidence: 1, name: d.name,
       rationale: 'Present in the Workbench, absent from this ServiceNow capture — flagged for human awareness, NEVER auto-deleted.' },
   };
