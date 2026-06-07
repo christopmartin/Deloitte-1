@@ -103,10 +103,17 @@ const PROVENANCE_FIELDS = {
   source_fluent: { type: 'string', description: 'The raw Fluent code snippet for this exact record, copied verbatim from the source.' },
 };
 const PROVENANCE_FIELDMAP = {
+  source_system: { col: 'source_system' },  // deterministic-only (e.g. 'servicenow'); never model-emitted
   source_sys_id: { col: 'source_sys_id' },
   source_table:  { col: 'source_table' },
   source_scope:  { col: 'source_scope' },
   source_fluent: { col: 'source_fluent' },
+  // source_hash is set DETERMINISTICALLY by the sync engine (Phase F) — the content
+  // hash of the captured ServiceNow artifact — so a later sync's tier-0 pre-diff can
+  // detect "unchanged" and skip the LLM. It is intentionally absent from
+  // PROVENANCE_FIELDS (the model-facing schema), so it is never model-emitted; it only
+  // needs a fieldMap entry so deterministic injection into entity_data materializes it.
+  source_hash:   { col: 'source_hash' },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

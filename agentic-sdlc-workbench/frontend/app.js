@@ -29,6 +29,7 @@ const MODULE_LOADERS = {
   reports: () => import('./modules/reports.js'),
   admin_ai: () => import('./modules/admin_ai.js'),
   admin_best_practices: () => import('./modules/admin_best_practices.js'),
+  servicenow_sync: () => import('./modules/servicenow_sync.js'),
 };
 
 // ============================================================
