@@ -262,11 +262,46 @@ app.get('/api/v1/projects/:id', (req, res) => {
   res.json({ ...project, members });
 });
 
+// ── Clients ──────────────────────────────────────────────────────────────────
+// List active clients (used to populate the New Application client dropdown).
+app.get('/api/v1/clients', (req, res) => {
+  const rows = db.prepare(
+    "SELECT client_id, client_name, client_code FROM asdlc_client WHERE lifecycle_status != 'retired' ORDER BY client_name"
+  ).all();
+  res.json(rows);
+});
+
+// Create a new client (so a brand-new application can be attached to a brand-new customer).
+app.post('/api/v1/clients', (req, res) => {
+  const { client_name, client_code } = req.body || {};
+  if (!client_name || !client_code) {
+    return res.status(400).json({ error: 'client_name and client_code are required' });
+  }
+  const code = String(client_code).trim().toUpperCase();
+  const existing = db.prepare('SELECT * FROM asdlc_client WHERE client_code = ?').get(code);
+  if (existing) return res.status(409).json({ error: `Client code "${code}" already exists.`, client: existing });
+  const id = generateId();
+  const uid = userId(req);
+  db.prepare(`
+    INSERT INTO asdlc_client (client_id, client_name, client_code, created_by, updated_by)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(id, String(client_name).trim(), code, uid, uid);
+  const created = db.prepare('SELECT * FROM asdlc_client WHERE client_id = ?').get(id);
+  auditLog('asdlc_client', id, 'INSERT', null, created, uid);
+  res.status(201).json(created);
+});
+
 app.post('/api/v1/projects', (req, res) => {
   const { client_id, project_name, project_code, stage,
           servicenow_scope, servicenow_sys_app_id, servicenow_instance } = req.body;
   if (!client_id || !project_name || !project_code) {
     return res.status(400).json({ error: 'client_id, project_name and project_code are required' });
+  }
+  // Validate the FK up-front so the caller gets a clear 400 instead of a raw
+  // "FOREIGN KEY constraint failed" 500 when client_id isn't a real client.
+  const clientRow = db.prepare('SELECT client_id FROM asdlc_client WHERE client_id = ?').get(client_id);
+  if (!clientRow) {
+    return res.status(400).json({ error: `Unknown client_id "${client_id}". Pick an existing client or create one first.` });
   }
   const id = generateId();
   const uid = userId(req);

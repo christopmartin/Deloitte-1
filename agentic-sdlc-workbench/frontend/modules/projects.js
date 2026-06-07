@@ -344,7 +344,7 @@ function renderDetail(p, pane) {
   pane.appendChild(body);
 }
 
-function openNewProject(pane) {
+async function openNewProject(pane) {
   pane.innerHTML = '';
 
   const header = el('div', { className: 'pane-header' },
@@ -355,23 +355,52 @@ function openNewProject(pane) {
   const body = el('div', { className: 'pane-body' });
   const form = el('div', { className: 'detail-section' });
 
+  // ── Client selector (dropdown of real clients + "new client" option) ─────────
+  // Replaces the old free-text "Client ID" box that caused FK errors when a name
+  // (or blank) was typed instead of a real client_id UUID.
+  let clients = [];
+  try { clients = await apiFetch('/clients'); } catch (err) { console.warn('[projects] could not load clients:', err.message); }
+
+  const clientGroup = el('div', { className: 'form-group' });
+  clientGroup.appendChild(el('label', { className: 'form-label' }, 'Client *'));
+  const clientSelect = el('select', { className: 'form-input' });
+  clients.forEach(c => clientSelect.appendChild(
+    el('option', { value: c.client_id }, `${c.client_name} (${c.client_code})`)
+  ));
+  clientSelect.appendChild(el('option', { value: '__new__' }, '➕ New client…'));
+  clientGroup.appendChild(clientSelect);
+  form.appendChild(clientGroup);
+
+  // Inline new-client fields (hidden unless "New client" is chosen)
+  const newClientWrap = el('div', { style: { display: 'none', paddingLeft: '12px', borderLeft: '2px solid var(--color-border)', marginBottom: '8px' } });
+  const newClientName = el('input', { type: 'text', className: 'form-input', placeholder: 'e.g. Globex Corporation' });
+  const newClientCode = el('input', { type: 'text', className: 'form-input', placeholder: 'e.g. GLOBEX' });
+  newClientWrap.appendChild(el('div', { className: 'form-group' },
+    el('label', { className: 'form-label' }, 'New Client Name *'), newClientName));
+  newClientWrap.appendChild(el('div', { className: 'form-group' },
+    el('label', { className: 'form-label' }, 'New Client Code *'), newClientCode));
+  form.appendChild(newClientWrap);
+
+  const syncNewClientVisibility = () => {
+    newClientWrap.style.display = clientSelect.value === '__new__' ? 'block' : 'none';
+  };
+  clientSelect.addEventListener('change', syncNewClientVisibility);
+  // If there are no existing clients, default to the new-client path.
+  if (!clients.length) { clientSelect.value = '__new__'; }
+  syncNewClientVisibility();
+
+  // ── Remaining application fields ──────────────────────────────────────────────
   const fields = [
     { key: 'project_name', label: 'Application Name', required: true },
     { key: 'project_code', label: 'Application Code (e.g. ACME-P2)', required: true },
-    { key: 'client_id', label: 'Client ID' },
-    { key: 'stage', label: 'Stage (draft/build/pilot/production)', required: true },
+    { key: 'stage',        label: 'Stage (draft/build/pilot/production)', required: true },
   ];
-
   const inputs = {};
   fields.forEach(f => {
     const group = el('div', { className: 'form-group' });
     group.appendChild(el('label', { className: 'form-label' }, f.label + (f.required ? ' *' : '')));
-    let input;
-    if (f.type === 'textarea') {
-      input = el('textarea', { className: 'form-textarea', rows: '3' });
-    } else {
-      input = el('input', { type: 'text', className: 'form-input' });
-    }
+    const input = el('input', { type: 'text', className: 'form-input' });
+    if (f.key === 'stage') input.value = 'draft';
     inputs[f.key] = input;
     group.appendChild(input);
     form.appendChild(group);
@@ -379,14 +408,29 @@ function openNewProject(pane) {
 
   const saveBtn = el('button', { className: 'btn btn-primary' }, 'Create Application');
   saveBtn.addEventListener('click', async () => {
-    const payload = {};
-    fields.forEach(f => { payload[f.key] = inputs[f.key].value; });
-    if (!payload.project_name) { showToast('Application name is required.', 'error'); return; }
+    const project_name = inputs.project_name.value.trim();
+    const project_code = inputs.project_code.value.trim();
+    if (!project_name) { showToast('Application name is required.', 'error'); return; }
+    if (!project_code) { showToast('Application code is required.', 'error'); return; }
+
     saveBtn.disabled = true;
     try {
+      // Resolve the client_id — creating a new client first if requested.
+      let client_id = clientSelect.value;
+      if (client_id === '__new__') {
+        const cname = newClientName.value.trim();
+        const ccode = newClientCode.value.trim();
+        if (!cname || !ccode) { showToast('New client name and code are required.', 'error'); saveBtn.disabled = false; return; }
+        const newClient = await apiFetch('/clients', {
+          method: 'POST',
+          body: JSON.stringify({ client_name: cname, client_code: ccode }),
+        });
+        client_id = newClient.client_id;
+      }
+
       const created = await apiFetch('/projects', {
         method: 'POST',
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ client_id, project_name, project_code, stage: inputs.stage.value.trim() || 'draft' }),
       });
       allProjects.push(created);
       showToast('Application created.', 'success');
