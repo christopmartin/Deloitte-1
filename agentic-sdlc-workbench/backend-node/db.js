@@ -172,6 +172,23 @@ const MIGRATIONS = [
   "ALTER TABLE asdlc_change_packet_item ADD COLUMN item_decided_by TEXT",
   "ALTER TABLE asdlc_change_packet_item ADD COLUMN item_decided_at TEXT",
 
+  // ── Change-packet origin (ServiceNow round-trip Phase 2 OUTBOUND) ────────────
+  // Distinguishes CPs that came FROM ServiceNow (inbound sync) from Workbench-authored
+  // CPs (manual edits, document ingestion). The outbound SN delta export must NEVER
+  // push inbound-origin CPs back to ServiceNow — that content originated in SN, so
+  // pushing it back is a redundant/destructive round-trip. NULL = Workbench-origin
+  // (outbound-eligible); 'sn_inbound' = came from a ServiceNow sync (excluded outbound).
+  "ALTER TABLE asdlc_change_packet ADD COLUMN cp_origin TEXT",
+  // One-time idempotent backfill for CPs created before this column existed. A CP is
+  // inbound-origin if its summary is the deterministic 'SN to WB synch …' label OR any
+  // of its items carry the deterministic '[SN sync ·' rationale prefix (set by the sync
+  // orchestrator for drift/new/changed items). Runs every boot but only ever touches
+  // still-NULL rows matching those signals, so it converges and is safe to re-run.
+  "UPDATE asdlc_change_packet SET cp_origin = 'sn_inbound' " +
+    "WHERE cp_origin IS NULL AND (" +
+    "summary LIKE 'SN to WB synch%' " +
+    "OR change_packet_id IN (SELECT DISTINCT change_packet_id FROM asdlc_change_packet_item WHERE rationale LIKE '[SN sync %'))",
+
   // ── ServiceNow round-trip (Round 2): Application ↔ ServiceNow app link on the
   // project, so a Workbench Application can be created/linked to a scoped app and
   // re-synced. sn_last_synced_at is stamped after each successful extraction ingest.

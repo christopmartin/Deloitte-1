@@ -5017,15 +5017,17 @@ app.get('/api/v1/projects/:id/servicenow/delta-info', (req, res) => {
       delta_cp_count: 0, update_count: 0, create_count: 0, has_changes: false });
   }
 
+  // Outbound delta EXCLUDES inbound-origin CPs (cp_origin='sn_inbound') — that content
+  // came FROM ServiceNow, so pushing it back would be a redundant/destructive round-trip.
   const sinceTs = project.sn_last_synced_at || null;
   let deltaCps;
   if (sinceTs) {
     deltaCps = db.prepare(
-      "SELECT change_packet_id FROM asdlc_change_packet WHERE project_id = ? AND status = 'approved' AND updated_at > ?"
+      "SELECT change_packet_id FROM asdlc_change_packet WHERE project_id = ? AND status = 'approved' AND (cp_origin IS NULL OR cp_origin != 'sn_inbound') AND updated_at > ?"
     ).all(req.params.id, sinceTs);
   } else {
     deltaCps = db.prepare(
-      "SELECT change_packet_id FROM asdlc_change_packet WHERE project_id = ? AND status = 'approved'"
+      "SELECT change_packet_id FROM asdlc_change_packet WHERE project_id = ? AND status = 'approved' AND (cp_origin IS NULL OR cp_origin != 'sn_inbound')"
     ).all(req.params.id);
   }
 
@@ -5080,12 +5082,14 @@ app.get('/api/v1/projects/:id/servicenow/delta-export', (req, res) => {
     return res.status(400).json({ error: 'Project is not linked to a ServiceNow scope.' });
   }
 
+  // Outbound delta EXCLUDES inbound-origin CPs (cp_origin='sn_inbound') — that content
+  // came FROM ServiceNow, so pushing it back would be a redundant/destructive round-trip.
   const sinceTs = project.sn_last_synced_at || null;
   const cpQuery = sinceTs
     ? `SELECT cp.*, (SELECT COUNT(*) FROM asdlc_change_packet_item WHERE change_packet_id = cp.change_packet_id AND item_status != 'rejected') AS item_count
-       FROM asdlc_change_packet cp WHERE cp.project_id = ? AND cp.status = 'approved' AND cp.updated_at > ? ORDER BY cp.updated_at ASC`
+       FROM asdlc_change_packet cp WHERE cp.project_id = ? AND cp.status = 'approved' AND (cp.cp_origin IS NULL OR cp.cp_origin != 'sn_inbound') AND cp.updated_at > ? ORDER BY cp.updated_at ASC`
     : `SELECT cp.*, (SELECT COUNT(*) FROM asdlc_change_packet_item WHERE change_packet_id = cp.change_packet_id AND item_status != 'rejected') AS item_count
-       FROM asdlc_change_packet cp WHERE cp.project_id = ? AND cp.status = 'approved' ORDER BY cp.updated_at ASC`;
+       FROM asdlc_change_packet cp WHERE cp.project_id = ? AND cp.status = 'approved' AND (cp.cp_origin IS NULL OR cp.cp_origin != 'sn_inbound') ORDER BY cp.updated_at ASC`;
   const deltaCps = sinceTs
     ? db.prepare(cpQuery).all(req.params.id, sinceTs)
     : db.prepare(cpQuery).all(req.params.id);
@@ -6418,10 +6422,10 @@ app.post('/api/v1/ingest-documents/:id/promote', (req, res) => {
     INSERT INTO asdlc_change_packet
       (change_packet_id, project_id, packet_code, status, summary,
        source_timestamp, conflict_classification, risk_level, recommended_action,
-       ingest_id, visibility_scope, created_by, created_at, updated_at)
-    VALUES (?,?,?,'pending_review',?,datetime('now'),?,?,'review',?,'PROJECT',?,datetime('now'),datetime('now'))
+       ingest_id, cp_origin, visibility_scope, created_by, created_at, updated_at)
+    VALUES (?,?,?,'pending_review',?,datetime('now'),?,?,'review',?,?,'PROJECT',?,datetime('now'),datetime('now'))
   `).run(cpId, doc.project_id, cpCode, summary, CONFLICT_BY_RANK[worstRank] || 'net_new', hasChange ? 'med' : 'low',
-         req.params.id, uid);
+         req.params.id, isSnSync ? 'sn_inbound' : null, uid);
 
   const insertItem = db.prepare(`
     INSERT INTO asdlc_change_packet_item
@@ -6655,8 +6659,8 @@ app.post('/api/v1/projects/:id/servicenow/sync', async (req, res) => {
     db.prepare(`
       INSERT INTO asdlc_change_packet
         (change_packet_id, project_id, packet_code, status, summary, source_timestamp,
-         conflict_classification, risk_level, recommended_action, visibility_scope, created_by, created_at, updated_at)
-      VALUES (?,?,?,?,?,datetime('now'),?,?,?, 'PROJECT', ?, datetime('now'), datetime('now'))
+         conflict_classification, risk_level, recommended_action, cp_origin, visibility_scope, created_by, created_at, updated_at)
+      VALUES (?,?,?,?,?,datetime('now'),?,?,?, 'sn_inbound', 'PROJECT', ?, datetime('now'), datetime('now'))
     `).run(cpId, project.project_id, cpCode, status, summary, 'modifies_existing', 'med',
            status === 'approved' ? 'apply' : 'review', uid);
     const ins = db.prepare(`
