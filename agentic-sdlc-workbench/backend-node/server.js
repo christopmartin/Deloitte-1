@@ -6255,38 +6255,44 @@ function buildExportMarkdown(project, baseline, sections, data) {
 // AGENT INGESTION — process / extractions / clarifications / promote
 // ──────────────────────────────────────────────
 
-// Trigger agent processing for one document
-app.post('/api/v1/ingest-documents/:id/process', async (req, res) => {
-  try {
-    const doc = db.prepare('SELECT * FROM asdlc_ingest_document WHERE ingest_id = ?').get(req.params.id);
-    if (!doc) return res.status(404).json({ error: 'Ingest document not found' });
-    if (doc.lifecycle_status === 'cancelled') return res.status(409).json({ error: 'Document is cancelled — restore it before processing.' });
+// Trigger agent processing for one document.
+// NON-BLOCKING: marks the document 'processing', returns 202 immediately, and runs the
+// (multi-minute) extraction in the background. The client polls GET /:id until the status
+// leaves 'processing' (→ staged | review_required | failed). Any failure — including file
+// text extraction — is persisted to the document (ingest_status='failed' + processing_notes)
+// so the poll surfaces it; it is never lost in a request that already returned.
+app.post('/api/v1/ingest-documents/:id/process', (req, res) => {
+  const id = req.params.id;
+  const doc = db.prepare('SELECT * FROM asdlc_ingest_document WHERE ingest_id = ?').get(id);
+  if (!doc) return res.status(404).json({ error: 'Ingest document not found' });
+  if (doc.lifecycle_status === 'cancelled') return res.status(409).json({ error: 'Document is cancelled — restore it before processing.' });
+  if (doc.ingest_status === 'processing') return res.status(409).json({ error: 'Document is already being processed.' });
 
-    // If a file was uploaded and raw_text hasn't been extracted yet, do it now
-    if (doc.file_path && !doc.raw_text) {
-      console.log(`[process] Extracting text from file: ${doc.file_path}`);
-      try {
+  // Mark 'processing' BEFORE responding so the client's immediate poll sees it (no race).
+  db.prepare("UPDATE asdlc_ingest_document SET ingest_status='processing', processing_notes=NULL, updated_at=datetime('now') WHERE ingest_id=?").run(id);
+  res.status(202).json({ status: 'processing', ingest_id: id });
+
+  // Fire-and-forget the actual work; persist any failure to the document.
+  (async () => {
+    try {
+      // First run on an uploaded file: extract its text.
+      if (doc.file_path && !doc.raw_text) {
+        console.log(`[process] Extracting text from file: ${doc.file_path}`);
         const { extractText } = require('./agent/document-reader');
         const rawText = await extractText(doc.file_path, doc.file_type);
         db.prepare("UPDATE asdlc_ingest_document SET raw_text = ?, updated_at = datetime('now') WHERE ingest_id = ?")
-          .run(rawText, req.params.id);
-        console.log(`[process] Text extracted — ${rawText.length} chars stored for ingest ${req.params.id}`);
-      } catch (extractErr) {
-        console.error('[process] Text extraction failed:', extractErr.message);
-        // Mark as failed so the user sees the error rather than silently running stub on empty text
-        db.prepare("UPDATE asdlc_ingest_document SET ingest_status = 'failed', processing_notes = ?, updated_at = datetime('now') WHERE ingest_id = ?")
-          .run(`Text extraction failed: ${extractErr.message}`, req.params.id);
-        return res.status(422).json({ error: `Text extraction failed: ${extractErr.message}` });
+          .run(rawText, id);
+        console.log(`[process] Text extracted — ${rawText.length} chars stored for ingest ${id}`);
       }
+      const { processDocument } = require('./agent/processor');
+      const result = await processDocument(id);
+      console.log(`[process] Done — ingest ${id}: ${JSON.stringify(result && { staged: result.extractions_staged, status: result.new_status })}`);
+    } catch (err) {
+      console.error('[process:async]', err.message);
+      db.prepare("UPDATE asdlc_ingest_document SET ingest_status='failed', processing_notes=?, updated_at=datetime('now') WHERE ingest_id=?")
+        .run(String((err && err.message) || err).slice(0, 1000), id);
     }
-
-    const { processDocument } = require('./agent/processor');
-    const result = await processDocument(req.params.id);
-    res.json(result);
-  } catch (err) {
-    console.error('[process]', err.message);
-    res.status(500).json({ error: err.message });
-  }
+  })();
 });
 
 // Get staged extractions
