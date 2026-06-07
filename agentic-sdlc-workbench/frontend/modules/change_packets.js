@@ -606,6 +606,134 @@ function parseItemJson(val) {
   try { return JSON.parse(val); } catch { return null; }
 }
 
+// ── ServiceNow sync plain-English diff helpers ────────────────────────────────
+
+/**
+ * Parse the structured rationale string written by the SN sync engine.
+ * Format (conflict):
+ *   [SN sync · conflict] reviewer verdict = X — routing · needs human: f1 (kind), f2 (kind) · explanation
+ * Format (new / changed):
+ *   [SN sync · new] confidence 0.62 < threshold 0.75 — routing
+ */
+function parseSNSyncRationale(rationale) {
+  if (!rationale || !rationale.startsWith('[SN sync')) return null;
+  const typeMatch = rationale.match(/^\[SN sync · (\w+)\]/);
+  const type = typeMatch ? typeMatch[1] : 'unknown';
+  const body = rationale.replace(/^\[SN sync · \w+\]\s*/, '');
+  const parts = body.split(' · ');
+  const header = parts[0] || '';
+
+  const confMatch   = header.match(/conf(?:idence)?\s+([\d.]+)/i);
+  const confidence  = confMatch ? parseFloat(confMatch[1]) : null;
+  const verdictMatch = header.match(/verdict\s*=\s*(\w+)/i);
+  const verdict     = verdictMatch ? verdictMatch[1] : null;
+
+  // "needs human: scope (modify), instructions (modify)"
+  let conflictingFields = [];
+  const needsPart = parts.find(p => p.trim().startsWith('needs human:'));
+  if (needsPart) {
+    conflictingFields = needsPart.replace(/^needs human:\s*/i, '').split(',').map(f => f.trim()).filter(Boolean);
+  }
+
+  const expStart = needsPart ? (parts.indexOf(needsPart) + 1) : 1;
+  const explanation = parts.slice(expStart).join(' · ').trim();
+
+  return { type, confidence, verdict, conflictingFields, explanation, header };
+}
+
+const SN_FIELD_LABELS = {
+  scope: 'Scope', instructions: 'Instructions', name: 'Name', description: 'Description',
+  goals: 'Goals', done_criteria: 'Done Criteria', design_risks: 'Design Risks',
+  contract: 'Contract / Purpose', role: 'Role', type: 'Type',
+};
+
+function renderSNSyncDiff(parsed, oldData, newData) {
+  const isConflict = parsed.type === 'conflict';
+  const borderColor = isConflict ? 'var(--color-warn, #f59e0b)' : 'var(--color-accent)';
+  const bgColor     = isConflict ? 'var(--color-warn-bg, #fffbeb)' : 'var(--color-accent-light, #eef6ff)';
+  const icon        = isConflict ? '⚠' : (parsed.type === 'new' ? '＋' : '↻');
+  const label       = isConflict
+    ? 'ServiceNow ↔ Workbench Conflict'
+    : parsed.type === 'new' ? 'New Record from ServiceNow' : 'Updated from ServiceNow';
+
+  const wrap = el('div', { style: `margin-top:10px;border-radius:6px;overflow:hidden;border:1px solid ${borderColor}` });
+
+  // Banner bar
+  const bar = el('div', { style: `display:flex;align-items:center;gap:8px;padding:6px 12px;background:${bgColor};border-bottom:1px solid ${borderColor}` });
+  bar.appendChild(el('span', { style: `color:${borderColor};font-weight:700;font-size:12px` }, `${icon}  ${label}`));
+  if (parsed.confidence !== null) {
+    const pct = Math.round(parsed.confidence * 100);
+    const confColor = pct < 75 ? 'var(--color-warn,#b45309)' : 'var(--color-success,#15803d)';
+    bar.appendChild(el('span', { style: `margin-left:auto;font-size:11px;color:${confColor};font-weight:600` }, `AI Agent confidence: ${pct}%`));
+  }
+  wrap.appendChild(bar);
+
+  const content = el('div', { style: 'padding:10px 12px' });
+
+  // Conflict: show before/after for each conflicting field
+  if (isConflict && parsed.conflictingFields.length && oldData) {
+    const snProposed = (newData && newData._sn_proposed) ? newData._sn_proposed : null;
+
+    const intro = el('div', { style: 'font-size:12px;font-weight:600;color:var(--color-text);margin-bottom:8px' },
+      `ServiceNow proposes changes to ${parsed.conflictingFields.length} field${parsed.conflictingFields.length !== 1 ? 's' : ''}:`);
+    content.appendChild(intro);
+
+    parsed.conflictingFields.forEach(fieldEntry => {
+      const fieldKey   = (fieldEntry.match(/^(\w+)/) || [])[1] || fieldEntry;
+      const changeKind = (fieldEntry.match(/\((\w+)\)/) || [])[1] || 'modify';
+      const fieldLabel = SN_FIELD_LABELS[fieldKey] || fieldKey;
+      const currentVal = oldData[fieldKey];
+      const proposedVal = snProposed ? snProposed[fieldKey] : null;
+
+      const row = el('div', { style: 'margin-bottom:10px;border-radius:4px;border:1px solid var(--color-border);overflow:hidden' });
+
+      // Field header
+      const rowHdr = el('div', { style: 'display:flex;align-items:center;gap:8px;padding:5px 10px;background:var(--color-bg)' });
+      rowHdr.appendChild(el('span', { style: 'font-size:11px;font-weight:700;color:var(--color-text)' }, fieldLabel));
+      rowHdr.appendChild(el('span', { className: 'tag tag-warn', style: 'font-size:10px' }, changeKind));
+      row.appendChild(rowHdr);
+
+      const cols = el('div', { style: `display:grid;grid-template-columns:1fr 1fr;gap:0` });
+
+      // Left: Current Workbench value
+      const leftCol = el('div', { style: 'padding:8px 10px;border-right:1px solid var(--color-border);background:var(--color-bg-card,#fff)' });
+      leftCol.appendChild(el('div', { style: 'font-size:10px;font-weight:700;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px' }, '📋 Current (Workbench)'));
+      if (currentVal !== undefined && currentVal !== null && currentVal !== '') {
+        const valStr = Array.isArray(currentVal) ? currentVal.join('; ') : String(currentVal);
+        leftCol.appendChild(el('div', { style: 'font-size:12px;color:var(--color-text);line-height:1.55;word-break:break-word;max-height:140px;overflow:auto' }, valStr.slice(0, 600)));
+      } else {
+        leftCol.appendChild(el('div', { style: 'font-size:11px;color:var(--color-text-muted);font-style:italic' }, '(empty)'));
+      }
+      cols.appendChild(leftCol);
+
+      // Right: Proposed ServiceNow value
+      const rightCol = el('div', { style: 'padding:8px 10px;background:var(--color-accent-light,#eef6ff)' });
+      rightCol.appendChild(el('div', { style: 'font-size:10px;font-weight:700;color:var(--color-accent);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px' }, '🔄 Proposed (ServiceNow)'));
+      if (proposedVal !== undefined && proposedVal !== null && proposedVal !== '') {
+        const valStr = Array.isArray(proposedVal) ? proposedVal.join('; ') : String(proposedVal);
+        rightCol.appendChild(el('div', { style: 'font-size:12px;color:var(--color-text);line-height:1.55;word-break:break-word;max-height:140px;overflow:auto' }, valStr.slice(0, 600)));
+      } else {
+        rightCol.appendChild(el('div', { style: 'font-size:11px;color:var(--color-text-muted);font-style:italic' }, '(not stored — approve to see ServiceNow value)'));
+      }
+      cols.appendChild(rightCol);
+
+      row.appendChild(cols);
+      content.appendChild(row);
+    });
+  }
+
+  // AI Agent analysis (the reconciler/reviewer explanation)
+  if (parsed.explanation) {
+    const analysisWrap = el('div', { style: 'margin-top:8px' });
+    analysisWrap.appendChild(el('div', { style: 'font-size:10px;font-weight:700;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px' }, '🤖 AI Agent Analysis'));
+    analysisWrap.appendChild(el('div', { style: 'font-size:12px;color:var(--color-text);line-height:1.65;font-style:italic' }, parsed.explanation));
+    content.appendChild(analysisWrap);
+  }
+
+  wrap.appendChild(content);
+  return wrap;
+}
+
 function entityDisplayName(entityType, data) {
   if (!data) return null;
   return data.title || data.name || data.rule_name || data.gate_name ||
@@ -613,23 +741,40 @@ function entityDisplayName(entityType, data) {
     (data.role && data.want ? `${data.role}: ${data.want}` : null);
 }
 
-function renderChangeItem(item) {
+/**
+ * Render a single CP item card.
+ * @param {object} item   - the CP item record (may include item_status / decision fields)
+ * @param {string} cpStatus - parent CP's status (controls whether action buttons show)
+ * @param {string} cpId   - parent CP id (not used currently but kept for future)
+ * @param {Function} onDecision - called with server response after approve/reject
+ */
+function renderChangeItem(item, cpStatus, cpId, onDecision) {
   const op = (item.operation || 'create').toLowerCase();
   const opCfg = OP_CONFIG[op] || OP_CONFIG.create;
   const newData = parseItemJson(item.new_value);
   const oldData = parseItemJson(item.old_value);
   const keyFields = ITEM_KEY_FIELDS[item.entity_type] || ['title', 'name'];
+  const itemDecision = item.item_status && item.item_status !== 'pending' ? item.item_status : null;
 
-  const card = el('div', { style: 'border:1px solid var(--color-border);border-radius:6px;margin-bottom:10px;overflow:hidden' });
+  // Card border colour reflects decision state
+  const cardBorder = itemDecision === 'approved'
+    ? '1px solid var(--color-success, #16a34a)'
+    : itemDecision === 'rejected'
+      ? '1px solid var(--color-danger)'
+      : '1px solid var(--color-border)';
 
-  // Card header: operation badge + entity type + name
+  const card = el('div', { style: `border:${cardBorder};border-radius:6px;margin-bottom:10px;overflow:hidden` });
+
+  // Card header: operation badge + entity type + name + decision badge
   const displayName = entityDisplayName(item.entity_type, newData) ||
     entityDisplayName(item.entity_type, oldData) || '—';
   const hdr = el('div', { style: 'display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--color-bg)' });
   hdr.appendChild(el('span', { className: `tag ${opCfg.cls}`, style: 'font-family:monospace;font-size:11px;white-space:nowrap' }, opCfg.label));
   hdr.appendChild(el('span', { style: 'font-size:11px;color:var(--color-text-muted);font-family:monospace' }, item.entity_type));
   hdr.appendChild(el('span', { style: 'font-weight:600;font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, displayName));
-  if (item.applied_at) hdr.appendChild(el('span', { className: 'tag tag-ok', style: 'font-size:10px' }, '✓ applied'));
+  if (item.applied_at && !itemDecision) hdr.appendChild(el('span', { className: 'tag tag-ok', style: 'font-size:10px' }, '✓ applied'));
+  if (itemDecision === 'approved') hdr.appendChild(el('span', { className: 'tag tag-ok', style: 'font-size:10px' }, '✓ Approved'));
+  if (itemDecision === 'rejected') hdr.appendChild(el('span', { className: 'tag tag-danger', style: 'font-size:10px' }, '✗ Rejected'));
   card.appendChild(hdr);
 
   // Body: what will happen
@@ -658,7 +803,7 @@ function renderChangeItem(item) {
     renderFieldTable(bdy, newData, keyFields, 'Fields that will be created');
   }
 
-  // Conflict classification + rationale
+  // Conflict classification + rationale (non-SN items)
   if (newData?.conflict_classification && newData.conflict_classification !== 'net_new') {
     const cls = newData.conflict_classification.replace(/_/g, ' ');
     bdy.appendChild(el('div', { style: 'margin-top:8px;padding:6px 8px;background:var(--color-accent-light);border-radius:4px;font-size:11px' },
@@ -668,15 +813,25 @@ function renderChangeItem(item) {
     ));
   }
 
-  // Confidence + rationale
-  const conf = newData?.confidence;
-  if (conf != null && conf < 1) {
-    bdy.appendChild(el('div', { style: 'margin-top:6px;font-size:11px;color:var(--color-text-muted)' },
-      `Extraction confidence: ${Math.round(conf * 100)}%`));
-  }
-  if (item.rationale) {
-    const ratDiv = el('div', { style: 'margin-top:6px;font-size:11px;color:var(--color-text-muted);font-style:italic' }, item.rationale.slice(0, 200));
-    bdy.appendChild(ratDiv);
+  // ── SN sync: rich plain-English diff instead of raw rationale ──────────────
+  if (item.rationale && item.rationale.startsWith('[SN sync')) {
+    const parsed = parseSNSyncRationale(item.rationale);
+    if (parsed) {
+      bdy.appendChild(renderSNSyncDiff(parsed, oldData, newData));
+    } else {
+      // Fallback: show full rationale text
+      bdy.appendChild(el('div', { style: 'margin-top:6px;font-size:11px;color:var(--color-text-muted);font-style:italic' }, item.rationale));
+    }
+  } else {
+    // Non-SN items: show confidence + truncated rationale as before
+    const conf = newData?.confidence;
+    if (conf != null && conf < 1) {
+      bdy.appendChild(el('div', { style: 'margin-top:6px;font-size:11px;color:var(--color-text-muted)' },
+        `Extraction confidence: ${Math.round(conf * 100)}%`));
+    }
+    if (item.rationale) {
+      bdy.appendChild(el('div', { style: 'margin-top:6px;font-size:11px;color:var(--color-text-muted);font-style:italic' }, item.rationale.slice(0, 200)));
+    }
   }
 
   // "Show all fields" toggle
@@ -714,6 +869,89 @@ function renderChangeItem(item) {
       navigate('design_review');
     });
     bdy.appendChild(drBtn);
+  }
+
+  // ── Per-item decision footer ─────────────────────────────────────────────────
+  const canDecide = ['pending_review', 'in_review'].includes(cpStatus) && !item.applied_at;
+
+  if (itemDecision) {
+    // Already decided: show who/when/notes
+    const decRow = el('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;padding:8px 10px;border-top:1px solid var(--color-border);background:var(--color-bg)' });
+    const decColor = itemDecision === 'approved' ? 'var(--color-success,#15803d)' : 'var(--color-danger)';
+    decRow.appendChild(el('span', { style: `font-size:12px;font-weight:700;color:${decColor}` },
+      itemDecision === 'approved' ? '✓ Approved' : '✗ Rejected'));
+    if (item.item_decided_by) decRow.appendChild(el('span', { style: 'font-size:11px;color:var(--color-text-muted)' }, `by ${item.item_decided_by}`));
+    if (item.item_decided_at)  decRow.appendChild(el('span', { style: 'font-size:11px;color:var(--color-text-muted)' }, formatDateTime(item.item_decided_at)));
+    if (item.item_decision_notes) decRow.appendChild(el('span', { style: 'font-size:11px;color:var(--color-text-muted);font-style:italic' }, `— "${item.item_decision_notes}"`));
+    bdy.appendChild(decRow);
+  } else if (canDecide && onDecision) {
+    // Pending + CP is still open: show Approve / Reject buttons
+    const confirmArea = el('div');
+    const footer = el('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;padding:8px 10px;border-top:1px solid var(--color-border);background:var(--color-bg)' });
+    footer.appendChild(el('span', { style: 'font-size:11px;color:var(--color-text-muted);flex:1' }, 'Decision:'));
+
+    // Keep on List label (implicit default)
+    footer.appendChild(el('span', { className: 'tag tag-muted', style: 'font-size:10px' }, 'Keep on List'));
+
+    // Approve button
+    const approveBtn = el('button', { className: 'btn btn-sm btn-success' }, '✓ Approve');
+    approveBtn.addEventListener('click', () => {
+      confirmArea.innerHTML = '';
+      const conf = el('div', { style: 'display:flex;align-items:center;gap:8px;padding:6px 0;font-size:12px' });
+      conf.appendChild(el('span', { style: 'flex:1' }, 'Apply this item to the design now?'));
+      const yesBtn = el('button', { className: 'btn btn-sm btn-success' }, 'Yes, Approve & Apply');
+      const noBtn  = el('button', { className: 'btn btn-sm btn-ghost'   }, 'Cancel');
+      yesBtn.addEventListener('click', async () => {
+        yesBtn.disabled = true;
+        try {
+          const result = await apiFetch(`/change-packet-items/${item.change_packet_item_id}/approve`, { method: 'POST' });
+          showToast('✓ Item approved and applied to design.', 'success');
+          onDecision(result);
+        } catch (err) { showToast(`Error: ${err.message}`, 'error'); }
+        finally { yesBtn.disabled = false; }
+      });
+      noBtn.addEventListener('click', () => { confirmArea.innerHTML = ''; });
+      conf.appendChild(yesBtn);
+      conf.appendChild(noBtn);
+      confirmArea.appendChild(conf);
+    });
+
+    // Reject button
+    const rejectBtn = el('button', { className: 'btn btn-sm btn-danger' }, '✗ Reject');
+    rejectBtn.addEventListener('click', () => {
+      confirmArea.innerHTML = '';
+      const notesInput = el('textarea', { className: 'form-input', rows: '2',
+        placeholder: 'Reason for rejecting this item (optional)…',
+        style: 'width:100%;margin-bottom:6px;resize:vertical;min-height:40px;font-size:12px' });
+      const conf = el('div', { style: 'padding:6px 0' });
+      conf.appendChild(el('div', { style: 'font-size:12px;font-weight:600;margin-bottom:4px' }, 'Reject this item?'));
+      conf.appendChild(notesInput);
+      const btnRow = el('div', { style: 'display:flex;gap:8px' });
+      const yesBtn = el('button', { className: 'btn btn-sm btn-danger' }, 'Yes, Reject');
+      const noBtn  = el('button', { className: 'btn btn-sm btn-ghost'  }, 'Cancel');
+      yesBtn.addEventListener('click', async () => {
+        yesBtn.disabled = true;
+        try {
+          const result = await apiFetch(`/change-packet-items/${item.change_packet_item_id}/reject`, {
+            method: 'POST',
+            body: JSON.stringify({ decision_notes: notesInput.value.trim() || undefined }),
+          });
+          showToast('Item rejected.', 'success');
+          onDecision(result);
+        } catch (err) { showToast(`Error: ${err.message}`, 'error'); }
+        finally { yesBtn.disabled = false; }
+      });
+      noBtn.addEventListener('click', () => { confirmArea.innerHTML = ''; });
+      btnRow.appendChild(yesBtn);
+      btnRow.appendChild(noBtn);
+      conf.appendChild(btnRow);
+      confirmArea.appendChild(conf);
+    });
+
+    footer.appendChild(approveBtn);
+    footer.appendChild(rejectBtn);
+    bdy.appendChild(footer);
+    bdy.appendChild(confirmArea);
   }
 
   card.appendChild(bdy);
@@ -866,8 +1104,34 @@ function renderDetail(p, pane) {
       counts.delete ? `${counts.delete} delete` : '',
     ].filter(Boolean).join(' · ');
 
+    // Item-level decision progress banner (shown when CP is still open)
+    const totalItems   = items.length;
+    const approvedCnt  = items.filter(i => i.item_status === 'approved').length;
+    const rejectedCnt  = items.filter(i => i.item_status === 'rejected').length;
+    const decidedCnt   = approvedCnt + rejectedCnt;
+    const pendingCnt   = totalItems - decidedCnt;
+
+    if (totalItems > 0 && p.status === 'pending_review') {
+      const progressBanner = el('div', {
+        style: 'display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;padding:8px 12px;background:var(--color-bg);border:1px solid var(--color-border);border-radius:6px;font-size:12px',
+      });
+      progressBanner.appendChild(el('span', { style: 'font-weight:600;color:var(--color-text)' },
+        `${decidedCnt} of ${totalItems} item${totalItems !== 1 ? 's' : ''} reviewed`));
+      if (approvedCnt) progressBanner.appendChild(el('span', { className: 'tag tag-ok' }, `${approvedCnt} approved`));
+      if (rejectedCnt) progressBanner.appendChild(el('span', { className: 'tag tag-danger' }, `${rejectedCnt} rejected`));
+      if (pendingCnt)  progressBanner.appendChild(el('span', { className: 'tag tag-muted' }, `${pendingCnt} pending`));
+      if (decidedCnt > 0 && pendingCnt === 0) {
+        progressBanner.appendChild(el('span', { style: 'margin-left:auto;font-size:11px;color:var(--color-text-muted);font-style:italic' }, 'All items reviewed — use Approve / Reject below to close this packet.'));
+      }
+      diffSection.appendChild(progressBanner);
+    }
+
     diffSection.appendChild(el('h4', {}, `Changes (${items.length} item${items.length !== 1 ? 's' : ''})${summaryParts ? ' — ' + summaryParts : ''}`));
-    items.forEach(item => diffSection.appendChild(renderChangeItem(item)));
+
+    // Reload callback — re-fetches and re-renders the CP detail after any item decision
+    const reloadDetail = () => loadPacketDetail(p, pane);
+
+    items.forEach(item => diffSection.appendChild(renderChangeItem(item, p.status, p.change_packet_id, reloadDetail)));
     body.appendChild(diffSection);
   }
 

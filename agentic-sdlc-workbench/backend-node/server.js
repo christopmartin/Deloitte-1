@@ -505,6 +505,161 @@ app.post('/api/v1/change-packets', (req, res) => {
   res.status(201).json(created);
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-item decisions: approve or reject a single CP item individually.
+// Approve = apply just this item to the design tables immediately.
+// Reject  = mark item as skipped (the CP-level approve will not re-apply it).
+// Both are audit-logged. When ALL items in a CP have been individually decided
+// the CP auto-closes (approved if ≥1 item applied; rejected if all rejected).
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.post('/api/v1/change-packet-items/:itemId/approve', (req, res) => {
+  const uid = userId(req);
+  const item = db.prepare('SELECT * FROM asdlc_change_packet_item WHERE change_packet_item_id = ?').get(req.params.itemId);
+  if (!item) return res.status(404).json({ error: 'Change packet item not found' });
+
+  const cp = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(item.change_packet_id);
+  if (!cp) return res.status(404).json({ error: 'Change packet not found' });
+  if (!['pending_review', 'in_review'].includes(cp.status)) {
+    return res.status(409).json({ error: `Cannot approve item — CP is '${cp.status}'` });
+  }
+  if (item.item_status === 'approved' || item.applied_at) {
+    return res.status(409).json({ error: 'Item has already been approved/applied' });
+  }
+  if (item.item_status === 'rejected') {
+    return res.status(409).json({ error: 'Item is rejected — restore it before approving' });
+  }
+
+  let applyResult;
+  const itemBefore = { ...item };
+
+  db.exec('BEGIN');
+  try {
+    // Apply this single item to the design tables
+    applyResult = applyOneItem(item, cp, uid);
+
+    // Mark item as individually approved
+    db.prepare(`
+      UPDATE asdlc_change_packet_item
+      SET item_status='approved', item_decided_by=?, item_decided_at=datetime('now'), updated_at=datetime('now')
+      WHERE change_packet_item_id=?
+    `).run(uid || 'reviewer', item.change_packet_item_id);
+
+    // Auto-close CP if ALL items in the CP are now decided
+    const allItems = db.prepare(
+      'SELECT item_status FROM asdlc_change_packet_item WHERE change_packet_id = ?'
+    ).all(cp.change_packet_id);
+    const allDecided = allItems.every(i => i.item_status && i.item_status !== 'pending');
+    const anyApproved = allItems.some(i => i.item_status === 'approved');
+    let cpNewStatus = cp.status;
+
+    if (allDecided) {
+      cpNewStatus = anyApproved ? 'approved' : 'rejected';
+      db.prepare(`
+        UPDATE asdlc_change_packet
+        SET status=?,
+            approval_timestamp=CASE WHEN ? = 'approved' THEN datetime('now') ELSE approval_timestamp END,
+            updated_by=?, updated_at=datetime('now'), version=version+1
+        WHERE change_packet_id=?
+      `).run(cpNewStatus, cpNewStatus, uid, cp.change_packet_id);
+
+      if (cpNewStatus === 'approved' && cp.project_id) {
+        db.prepare(
+          "UPDATE asdlc_project SET version=version+1, updated_at=datetime('now'), updated_by=? WHERE project_id=?"
+        ).run(uid, cp.project_id);
+      }
+    }
+
+    db.exec('COMMIT');
+
+    const itemAfter = db.prepare('SELECT * FROM asdlc_change_packet_item WHERE change_packet_item_id = ?').get(item.change_packet_item_id);
+    auditLog('asdlc_change_packet_item', item.change_packet_item_id, 'APPROVE_ITEM', itemBefore, itemAfter, uid);
+    if (allDecided) {
+      const cpAfter = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(cp.change_packet_id);
+      auditLog('asdlc_change_packet', cp.change_packet_id, 'UPDATE', cp, cpAfter, uid);
+    }
+
+    // Fire-and-forget test generation for newly-created testable entities
+    const toGenerate = applyResult.createdTestable || [];
+    if (toGenerate.length) {
+      Promise.allSettled(
+        toGenerate.map(e => generateAndInsertTests(cp.project_id, e.scope, e.entityId, uid))
+      ).catch(e => console.error('[item-approve test-gen]', e.message));
+    }
+
+    const itemFinal = db.prepare('SELECT * FROM asdlc_change_packet_item WHERE change_packet_item_id = ?').get(item.change_packet_item_id);
+    res.json({ item: itemFinal, apply_result: applyResult, cp_status: cpNewStatus });
+  } catch (err) {
+    db.exec('ROLLBACK');
+    console.error('[item-approve]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/v1/change-packet-items/:itemId/reject', (req, res) => {
+  const uid = userId(req);
+  const { decision_notes } = req.body || {};
+  const item = db.prepare('SELECT * FROM asdlc_change_packet_item WHERE change_packet_item_id = ?').get(req.params.itemId);
+  if (!item) return res.status(404).json({ error: 'Change packet item not found' });
+
+  const cp = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(item.change_packet_id);
+  if (!cp) return res.status(404).json({ error: 'Change packet not found' });
+  if (!['pending_review', 'in_review'].includes(cp.status)) {
+    return res.status(409).json({ error: `Cannot reject item — CP is '${cp.status}'` });
+  }
+  if (item.applied_at) {
+    return res.status(409).json({ error: 'Item has already been applied and cannot be rejected' });
+  }
+
+  const itemBefore = { ...item };
+
+  db.exec('BEGIN');
+  try {
+    db.prepare(`
+      UPDATE asdlc_change_packet_item
+      SET item_status='rejected',
+          item_decision_notes=COALESCE(?, item_decision_notes),
+          item_decided_by=?, item_decided_at=datetime('now'), updated_at=datetime('now')
+      WHERE change_packet_item_id=?
+    `).run(decision_notes || null, uid || 'reviewer', item.change_packet_item_id);
+
+    // Auto-close CP if ALL items now decided
+    const allItems = db.prepare(
+      'SELECT item_status FROM asdlc_change_packet_item WHERE change_packet_id = ?'
+    ).all(cp.change_packet_id);
+    const allDecided = allItems.every(i => i.item_status && i.item_status !== 'pending');
+    const anyApproved = allItems.some(i => i.item_status === 'approved');
+    let cpNewStatus = cp.status;
+
+    if (allDecided) {
+      cpNewStatus = anyApproved ? 'approved' : 'rejected';
+      db.prepare(`
+        UPDATE asdlc_change_packet
+        SET status=?,
+            approval_timestamp=CASE WHEN ? = 'approved' THEN datetime('now') ELSE approval_timestamp END,
+            updated_by=?, updated_at=datetime('now'), version=version+1
+        WHERE change_packet_id=?
+      `).run(cpNewStatus, cpNewStatus, uid, cp.change_packet_id);
+    }
+
+    db.exec('COMMIT');
+
+    const itemAfter = db.prepare('SELECT * FROM asdlc_change_packet_item WHERE change_packet_item_id = ?').get(item.change_packet_item_id);
+    auditLog('asdlc_change_packet_item', item.change_packet_item_id, 'REJECT_ITEM', itemBefore, itemAfter, uid);
+    if (allDecided) {
+      const cpAfter = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(cp.change_packet_id);
+      auditLog('asdlc_change_packet', cp.change_packet_id, 'UPDATE', cp, cpAfter, uid);
+    }
+
+    const itemFinal = db.prepare('SELECT * FROM asdlc_change_packet_item WHERE change_packet_item_id = ?').get(item.change_packet_item_id);
+    res.json({ item: itemFinal, cp_status: cpNewStatus });
+  } catch (err) {
+    db.exec('ROLLBACK');
+    console.error('[item-reject]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 /**
  * Approve a change packet and materialize it — the shared core used by BOTH the
  * /change-packets/:id/approve HTTP handler and the ServiceNow sync engine's
@@ -834,6 +989,66 @@ function markItemApplied(itemId, note) {
 // Registry entity_type → test_case.scope (the entities tests can target).
 const TESTABLE_SCOPE_OF = { use_case: 'use_case', workflow: 'workflow', agent_spec: 'agent', tool: 'tool' };
 
+/**
+ * Apply a single CP item using the same materializer as applyChangePacket, but
+ * for ONE item only. Callers must wrap in a transaction. Returns the same result
+ * shape as applyChangePacket so callers can treat it uniformly.
+ */
+function applyOneItem(item, cp, uid) {
+  const result = { applied: 0, updated: 0, deleted: 0, skipped: 0, errors: [], createdTestable: [] };
+
+  const fp = item.field_path || '';
+  if (!new RegExp(`^${item.entity_type}\\.(new_record|create|update|delete)$`).test(fp)) {
+    result.skipped++;
+    return result;
+  }
+
+  const entity = registry.byEntityType[item.entity_type];
+  let data; try { data = JSON.parse(item.new_value); } catch { data = {}; }
+
+  if (!entity || !entity.materializable) {
+    markItemApplied(item.change_packet_item_id, '[not materialized — no target table in v1]');
+    result.skipped++;
+    return result;
+  }
+
+  const op = item.operation || 'create';
+  const idMap = {};
+  try {
+    if (op === 'delete') {
+      const r = mtDelete(entity, item, uid);
+      if (r.blocked) {
+        result.errors.push({ item: item.change_packet_item_id, entity_type: item.entity_type, reason: r.reason });
+        return result;
+      }
+      result.deleted++;
+    } else if (op === 'update') {
+      const r = mtUpdate(entity, data, item, uid);
+      result.updated++;
+      if (r && r.protected && r.protected.length) {
+        markItemApplied(item.change_packet_item_id, `[non-destructive: kept richer Workbench values for ${r.protected.join(', ')}]`);
+      }
+      materializeRequirementLinks(entity.entity_type, item.entity_id, data, cp.project_id, uid);
+    } else {
+      const newId = mtCreate(entity, data, cp.project_id, uid, idMap, item);
+      result.applied++;
+      materializeRequirementLinks(entity.entity_type, newId, data, cp.project_id, uid);
+      const scope = TESTABLE_SCOPE_OF[entity.entity_type];
+      if (scope) result.createdTestable.push({ scope, entityId: newId });
+    }
+    if (result.applied + result.updated + result.deleted > 0) {
+      markItemApplied(item.change_packet_item_id, null);
+    }
+  } catch (err) {
+    if (err instanceof SoftSkip) {
+      result.errors.push({ item: item.change_packet_item_id, entity_type: item.entity_type, reason: err.message });
+    } else {
+      throw err;  // fatal — caller must roll back
+    }
+  }
+  return result;
+}
+
 // Insert AI-generated test cases for one entity (draft, source='generated').
 // Used both at materialize time and on demand. Dedupes by title per entity so
 // re-running doesn't pile up copies. Never throws; returns the count inserted.
@@ -935,6 +1150,8 @@ function applyChangePacket(cpId, uid) {
 
   for (const item of ordered) {
     if (item.applied_at) { result.skipped++; continue; }
+    // Skip items the reviewer individually rejected — they opted out of this item
+    if (item.item_status === 'rejected') { result.skipped++; continue; }
 
     // Only materialize items produced by the AI ingest pipeline (field_path
     // "<type>.new_record|create|update|delete"). Skip legacy/manual items —
@@ -6017,11 +6234,19 @@ function snPlanItemToCpSpec(pl, scope) {
   const proposal = pl.proposal || {};
   const entity_data = { ...prov };
   const filled = [], deferred = [];
+  const snProposed = {};   // proposed values for conflict fields — stored so the UI can show before/after
   for (const fc of (proposal.field_changes || [])) {
     const key = colToDataKey(entity, fc.field);
-    if (fc.change_kind === 'fill_blank' && key) { entity_data[key] = fc.proposed; filled.push(fc.field); }
-    else deferred.push(`${fc.field} (${fc.change_kind})`);
+    if (fc.change_kind === 'fill_blank' && key) {
+      entity_data[key] = fc.proposed;
+      filled.push(fc.field);
+    } else {
+      deferred.push(`${fc.field} (${fc.change_kind})`);
+      // Preserve the proposed value so the reviewer can compare old vs proposed
+      if (fc.proposed !== undefined && fc.proposed !== null && key) snProposed[key] = fc.proposed;
+    }
   }
+  if (Object.keys(snProposed).length) entity_data._sn_proposed = snProposed;
   const parts = [`[SN sync · ${proposal.action || 'changed'}] ${dec.reason}${conf}`];
   if (filled.length)   parts.push(`fills: ${filled.join(', ')}`);
   if (deferred.length) parts.push(`needs human: ${deferred.join(', ')}`);

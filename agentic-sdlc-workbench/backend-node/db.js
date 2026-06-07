@@ -163,6 +163,15 @@ const MIGRATIONS = [
   "CREATE INDEX IF NOT EXISTS idx_step_sysid  ON asdlc_workflow_step(source_sys_id)",
   "CREATE INDEX IF NOT EXISTS idx_usecase_sysid ON asdlc_use_case(source_sys_id)",
 
+  // ── Per-item decisions on change packets ─────────────────────────────────────
+  // Product owners can individually approve or reject CP items (rather than only
+  // approving/rejecting the whole packet at once). 'pending' = no decision yet
+  // (= Keep on List). Applied items also get item_status='approved'.
+  "ALTER TABLE asdlc_change_packet_item ADD COLUMN item_status TEXT NOT NULL DEFAULT 'pending'",
+  "ALTER TABLE asdlc_change_packet_item ADD COLUMN item_decision_notes TEXT",
+  "ALTER TABLE asdlc_change_packet_item ADD COLUMN item_decided_by TEXT",
+  "ALTER TABLE asdlc_change_packet_item ADD COLUMN item_decided_at TEXT",
+
   // ── ServiceNow round-trip (Round 2): Application ↔ ServiceNow app link on the
   // project, so a Workbench Application can be created/linked to a scoped app and
   // re-synced. sn_last_synced_at is stamped after each successful extraction ingest.
