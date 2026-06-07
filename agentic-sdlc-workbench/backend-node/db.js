@@ -149,10 +149,19 @@ const MIGRATIONS = [
   "ALTER TABLE asdlc_workflow_step ADD COLUMN source_scope  TEXT",
   "ALTER TABLE asdlc_workflow_step ADD COLUMN source_fluent TEXT",
   "ALTER TABLE asdlc_workflow_step ADD COLUMN source_hash   TEXT",
+  // use_case is a ServiceNow-synced reuse type too (sn_aia_usecase). Without provenance
+  // it could not be matched on re-sync and was re-created as a duplicate every sync.
+  "ALTER TABLE asdlc_use_case      ADD COLUMN source_system TEXT",
+  "ALTER TABLE asdlc_use_case      ADD COLUMN source_sys_id TEXT",
+  "ALTER TABLE asdlc_use_case      ADD COLUMN source_table  TEXT",
+  "ALTER TABLE asdlc_use_case      ADD COLUMN source_scope  TEXT",
+  "ALTER TABLE asdlc_use_case      ADD COLUMN source_fluent TEXT",
+  "ALTER TABLE asdlc_use_case      ADD COLUMN source_hash   TEXT",
   "CREATE INDEX IF NOT EXISTS idx_agent_sysid ON asdlc_agent_spec(source_sys_id)",
   "CREATE INDEX IF NOT EXISTS idx_tool_sysid  ON asdlc_tool(source_sys_id)",
   "CREATE INDEX IF NOT EXISTS idx_wf_sysid    ON asdlc_workflow(source_sys_id)",
   "CREATE INDEX IF NOT EXISTS idx_step_sysid  ON asdlc_workflow_step(source_sys_id)",
+  "CREATE INDEX IF NOT EXISTS idx_usecase_sysid ON asdlc_use_case(source_sys_id)",
 
   // ── ServiceNow round-trip (Round 2): Application ↔ ServiceNow app link on the
   // project, so a Workbench Application can be created/linked to a scoped app and

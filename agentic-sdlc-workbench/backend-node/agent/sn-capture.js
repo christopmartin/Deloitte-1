@@ -32,6 +32,7 @@ const SN_SURFACES = [
 
 // Workbench tables that carry Level-2 provenance (where SN-sourced records live).
 const WB_PROVENANCE_TABLES = [
+  { table: 'asdlc_use_case',       pk: 'use_case_id',       type: 'use_case',       nameCol: 'title' },
   { table: 'asdlc_agent_spec',     pk: 'agent_spec_id',     type: 'agent_spec',     nameCol: 'name' },
   { table: 'asdlc_tool',           pk: 'tool_id',           type: 'tool',           nameCol: 'name' },
   { table: 'asdlc_workflow',       pk: 'workflow_id',       type: 'workflow',       nameCol: 'name' },

@@ -843,7 +843,7 @@ const REGISTRY = [
 // design types so agents/workflows/tools extracted from ServiceNow also carry
 // sys_id identity. Done here (not inline) to keep it in one place; fields are
 // optional and clearly SN-only, so transcript ingestion is unaffected.
-for (const et of ['agent_spec', 'tool', 'workflow', 'workflow_step']) {
+for (const et of ['use_case', 'agent_spec', 'tool', 'workflow', 'workflow_step']) {
   const e = REGISTRY.find(r => r.entity_type === et);
   if (!e) continue;
   e.tool.properties = { ...e.tool.properties, ...PROVENANCE_FIELDS };
