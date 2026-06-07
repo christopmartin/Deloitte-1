@@ -4996,6 +4996,337 @@ app.get('/api/v1/projects/:id/build-export', async (req, res) => {
   res.send(md);
 });
 
+// ─── ServiceNow Outbound Delta Export (Phase 2) ──────────────────────────────
+
+/**
+ * GET /api/v1/projects/:id/servicenow/delta-info
+ * Lightweight check — how many approved CPs have accumulated since the last SN sync.
+ * Frontend uses this to decide whether to show/enable the "Export SN Delta" button.
+ */
+app.get('/api/v1/projects/:id/servicenow/delta-info', (req, res) => {
+  const project = db.prepare(`
+    SELECT p.*, c.client_name
+    FROM asdlc_project p
+    LEFT JOIN asdlc_client c ON c.client_id = p.client_id
+    WHERE p.project_id = ?
+  `).get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  if (!project.servicenow_scope) {
+    return res.json({ enabled: false, has_last_sync: false, sn_last_synced_at: null,
+      delta_cp_count: 0, update_count: 0, create_count: 0, has_changes: false });
+  }
+
+  const sinceTs = project.sn_last_synced_at || null;
+  let deltaCps;
+  if (sinceTs) {
+    deltaCps = db.prepare(
+      "SELECT change_packet_id FROM asdlc_change_packet WHERE project_id = ? AND status = 'approved' AND updated_at > ?"
+    ).all(req.params.id, sinceTs);
+  } else {
+    deltaCps = db.prepare(
+      "SELECT change_packet_id FROM asdlc_change_packet WHERE project_id = ? AND status = 'approved'"
+    ).all(req.params.id);
+  }
+
+  if (!deltaCps.length) {
+    return res.json({ enabled: true, has_last_sync: !!sinceTs, sn_last_synced_at: sinceTs,
+      delta_cp_count: 0, update_count: 0, create_count: 0, has_changes: false });
+  }
+
+  const cpIds = deltaCps.map(c => c.change_packet_id);
+  const pholds = cpIds.map(() => '?').join(',');
+  const items = db.prepare(
+    `SELECT entity_type, entity_id FROM asdlc_change_packet_item WHERE change_packet_id IN (${pholds}) AND item_status != 'rejected'`
+  ).all(...cpIds);
+
+  let updateCount = 0, createCount = 0;
+  for (const item of items) {
+    const ent = registry.byEntityType[item.entity_type];
+    if (!ent || !ent.materializable) continue;
+    let row = null;
+    try { row = db.prepare(`SELECT source_sys_id FROM ${ent.table} WHERE ${ent.pk} = ?`).get(item.entity_id); } catch { /* ignore */ }
+    if (!row) continue;
+    if (row.source_sys_id) updateCount++;
+    else createCount++;
+  }
+
+  res.json({
+    enabled: true,
+    has_last_sync: !!sinceTs,
+    sn_last_synced_at: sinceTs,
+    delta_cp_count: deltaCps.length,
+    update_count: updateCount,
+    create_count: createCount,
+    has_changes: (updateCount + createCount) > 0,
+  });
+});
+
+/**
+ * GET /api/v1/projects/:id/servicenow/delta-export
+ * Download a single Markdown file containing the SN delta spec (PATCH + POST records)
+ * and companion deployment instructions.
+ * Covers all approved CPs since sn_last_synced_at; if never synced, covers all approved CPs.
+ */
+app.get('/api/v1/projects/:id/servicenow/delta-export', (req, res) => {
+  const project = db.prepare(`
+    SELECT p.*, c.client_name, c.client_code
+    FROM asdlc_project p
+    LEFT JOIN asdlc_client c ON c.client_id = p.client_id
+    WHERE p.project_id = ?
+  `).get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  if (!project.servicenow_scope) {
+    return res.status(400).json({ error: 'Project is not linked to a ServiceNow scope.' });
+  }
+
+  const sinceTs = project.sn_last_synced_at || null;
+  const cpQuery = sinceTs
+    ? `SELECT cp.*, (SELECT COUNT(*) FROM asdlc_change_packet_item WHERE change_packet_id = cp.change_packet_id AND item_status != 'rejected') AS item_count
+       FROM asdlc_change_packet cp WHERE cp.project_id = ? AND cp.status = 'approved' AND cp.updated_at > ? ORDER BY cp.updated_at ASC`
+    : `SELECT cp.*, (SELECT COUNT(*) FROM asdlc_change_packet_item WHERE change_packet_id = cp.change_packet_id AND item_status != 'rejected') AS item_count
+       FROM asdlc_change_packet cp WHERE cp.project_id = ? AND cp.status = 'approved' ORDER BY cp.updated_at ASC`;
+  const deltaCps = sinceTs
+    ? db.prepare(cpQuery).all(req.params.id, sinceTs)
+    : db.prepare(cpQuery).all(req.params.id);
+
+  const cpIds = deltaCps.map(c => c.change_packet_id);
+  let allItems = [];
+  if (cpIds.length) {
+    const pholds = cpIds.map(() => '?').join(',');
+    allItems = db.prepare(`
+      SELECT i.*, cp.packet_code AS cp_ref, cp.summary AS cp_title
+      FROM asdlc_change_packet_item i
+      JOIN asdlc_change_packet cp ON cp.change_packet_id = i.change_packet_id
+      WHERE i.change_packet_id IN (${pholds}) AND i.item_status != 'rejected'
+      ORDER BY i.entity_type, i.created_at
+    `).all(...cpIds);
+  }
+
+  const STRIP_INTERNAL = ['created_by','created_at','updated_by','updated_at','version','project_id',
+    'lifecycle_status','source_hash','source_fluent','ingest_id'];
+  const updates = [], creates = [];
+  for (const item of allItems) {
+    const ent = registry.byEntityType[item.entity_type];
+    if (!ent || !ent.materializable) continue;
+    let row = null;
+    try { row = db.prepare(`SELECT * FROM ${ent.table} WHERE ${ent.pk} = ?`).get(item.entity_id); } catch { /* ignore */ }
+    if (!row) continue;
+
+    // Derive display name from registry nameKeys → DB column names
+    let entityName = item.entity_id;
+    for (const nk of (ent.nameKeys || [])) {
+      const col = (ent.fieldMap && ent.fieldMap[nk] && ent.fieldMap[nk].col) || nk;
+      if (row[col]) { entityName = String(row[col]); break; }
+    }
+
+    const cleanRow = { ...row };
+    for (const k of STRIP_INTERNAL) delete cleanRow[k];
+
+    const entry = { entity_type: item.entity_type, entity_id: item.entity_id, entity_name: entityName,
+      cp_ref: item.cp_ref, cp_title: item.cp_title, operation: item.operation, row: cleanRow };
+
+    if (row.source_sys_id) updates.push(entry);
+    else creates.push(entry);
+  }
+
+  const md       = buildSNDeltaMarkdown(project, deltaCps, updates, creates, sinceTs);
+  const dateStr  = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const code     = (project.project_code || project.project_name || 'project').replace(/\s+/g, '-');
+  const fileName = `${code}-sn-delta-${dateStr}.md`;
+
+  res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+  res.send(md);
+});
+
+// ─── SN Delta markdown assembler ─────────────────────────────────────────────
+
+function buildSNDeltaMarkdown(project, deltaCps, updates, creates, sinceTs) {
+  const lines    = [];
+  const ts       = new Date().toISOString();
+  const prefix   = project.client_name ? `${project.client_name} — ` : '';
+  const scope    = project.servicenow_scope    || '(not set)';
+  const instance = project.servicenow_instance || '(not configured)';
+
+  function fmtType(t) { return t.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' '); }
+  function stripProvenance(obj) {
+    const o = { ...obj };
+    ['source_sys_id','source_table','source_scope','source_fluent','source_hash','source_system'].forEach(k => delete o[k]);
+    return o;
+  }
+
+  // ── Header ──────────────────────────────────────────────────────────────────
+  lines.push(`# ${prefix}${project.project_name}`);
+  lines.push(`## ServiceNow Delta Export + Deployment Instructions`);
+  lines.push('');
+  lines.push('> **Purpose:** Deploy approved Workbench design changes back to ServiceNow using the SDK.');
+  lines.push('> Read the Deployment Instructions section at the bottom of this file before proceeding.');
+  lines.push('');
+  lines.push('| Field | Value |');
+  lines.push('|---|---|');
+  lines.push(`| Project | ${project.project_name}${project.project_code ? ` (${project.project_code})` : ''} |`);
+  if (project.client_name) lines.push(`| Client | ${project.client_name} |`);
+  lines.push(`| ServiceNow Scope | \`${scope}\` |`);
+  lines.push(`| ServiceNow Instance | ${instance} |`);
+  lines.push(`| Delta Baseline | ${sinceTs ? sinceTs : 'First-time export (no prior sync)'} |`);
+  lines.push(`| Change Packets | ${deltaCps.length} approved |`);
+  lines.push(`| Updates (PATCH) | ${updates.length} |`);
+  lines.push(`| Creates (POST) | ${creates.length} |`);
+  lines.push(`| Exported | ${ts} |`);
+  lines.push('');
+  lines.push('---');
+  lines.push('');
+
+  // ── Change Packets table ─────────────────────────────────────────────────────
+  lines.push('## Change Packets Included in This Delta');
+  lines.push('');
+  if (!deltaCps.length) {
+    lines.push('_No approved Change Packets found — nothing to deploy._');
+  } else {
+    lines.push('| CP Ref | Title | Non-Rejected Items |');
+    lines.push('|---|---|---|');
+    for (const cp of deltaCps) {
+      lines.push(`| ${mdCell(cp.packet_code || cp.change_packet_id.slice(0, 8))} | ${mdCell(cp.summary)} | ${cp.item_count} |`);
+    }
+  }
+  lines.push('');
+  lines.push('---');
+  lines.push('');
+
+  // ── PATCH: update existing SN records ────────────────────────────────────────
+  lines.push('## 🔄 PATCH — Update Existing ServiceNow Records');
+  lines.push('');
+  if (!updates.length) {
+    lines.push('_No records to update in this delta._');
+    lines.push('');
+  } else {
+    lines.push('These records already exist in ServiceNow (they carry a `source_sys_id`).');
+    lines.push('**Use PATCH, not POST.** Locate each by its `sys_id` and apply the Workbench values.');
+    lines.push('');
+    for (const u of updates) {
+      lines.push(`### ${fmtType(u.entity_type)}: ${u.entity_name}`);
+      lines.push('');
+      lines.push('| Field | Value |');
+      lines.push('|---|---|');
+      lines.push(`| Workbench ID | \`${u.entity_id}\` |`);
+      lines.push(`| SN sys_id | \`${u.row.source_sys_id}\` |`);
+      if (u.row.source_table) lines.push(`| SN table | \`${u.row.source_table}\` |`);
+      lines.push(`| SN scope | \`${u.row.source_scope || scope}\` |`);
+      lines.push(`| From CP | ${mdCell(u.cp_ref)} — ${mdCell(u.cp_title)} |`);
+      lines.push('');
+      lines.push('**Workbench values to PATCH to ServiceNow:**');
+      lines.push('');
+      lines.push('```json');
+      lines.push(JSON.stringify(stripProvenance(u.row), null, 2));
+      lines.push('```');
+      lines.push('');
+    }
+  }
+  lines.push('---');
+  lines.push('');
+
+  // ── POST: create new SN records ───────────────────────────────────────────────
+  lines.push('## ✨ POST — Create New ServiceNow Records');
+  lines.push('');
+  if (!creates.length) {
+    lines.push('_No new records to create in this delta._');
+    lines.push('');
+  } else {
+    lines.push('These records exist in the Workbench but not yet in ServiceNow (no `source_sys_id`).');
+    lines.push('**Use POST.** After creation, capture the returned `sys_id` and register it back to the Workbench');
+    lines.push('so the next delta correctly classifies this record as a PATCH (not another POST).');
+    lines.push('');
+    for (const c of creates) {
+      lines.push(`### ${fmtType(c.entity_type)}: ${c.entity_name}`);
+      lines.push('');
+      lines.push('| Field | Value |');
+      lines.push('|---|---|');
+      lines.push(`| Workbench ID | \`${c.entity_id}\` |`);
+      lines.push(`| Target SN scope | \`${scope}\` |`);
+      lines.push(`| From CP | ${mdCell(c.cp_ref)} — ${mdCell(c.cp_title)} |`);
+      lines.push('');
+      lines.push('**Design values to POST to ServiceNow:**');
+      lines.push('');
+      lines.push('```json');
+      lines.push(JSON.stringify(stripProvenance(c.row), null, 2));
+      lines.push('```');
+      lines.push('');
+    }
+  }
+
+  // ── Companion: Deployment Instructions ────────────────────────────────────────
+  lines.push('---');
+  lines.push('');
+  lines.push('# Deployment Instructions');
+  lines.push('');
+  lines.push('## ⚠️ Critical Rules — Read Before Deploying');
+  lines.push('');
+  lines.push('1. **NEVER deploy to production.** Target DEV or TEST only.');
+  lines.push('2. **PATCH records that have a `sys_id`, POST records that do not.** Never create duplicates.');
+  lines.push('3. **Sequence matters:** deploy parent entities (Use Cases, Agents) before children (Tools, Steps).');
+  lines.push('4. **After POST:** capture the returned `sys_id` and register it back to the Workbench entity');
+  lines.push('   (`source_sys_id` column) so future deltas treat it as PATCH.');
+  lines.push('5. **Run a validation sync** after deployment to confirm all changes landed correctly.');
+  lines.push('');
+  lines.push('## Prerequisites');
+  lines.push('');
+  lines.push('```bash');
+  lines.push('# Install the ServiceNow SDK (if not already installed)');
+  lines.push('npm install -g @servicenow/sdk');
+  lines.push('');
+  lines.push(`# Configure credentials for the target DEV instance`);
+  lines.push(`# Instance: ${instance}`);
+  lines.push(`# Scope:    ${scope}`);
+  lines.push('snc configure  # follow the prompts to enter instance URL and credentials');
+  lines.push('snc app list   # verify the connection');
+  lines.push('```');
+  lines.push('');
+  lines.push('## Deployment Steps');
+  lines.push('');
+  lines.push('1. **Review this delta** — confirm every PATCH/POST record is correct.');
+  lines.push(`2. **Open the SDK project** for this scope:`);
+  lines.push(`   \`\`\`bash`);
+  lines.push(`   snc app open --scope ${scope}`);
+  lines.push(`   \`\`\``);
+  lines.push('3. **For each 🔄 PATCH record:**');
+  lines.push('   - Locate the artifact file by its `sys_id`');
+  lines.push('   - Apply the updated field values from the JSON block above');
+  lines.push('   - Deploy to DEV: `snc app deploy --target DEV`');
+  lines.push('4. **For each ✨ POST record:**');
+  lines.push('   - Create a new artifact file in the SDK project');
+  lines.push('   - Populate all fields from the JSON block above');
+  lines.push('   - Deploy to DEV: `snc app deploy --target DEV`');
+  lines.push('   - **Capture the new `sys_id`** from the deployment output');
+  lines.push('5. **Validate the deployment:**');
+  lines.push('   ```bash');
+  lines.push('   snc app validate --target DEV');
+  lines.push('   ```');
+  lines.push('6. **Register new sys_ids** back to the Workbench — update each newly created entity\'s');
+  lines.push('   `source_sys_id` so future deltas PATCH rather than re-creating.');
+  lines.push('7. **Advance the sync baseline** — run the Workbench SN ingest sync for this project');
+  lines.push('   so `sn_last_synced_at` advances and the CPs above are excluded from the next delta.');
+  lines.push('');
+  lines.push('## Using Claude Code + SDK for AI-Assisted Deployment');
+  lines.push('');
+  lines.push('You can hand this entire file to Claude Code to automate the deployment:');
+  lines.push('');
+  lines.push('```');
+  lines.push('Deploy the ServiceNow delta described in this file to the DEV instance.');
+  lines.push('Follow the Critical Rules section exactly. Use PATCH for records with a sys_id,');
+  lines.push('POST for records without one. Never touch production. Report the sys_id');
+  lines.push('returned by each POST so I can register it back to the Workbench.');
+  lines.push('```');
+  lines.push('');
+  lines.push('Claude Code will use the ServiceNow SDK to build the artifact files, apply the');
+  lines.push('Workbench values, and deploy to DEV in the correct parent-before-child order.');
+  lines.push('');
+  lines.push('---');
+  lines.push(`_Generated by Agentic SDLC Workbench · ${ts}_`);
+
+  return lines.join('\n');
+}
+
 /**
  * Optional AI review of the deterministic build spec. Returns an additive Markdown
  * section (Executive Summary + Gaps + Implementation Notes) or null if no API key.
