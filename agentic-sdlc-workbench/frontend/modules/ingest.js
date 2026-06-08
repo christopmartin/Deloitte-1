@@ -52,11 +52,59 @@ function ingestTag(status) {
 
 function entityName(type, data) {
   if (!data) return type;
-  return data.use_case_name || data.workflow_name || data.step_name ||
+  // Check the common registry nameKeys first (title, name), then legacy *_name fields
+  return data.title || data.name ||
+         data.use_case_name || data.workflow_name || data.step_name ||
          data.rule_name || data.segment_name || data.source_name ||
          data.agent_name || data.gate_name || data.control_name ||
          (data.role && data.want ? `${data.role}: ${data.want}` : null) ||
+         (data.text ? data.text.slice(0, 80) + (data.text.length > 80 ? '…' : '') : null) ||
          type;
+}
+
+// Fields that are internal links or should not be shown in the detail expansion
+const DETAIL_SKIP_FIELDS = new Set([
+  'use_case_title','workflow_name','implements_requirements','dependencies','ingest_id',
+]);
+
+/** Render entity_data as a readable key-value grid for the detail expansion row. */
+function renderEntityDetail(entityType, data) {
+  const wrap = el('div', { style: 'padding:10px 16px 14px;background:var(--bg-subtle,#f4f6f8);border-top:1px solid var(--border)' });
+  if (!data || typeof data !== 'object') {
+    wrap.appendChild(el('span', { style: 'font-size:12px;color:var(--text-muted)' }, 'No detail available.'));
+    return wrap;
+  }
+  const grid = el('div', { style: 'display:grid;grid-template-columns:160px 1fr;gap:5px 14px;font-size:12px;line-height:1.5' });
+  let hasAny = false;
+  for (const [key, val] of Object.entries(data)) {
+    if (DETAIL_SKIP_FIELDS.has(key)) continue;
+    if (val === null || val === undefined || val === '') continue;
+    if (Array.isArray(val) && val.length === 0) continue;
+    const label = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    let valueEl;
+    if (Array.isArray(val)) {
+      valueEl = el('div', {});
+      val.forEach(item => {
+        const line = el('div', { style: 'padding-left:10px' });
+        line.textContent = '• ' + (typeof item === 'object' ? JSON.stringify(item) : String(item));
+        valueEl.appendChild(line);
+      });
+    } else if (typeof val === 'object') {
+      valueEl = el('pre', { style: 'margin:0;font-size:11px;white-space:pre-wrap;font-family:monospace' },
+        JSON.stringify(val, null, 2));
+    } else {
+      valueEl = el('div', { style: 'white-space:pre-wrap' }, String(val));
+    }
+    grid.appendChild(el('div', { style: 'font-weight:600;color:var(--text-muted);padding-top:1px' }, label));
+    grid.appendChild(valueEl);
+    hasAny = true;
+  }
+  if (!hasAny) {
+    wrap.appendChild(el('span', { style: 'font-size:12px;color:var(--text-muted)' }, 'No detail fields available.'));
+    return wrap;
+  }
+  wrap.appendChild(grid);
+  return wrap;
 }
 
 // ── Module state ──────────────────────────────────────────────────────────────
@@ -898,17 +946,35 @@ function buildExtractionsSection(extractions, showPromote, doc, pane) {
 
   // Table
   const table = el('table', { className: 'wf-table' });
-  table.innerHTML = `<thead><tr><th>Entity</th><th>Name / Summary</th><th>Confidence</th><th>Round</th>${showPromote ? '<th></th>' : ''}</tr></thead>`;
+  table.innerHTML = `<thead><tr><th style="width:24px"></th><th>Entity</th><th>Name / Summary</th><th>Confidence</th><th>Round</th>${showPromote ? '<th></th>' : ''}</tr></thead>`;
   const tbody = el('tbody');
 
   extractions.forEach(ex => {
     const name  = entityName(ex.entity_type, ex.entity_data);
     const conf  = Math.round((ex.confidence ?? 0) * 100);
     const confColor = conf >= 85 ? 'var(--color-ok)' : conf >= 70 ? 'var(--color-warn)' : 'var(--color-danger)';
+    const d = ex.entity_data || {};
 
-    const tr = el('tr', {},
+    // Description preview — first non-title prose field, truncated
+    const previewText = d.description || d.summary || d.scope || d.plain_english ||
+                        d.contract || d.behavior_notes || d.text || null;
+    const nameTd = el('td', { style: { maxWidth: '320px' } });
+    nameTd.appendChild(el('div', { style: { fontWeight: '500' } }, name));
+    if (previewText && previewText !== name) {
+      const preview = String(previewText);
+      nameTd.appendChild(el('div', {
+        style: { fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px',
+                 whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '300px' },
+      }, preview.length > 120 ? preview.slice(0, 120) + '…' : preview));
+    }
+
+    // Toggle indicator
+    const toggleTd = el('td', { style: { width: '24px', color: 'var(--text-muted)', fontSize: '10px', userSelect: 'none' } }, '▶');
+
+    const tr = el('tr', { style: { cursor: 'pointer' } },
+      toggleTd,
       el('td', {}, tag(ENTITY_LABELS[ex.entity_type] || ex.entity_type, 'info')),
-      el('td', { style: { fontWeight: '500', maxWidth: '220px' } }, name),
+      nameTd,
       el('td', {}, el('span', { style: { color: confColor, fontWeight: '600', fontSize: '13px' } }, `${conf}%`)),
       el('td', { className: 'muted' }, `Round ${ex.round}`)
     );
@@ -916,7 +982,8 @@ function buildExtractionsSection(extractions, showPromote, doc, pane) {
     if (showPromote) {
       const actCell = el('td');
       const rejectBtn = el('button', { className: 'btn btn-ghost btn-sm' }, '✕ Reject');
-      rejectBtn.addEventListener('click', async () => {
+      rejectBtn.addEventListener('click', async e => {
+        e.stopPropagation();
         rejectBtn.disabled = true;
         try {
           await apiFetch(`/ingest-documents/${doc.ingest_id}/extractions/${ex.extraction_id}`, {
@@ -934,7 +1001,21 @@ function buildExtractionsSection(extractions, showPromote, doc, pane) {
       tr.appendChild(actCell);
     }
 
+    // Detail expansion row
+    const detailTr = el('tr', { style: { display: 'none' } });
+    const colSpan = showPromote ? '6' : '5';
+    const detailTd = el('td', { colSpan, style: { padding: '0' } });
+    detailTd.appendChild(renderEntityDetail(ex.entity_type, ex.entity_data));
+    detailTr.appendChild(detailTd);
+
+    tr.addEventListener('click', () => {
+      const open = detailTr.style.display !== 'none';
+      detailTr.style.display = open ? 'none' : '';
+      toggleTd.textContent = open ? '▶' : '▼';
+    });
+
     tbody.appendChild(tr);
+    tbody.appendChild(detailTr);
   });
 
   table.appendChild(tbody);
