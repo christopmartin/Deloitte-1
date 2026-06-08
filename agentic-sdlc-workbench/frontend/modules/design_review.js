@@ -1016,6 +1016,7 @@ function buildAgentSection(agent) {
   if (agentIssue) agentNameEl.appendChild(agentIssue);
   agentHdr.appendChild(agentNameEl);
   agentHdr.appendChild(statusPill(agent.lifecycle_status));
+  const agentSg = aiSuggestedBadge(agent); if (agentSg) agentHdr.appendChild(agentSg);
   // Phase 4: agent cost chip
   const agentCostChip = costChip(agent.agent_cost_per_period, 'month', 'Projected AI cost per month (steps owned by this agent)');
   if (agentCostChip) agentHdr.appendChild(agentCostChip);
@@ -1284,6 +1285,8 @@ function buildAgentSection(agent) {
         const nameTd = el('td', {});
         if (b.tool_slug) nameTd.appendChild(el('span', { className: 'dr-slug-badge' }, b.tool_slug));
         nameTd.appendChild(document.createTextNode(' ' + (b.tool_name || '—')));
+        const bindingSg = aiSuggestedBadge({ system_generated: b.tool_system_generated });
+        if (bindingSg) { nameTd.appendChild(document.createTextNode(' ')); nameTd.appendChild(bindingSg); }
         tr.appendChild(nameTd);
         tr.appendChild(el('td', { style: { fontSize: '12px' } }, b.purpose || ''));
         tr.appendChild(el('td', { style: { fontSize: '11px' } }, b.tool_execution_mode || ''));

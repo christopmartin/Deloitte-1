@@ -4026,7 +4026,8 @@ app.get('/api/v1/projects/:id/design-report/agents', (req, res) => {
     cost_impact: t.cost_impact,
     dev_status: t.dev_status || null,                            // Phase 1
     visibility_scope: t.visibility_scope || 'PROJECT',           // Phase 1: surfaces scope
-    boundaries: parseJson(t.boundaries) || []
+    boundaries: parseJson(t.boundaries) || [],
+    system_generated: t.system_generated ? 1 : 0,
   }));
 
   const agents = agentRows.map(agent => {
@@ -4057,7 +4058,8 @@ app.get('/api/v1/projects/:id/design-report/agents', (req, res) => {
       SELECT at.agent_tool_id, at.tool_id, at.purpose, at.fallback_behavior,
              at.binding_supervision_model, at.tool_execution_mode,
              at.linked_user_story_refs, at.details,
-             t.name AS tool_name, t.slug AS tool_slug, t.dev_status, t.execution_mode
+             t.name AS tool_name, t.slug AS tool_slug, t.dev_status, t.execution_mode,
+             t.system_generated AS tool_system_generated
       FROM asdlc_agent_tool at
       JOIN asdlc_tool t ON t.tool_id = at.tool_id
       WHERE at.agent_spec_id = ?
@@ -4080,7 +4082,8 @@ app.get('/api/v1/projects/:id/design-report/agents', (req, res) => {
             outputs:      parseJson(s.outputs) || {},
             decisions:    parseJson(s.decisions_list) || [],
             sla_hours:    s.sla_hours,
-            hitl_gate_id: s.hitl_gate_id
+            hitl_gate_id: s.hitl_gate_id,
+            system_generated: s.system_generated ? 1 : 0,
           }))
       : [];
 
@@ -4118,6 +4121,7 @@ app.get('/api/v1/projects/:id/design-report/agents', (req, res) => {
       latency_target:          agent.latency_target || null,
       post_release_validation: agent.post_release_validation || null,
       cost_model:              agent.cost_model || 'none',
+      system_generated:        agent.system_generated ? 1 : 0,
       // ── Phase 3: M:N use cases + tool bindings ────────────────
       use_cases: ucLinks,               // array of linked UCs (replaces single use_case)
       tool_bindings: toolBindings,      // array of agent↔tool bindings

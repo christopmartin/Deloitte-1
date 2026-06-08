@@ -221,6 +221,8 @@ const MIGRATIONS = [
   "ALTER TABLE asdlc_workflow_step      ADD COLUMN system_generated INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE asdlc_tool               ADD COLUMN system_generated INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE asdlc_data_source        ADD COLUMN system_generated INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE asdlc_agent_spec         ADD COLUMN system_generated INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE asdlc_functional_req     ADD COLUMN system_generated INTEGER NOT NULL DEFAULT 0",
 
   // ── Materialize core design elements from BRD ingest ─────────────────────────
   // Guardrails + data sources become first-class design rows; user stories get a

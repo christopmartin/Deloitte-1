@@ -174,8 +174,9 @@ const REGISTRY = [
       postconditions: { col: 'postconditions' },
       priority:       { col: 'priority' },
       source:         { col: 'source' },
-      dependencies:   { col: 'dependencies', json: true },
-      ingest_id:      { col: 'ingest_id' },   // populated at promote time, not by AI
+      dependencies:     { col: 'dependencies', json: true },
+      ingest_id:        { col: 'ingest_id' },   // populated at promote time, not by AI
+      system_generated: { col: 'system_generated', transform: boolInt },
     },
     parentLinks: [
       { col: 'use_case_id', parentType: 'use_case', nameKeyInData: 'use_case_title', required: false, tryFallback: true },
@@ -467,6 +468,7 @@ const REGISTRY = [
       latency_target:   { col: 'latency_target' },
       post_release_validation: { col: 'post_release_validation' },
       cost_model:       { col: 'cost_model' },
+      system_generated: { col: 'system_generated', transform: boolInt },
     },
     parentLinks: [
       { col: 'use_case_id', parentType: 'use_case', nameKeyInData: 'use_case_title', required: true },
