@@ -42,6 +42,12 @@ CREATE TABLE IF NOT EXISTS asdlc_project (
     default_human_approval_required INTEGER NOT NULL DEFAULT 1,
     confidence_threshold            REAL    NOT NULL DEFAULT 0.75,
     repository_access_model         TEXT NOT NULL DEFAULT 'INTERNAL_ONLY',
+    -- Reverse-path business-logic materiality (feat/core-design-elements).
+    -- Only reverse-engineered SN logic clearing these bars becomes a Level-1 design
+    -- row; the rest is captured-but-not-elevated. NULL min_confidence falls back to
+    -- confidence_threshold. disallow_types is a JSON array of logic_types to skip.
+    materiality_min_confidence      REAL,
+    materiality_disallow_types      TEXT NOT NULL DEFAULT '[]',
     -- ── Per-application cost params ──────────────────────────────────────────
     -- Pricing + planning + entitlement all per-Application (each customer/app
     -- negotiates its own price sheet & plan with ServiceNow). The legacy global
@@ -428,6 +434,7 @@ CREATE TABLE IF NOT EXISTS asdlc_business_logic (
     when_runs         TEXT,                         -- trigger in business terms (e.g. "after a flight is updated")
     conditions        TEXT,                         -- when it applies
     run_order         INTEGER,
+    requirement_refs  TEXT NOT NULL DEFAULT '[]',    -- JSON array of FR/NFR slugs it implements (traceability, not duplicated design)
     -- ── Level-2 provenance (hidden) ──
     source_system     TEXT NOT NULL DEFAULT 'servicenow',
     source_sys_id     TEXT,

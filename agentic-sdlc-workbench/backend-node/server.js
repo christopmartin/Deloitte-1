@@ -4948,7 +4948,7 @@ app.get('/api/v1/projects/:id/build-export', async (req, res) => {
   const RT_EXPORT = {
     data_models:    { table: 'asdlc_data_model',     json: ['fields', 'relationships'] },
     form_designs:   { table: 'asdlc_form_design',    json: ['sections', 'related_lists', 'mandatory_fields', 'readonly_fields'] },
-    business_logic: { table: 'asdlc_business_logic', json: [] },
+    business_logic: { table: 'asdlc_business_logic', json: ['requirement_refs'] },
     catalog_items:  { table: 'asdlc_catalog_item',   json: ['variables'] },
   };
   for (const [sectionKey, spec] of Object.entries(RT_EXPORT)) {
@@ -6099,6 +6099,9 @@ function buildExportMarkdown(project, baseline, sections, data) {
       if (bl.when_runs) lines.push(`**When:** ${bl.when_runs}`);
       if (bl.conditions) lines.push(`**Conditions:** ${bl.conditions}`);
       if (bl.run_order != null) lines.push(`**Order:** ${bl.run_order}`);
+      const blRefs = Array.isArray(bl.requirement_refs) ? bl.requirement_refs
+        : (() => { try { return JSON.parse(bl.requirement_refs || '[]'); } catch { return []; } })();
+      if (blRefs.length) lines.push(`**Implements:** ${blRefs.join(', ')}`);
       lines.push('');
       rtFluentDetails(bl);
     }
@@ -6623,6 +6626,17 @@ function inferredToEntityData(inferred) {
   }
 }
 
+// Tier-3 body: the real ServiceNow instantiation kept inline alongside the Level-1 design
+// row. For logic artifacts this is the script body; otherwise a compact snapshot of the
+// captured salient fields. Lets an elevated business_logic row hold its real source — not
+// just the sys_id identity — so the round-trip can preserve "the how as built".
+function snArtifactBody(a) {
+  const s = a && a.salient;
+  if (!s) return null;
+  if (typeof s.script === 'string' && s.script.trim()) return s.script;
+  try { return JSON.stringify(s); } catch { return null; }
+}
+
 // Build the Change-Packet item spec for ONE gated plan item, or null if it can't be
 // materialized faithfully (→ caller drops it to a note). `withHash` controls whether
 // the captured artifact's source_hash is stamped: only when the Workbench content is
@@ -6640,6 +6654,7 @@ function snPlanItemToCpSpec(pl, scope) {
     source_sys_id: pl.source_sys_id || a.source_sys_id || null,
     source_table:  a.source_table || null,
     source_scope:  scope || null,
+    source_fluent: snArtifactBody(a),   // Tier-3: the real instantiation (script body / captured fields)
   };
   if (withHash) prov.source_hash = a.hash || null;
 
@@ -6739,6 +6754,7 @@ app.post('/api/v1/projects/:id/servicenow/sync', async (req, res) => {
   const planView = {
     project_id: plan.project_id, scope: plan.scope, mode: plan.mode, threshold: plan.threshold,
     summary: plan.summary, classified_summary: plan.classified_summary, errors: plan.errors,
+    materiality: plan.materiality || null,
     items: plan.planned.map(pl => ({
       classification: pl.classification, source_sys_id: pl.source_sys_id,
       name: (pl.inferred && pl.inferred.name) || (pl.proposal && pl.proposal.name) || (pl.artifact && pl.artifact.name) || null,

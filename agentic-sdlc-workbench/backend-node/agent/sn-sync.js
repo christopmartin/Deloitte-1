@@ -53,6 +53,80 @@ function resolveProjectThreshold(projectId) {
   } catch { return DEFAULT_THRESHOLD; }
 }
 
+// ── Reverse-path business-logic MATERIALITY ──────────────────────────────────
+// Reverse-engineering a live ServiceNow app, not every captured script deserves a
+// first-class Level-1 design row. A mature app has hundreds of trivial client scripts /
+// UI policies; elevating all of them buries the real design. The gate below decides, per
+// NEW artifact, whether it becomes a design row ("elevated") or is captured-but-not-
+// elevated. It governs ONLY business-logic artifacts; tables, forms, agents, tools, use
+// cases, catalog items always elevate. `changed` artifacts already have a Workbench row
+// (the elevate decision was made on a prior sync), so they bypass the gate.
+//
+// Capture-level design_type for logic: business_rule | client_script | script_include |
+// ui_action (sys_script / sys_script_client / sys_script_include / sys_ui_action).
+const MATERIALITY_LOGIC_TYPES = new Set(['business_rule', 'client_script', 'script_include', 'ui_action']);
+
+/** Per-project materiality config: min confidence (null → project threshold) + disallowed capture types. */
+function resolveMaterialityConfig(projectId) {
+  try {
+    const row = db.prepare(
+      'SELECT materiality_min_confidence AS minc, materiality_disallow_types AS dis FROM asdlc_project WHERE project_id = ?'
+    ).get(projectId);
+    let disallowTypes = [];
+    if (row && row.dis) { try { disallowTypes = JSON.parse(row.dis) || []; } catch { disallowTypes = []; } }
+    const minConfidence = (row && typeof row.minc === 'number') ? row.minc : null;
+    return { minConfidence, disallowTypes };
+  } catch { return { minConfidence: null, disallowTypes: [] }; }
+}
+
+/** Heuristic: does this captured logic artifact carry real conditional / business behaviour? */
+function isSignificant(snType, artifact, inferred) {
+  const inf = inferred || {};
+  const text = [inf.behavior, inf.purpose, inf.rationale, ...(inf.key_details || [])]
+    .filter(Boolean).join(' ').toLowerCase();
+  if (/\b(when|if |condition|mandator|requir|calculat|comput|validat|reject|approv|abort|prevent|block|notif|email|assign|escalat|insert|create|update|delete|status|state|integrat|sla|due|overdue|threshold|restrict|enforce)\b/.test(text)) return true;
+  const salient = artifact.salient || {};
+  const script = typeof salient.script === 'string' ? salient.script : '';
+  if (script.replace(/\s+/g, '').length > 400) return true;   // non-trivial body
+  if (salient.condition || salient.when) return true;          // explicit business-rule trigger/condition
+  return false;
+}
+
+/**
+ * Materiality decision for ONE captured artifact + its inference. Governs business-logic
+ * only — every other design type always elevates. Returns { elevate, reason }.
+ */
+function passesMaterialityGate(artifact, inferred, cfg = {}, fallbackThreshold = DEFAULT_THRESHOLD) {
+  const snType = artifact && artifact.design_type;
+  if (!MATERIALITY_LOGIC_TYPES.has(snType)) return { elevate: true, reason: 'not business-logic — always elevated' };
+
+  // Server-side logic (business rules + script includes) is presumed material.
+  if (snType === 'business_rule' || snType === 'script_include') {
+    return { elevate: true, reason: `${snType} — server-side logic, presumed material` };
+  }
+  // client_script / ui_action: material only when it carries real conditional/business behaviour.
+  if (!isSignificant(snType, artifact, inferred)) {
+    return { elevate: false, reason: `${snType} appears cosmetic / default-setting (no conditional or business effect)` };
+  }
+  const minConf = (typeof cfg.minConfidence === 'number') ? cfg.minConfidence : fallbackThreshold;
+  const conf = (inferred && typeof inferred.confidence === 'number') ? inferred.confidence : 0;
+  if (conf < minConf) {
+    return { elevate: false, reason: `${snType} significant but inference confidence ${conf.toFixed(2)} < materiality min ${minConf.toFixed(2)}` };
+  }
+  return { elevate: true, reason: `${snType} — significant behaviour, confidence ${conf.toFixed(2)} ≥ ${minConf.toFixed(2)}` };
+}
+
+/** Compact report row for a non-elevated / skipped artifact. */
+function matReport(a, classification, reason, inferred) {
+  return {
+    source_sys_id: a.source_sys_id,
+    name: (inferred && inferred.name) || a.name || '(unnamed)',
+    design_type: a.design_type,
+    classification,
+    reason,
+  };
+}
+
 /**
  * Decide whether ONE reviewed proposal may auto-apply, or must go to HITL.
  * Pure + deterministic — the gate. Returns:
@@ -156,12 +230,36 @@ async function runSyncPlan(opts = {}, ctx = {}) {
   const classified = classifyArtifacts(artifacts, projectId);
 
   // 3. Reverse-engineer ONLY changed + new (the cost tier — unchanged skip the LLM).
-  const toInfer = [...classified.changed, ...classified.new];
+  //    MATERIALITY (NEW only): Stage 1 drops disallowed capture types BEFORE inference
+  //    (saves the expensive Opus call); Stage 2 drops immaterial business-logic AFTER
+  //    inference (needs the inferred behaviour/confidence). `changed` artifacts already
+  //    have a Workbench row, so they bypass materiality.
+  const matCfg = resolveMaterialityConfig(projectId);
+  const disallow = new Set(matCfg.disallowTypes || []);
+  const skipped_disallowed = [];
+  const newAllowed = [];
+  for (const a of classified.new) {
+    if (disallow.has(a.design_type)) skipped_disallowed.push(matReport(a, 'new', `capture type "${a.design_type}" is in materiality_disallow_types`));
+    else newAllowed.push(a);
+  }
+
+  const toInfer = [...classified.changed, ...newAllowed];
   const inferences = await reverseEngineer(toInfer, logCtx);
   const inferBySysId = {};
   for (const inf of inferences) inferBySysId[inf.source_sys_id] = inf.inferred;
+
+  // Stage 2: significance/confidence gate on NEW business-logic.
+  const captured_not_elevated = [];
+  const elevatedNew = [];
+  for (const a of newAllowed) {
+    const inferred = inferBySysId[a.source_sys_id];
+    const m = passesMaterialityGate(a, inferred, matCfg, threshold);
+    if (m.elevate) elevatedNew.push(a);
+    else captured_not_elevated.push(matReport(a, 'new', m.reason, inferred));
+  }
+
   const changedWithInf = classified.changed.map(a => ({ ...a, inferred: inferBySysId[a.source_sys_id] }));
-  const newWithInf     = classified.new.map(a => ({ ...a, inferred: inferBySysId[a.source_sys_id] }));
+  const newWithInf     = elevatedNew.map(a => ({ ...a, inferred: inferBySysId[a.source_sys_id] }));
 
   // 4. Reconcile (non-destructive proposals). 5. Independent adversarial review.
   const proposals = await reconcile({ changed: changedWithInf, new: newWithInf, drift: classified.drift }, logCtx);
@@ -180,13 +278,24 @@ async function runSyncPlan(opts = {}, ctx = {}) {
     decision: gateProposal(rv, { mode, threshold }),
   }));
 
+  const summary = summarize(planned, classified);
+  summary.elevated_new = newWithInf.length;
+  summary.captured_not_elevated = captured_not_elevated.length;
+  summary.skipped_disallowed = skipped_disallowed.length;
+
   return {
     project_id: projectId, scope, mode, threshold,
     classified_summary: classified.summary,
     unchanged: classified.unchanged,
     planned,
     errors: classified.errors,
-    summary: summarize(planned, classified),
+    materiality: {
+      elevated: newWithInf.length,
+      captured_not_elevated,
+      skipped_disallowed,
+      config: { min_confidence: matCfg.minConfidence, disallow_types: matCfg.disallowTypes },
+    },
+    summary,
   };
 }
 
@@ -194,7 +303,11 @@ module.exports = {
   runSyncPlan,
   gateProposal,
   resolveProjectThreshold,
+  resolveMaterialityConfig,
+  passesMaterialityGate,
+  isSignificant,
   summarize,
   TYPE_BY_WB_TABLE,
+  MATERIALITY_LOGIC_TYPES,
   DEFAULT_THRESHOLD,
 };

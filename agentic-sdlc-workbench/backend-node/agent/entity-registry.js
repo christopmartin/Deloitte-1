@@ -682,6 +682,7 @@ const REGISTRY = [
         when_runs:       { type: 'string', description: 'When it runs (e.g. "after a Flight record is updated", "when the form loads")' },
         conditions:      { type: 'string', description: 'The condition under which it applies, in business terms' },
         run_order:       { type: 'integer', description: 'Execution order, if relevant' },
+        requirement_refs:{ type: 'array', items: { type: 'string' }, description: 'FR/NFR slugs from the "existing design" list that this logic implements or elaborates, e.g. ["FR-003","NFR-001"]. Only use slugs shown in the existing design — never invent one. Traceability references, not duplicated design. Optional.' },
         ...PROVENANCE_FIELDS,
       },
       required: ['name', 'logic_type'],
@@ -693,6 +694,7 @@ const REGISTRY = [
       when_runs:     { col: 'when_runs' },
       conditions:    { col: 'conditions' },
       run_order:     { col: 'run_order' },
+      requirement_refs: { col: 'requirement_refs', json: true },
       ...PROVENANCE_FIELDMAP,
     },
     parentLinks: [

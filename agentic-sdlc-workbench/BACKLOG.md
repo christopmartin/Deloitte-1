@@ -24,6 +24,7 @@
 | #4 | Fix report formatting for Tools, Agents, Workflows, Use Cases |
 | #17 | CP action buttons (Approve / Reject / Send Back) remain active after a terminal action — should be greyed out |
 | #18 | Cost projections not updated after a CP approval adds or modifies Assist-consuming entities (Agents, Workflows, Use Cases) |
+| #22 | Orphan requirements — BRD-extracted FR/NFR can materialize with `use_case_id = NULL` when the AI Agent omits `use_case_title` (or it doesn't match a same-packet use case). Strengthen prompt/linking so requirements attach to their use case. |
 
 ---
 
@@ -44,3 +45,6 @@
 | #19 | RAG best practices documents — better mechanism for ingesting and managing reference material (standards, guidelines, playbooks) for agent retrieval |
 | #20 | Fix Supporting Evidence functionality — buttons currently do nothing useful; wire up to meaningful actions |
 | #21 | Per-Application Claude/AI cost view — surface AI usage & spend at the Application (project) level, not only in the global Admin AI Settings; roll up `asdlc_ai_usage` by `project_id` so Opus-heavy work (e.g. ServiceNow reconciliation/extraction) is attributable to the right Application |
+| #23 | Inference dials beyond materiality (fast-follow to the materiality gate) — pre-run cost estimate / dry-run projection, per-run budget ceiling, per-item *adaptive* reverse-engineer effort, cheap→Opus *escalation*, and Economy/Balanced/Maximum **Effort Profile** presets bundling model+thinking+materiality. Floor today: per-role config in `ai-config.js` + post-hoc `asdlc_ai_usage`. |
+| #24 | Reverse-path "force-elevate" — let a human promote a previously *captured-not-elevated* ServiceNow logic artifact into a Level-1 `business_logic` design row (e.g. from the sync report), and re-capture its body on demand. |
+| #25 | `catalog_item` from BRD extraction — currently only captured on the ServiceNow reverse-engineering path; decide if/when forward BRD ingest should propose catalog items (overlaps `form_design` + `use_case`; a platform-packaging decision). |

@@ -198,6 +198,17 @@ const MIGRATIONS = [
   "ALTER TABLE asdlc_project ADD COLUMN sn_last_synced_at TEXT",
   "CREATE INDEX IF NOT EXISTS idx_project_sn_sysapp ON asdlc_project(servicenow_sys_app_id)",
 
+  // ── Core design elements (feat/core-design-elements) ─────────────────────────
+  // business_logic gains a thin FR/NFR traceability link (the "how" elaborates the
+  // "what"), mirroring asdlc_user_story.requirement_refs. JSON slug array; optional.
+  "ALTER TABLE asdlc_business_logic ADD COLUMN requirement_refs TEXT NOT NULL DEFAULT '[]'",
+  // Reverse-path materiality config (per Application). When reverse-engineering a live
+  // ServiceNow app, only logic that clears these bars becomes a Level-1 design row; the
+  // rest is captured-but-not-elevated. min_confidence falls back to confidence_threshold
+  // when NULL; disallow_types is a JSON array of logic_types to skip before inference.
+  "ALTER TABLE asdlc_project ADD COLUMN materiality_min_confidence REAL",
+  "ALTER TABLE asdlc_project ADD COLUMN materiality_disallow_types TEXT NOT NULL DEFAULT '[]'",
+
   // ── Materialize core design elements from BRD ingest ─────────────────────────
   // Guardrails + data sources become first-class design rows; user stories get a
   // thin traceability home (narrative + requirement_refs slugs, no duplicated AC
