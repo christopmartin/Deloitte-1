@@ -828,8 +828,8 @@ CREATE TABLE IF NOT EXISTS asdlc_audit_log (
 -- ============================================================
 
 -- Acceptance criteria are attached to either a Use Case or a User Story.
--- User Stories live in asdlc_ingest_extraction as JSON blobs (no FK), so
--- parent_id is stored as a free string and validated by the API layer.
+-- parent_id is stored as a free string (no FK) and validated by the API layer —
+-- it may be a use_case_id or (now that user stories materialize) a user_story_id.
 CREATE TABLE IF NOT EXISTS asdlc_acceptance_criterion (
     acceptance_criterion_id TEXT PRIMARY KEY,
     project_id              TEXT NOT NULL REFERENCES asdlc_project(project_id),
@@ -846,6 +846,79 @@ CREATE TABLE IF NOT EXISTS asdlc_acceptance_criterion (
     updated_by              TEXT,
     updated_at              TEXT NOT NULL DEFAULT (datetime('now')),
     version                 INTEGER NOT NULL DEFAULT 1
+);
+
+-- ── Core design elements materialized from BRD ingest ──────────────────────────
+-- Guardrails (behavioural constraints) and data sources (integration surface) are
+-- first-class design elements — they carry information held nowhere else. No CHECK
+-- constraints on enum-like columns so unexpected model output can never crash
+-- materialization (the materializer writes whatever the extractor emitted).
+
+CREATE TABLE IF NOT EXISTS asdlc_guardrail (
+    guardrail_id         TEXT PRIMARY KEY,
+    project_id           TEXT REFERENCES asdlc_project(project_id),
+    ingest_id            TEXT REFERENCES asdlc_ingest_document(ingest_id),
+    slug                 TEXT,                        -- GR-### per project
+    rule_name            TEXT NOT NULL,
+    rule_text            TEXT NOT NULL DEFAULT '',
+    severity             TEXT NOT NULL DEFAULT 'medium',   -- critical|high|medium|low (not enforced)
+    applies_to           TEXT,
+    threshold_value      TEXT,
+    threshold_unit       TEXT,
+    regulatory_reference TEXT,
+    action_if_triggered  TEXT,                        -- block|escalate|flag|log|halt (not enforced)
+    visibility_scope     TEXT NOT NULL DEFAULT 'PROJECT',
+    lifecycle_status     TEXT NOT NULL DEFAULT 'active',
+    created_by           TEXT,
+    created_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by           TEXT,
+    updated_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    version              INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS asdlc_data_source (
+    data_source_id      TEXT PRIMARY KEY,
+    project_id          TEXT REFERENCES asdlc_project(project_id),
+    ingest_id           TEXT REFERENCES asdlc_ingest_document(ingest_id),
+    slug                TEXT,                         -- DS-### per project
+    source_name         TEXT NOT NULL,
+    source_type         TEXT NOT NULL DEFAULT 'other',  -- api|database|file|service|queue|other (not enforced)
+    description         TEXT NOT NULL DEFAULT '',
+    access_type         TEXT,                         -- read|write|read-write (not enforced)
+    access_requirements TEXT NOT NULL DEFAULT '[]',   -- JSON array of strings
+    contains_pii        INTEGER NOT NULL DEFAULT 0,
+    rate_limits         TEXT,
+    visibility_scope    TEXT NOT NULL DEFAULT 'PROJECT',
+    lifecycle_status    TEXT NOT NULL DEFAULT 'active',
+    created_by          TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by          TEXT,
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    version             INTEGER NOT NULL DEFAULT 1
+);
+
+-- User stories are a backlog/planning lens, NOT a carrier of unique design data
+-- (role/want/so_that/priority are already first-class on FR/use_case; acceptance
+-- criteria live in asdlc_acceptance_criterion). This is a THIN traceability home:
+-- the narrative + requirement_refs (FR/NFR slugs the story is realized by). It
+-- deliberately stores NO acceptance-criteria content (no duplication).
+CREATE TABLE IF NOT EXISTS asdlc_user_story (
+    user_story_id    TEXT PRIMARY KEY,
+    project_id       TEXT REFERENCES asdlc_project(project_id),
+    ingest_id        TEXT REFERENCES asdlc_ingest_document(ingest_id),
+    slug             TEXT,                            -- US-### per project
+    role             TEXT NOT NULL DEFAULT '',
+    want             TEXT NOT NULL DEFAULT '',
+    so_that          TEXT NOT NULL DEFAULT '',
+    priority         TEXT,                            -- must-have|should-have|could-have (not enforced)
+    requirement_refs TEXT NOT NULL DEFAULT '[]',      -- JSON array of FR/NFR slugs (traceability, not duplicated design)
+    visibility_scope TEXT NOT NULL DEFAULT 'PROJECT',
+    lifecycle_status TEXT NOT NULL DEFAULT 'active',
+    created_by       TEXT,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by       TEXT,
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    version          INTEGER NOT NULL DEFAULT 1
 );
 
 -- Test cases at one of four scopes: agent (unit), workflow, tool (unit),

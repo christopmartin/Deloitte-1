@@ -197,6 +197,65 @@ const MIGRATIONS = [
   "ALTER TABLE asdlc_project ADD COLUMN servicenow_instance TEXT",
   "ALTER TABLE asdlc_project ADD COLUMN sn_last_synced_at TEXT",
   "CREATE INDEX IF NOT EXISTS idx_project_sn_sysapp ON asdlc_project(servicenow_sys_app_id)",
+
+  // ── Materialize core design elements from BRD ingest ─────────────────────────
+  // Guardrails + data sources become first-class design rows; user stories get a
+  // thin traceability home (narrative + requirement_refs slugs, no duplicated AC
+  // content). Mirrors the CREATE TABLEs in schema.sql so existing DBs get them too.
+  // No CHECK constraints on enum columns — never crash materialization on model output.
+  `CREATE TABLE IF NOT EXISTS asdlc_guardrail (
+     guardrail_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     ingest_id TEXT REFERENCES asdlc_ingest_document(ingest_id),
+     slug TEXT,
+     rule_name TEXT NOT NULL,
+     rule_text TEXT NOT NULL DEFAULT '',
+     severity TEXT NOT NULL DEFAULT 'medium',
+     applies_to TEXT,
+     threshold_value TEXT,
+     threshold_unit TEXT,
+     regulatory_reference TEXT,
+     action_if_triggered TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT',
+     lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+     version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_data_source (
+     data_source_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     ingest_id TEXT REFERENCES asdlc_ingest_document(ingest_id),
+     slug TEXT,
+     source_name TEXT NOT NULL,
+     source_type TEXT NOT NULL DEFAULT 'other',
+     description TEXT NOT NULL DEFAULT '',
+     access_type TEXT,
+     access_requirements TEXT NOT NULL DEFAULT '[]',
+     contains_pii INTEGER NOT NULL DEFAULT 0,
+     rate_limits TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT',
+     lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+     version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_user_story (
+     user_story_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     ingest_id TEXT REFERENCES asdlc_ingest_document(ingest_id),
+     slug TEXT,
+     role TEXT NOT NULL DEFAULT '',
+     want TEXT NOT NULL DEFAULT '',
+     so_that TEXT NOT NULL DEFAULT '',
+     priority TEXT,
+     requirement_refs TEXT NOT NULL DEFAULT '[]',
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT',
+     lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+     version INTEGER NOT NULL DEFAULT 1
+   )`,
 ];
 for (const migration of MIGRATIONS) {
   try { db.exec(migration); } catch { /* column already exists — safe to ignore */ }
@@ -223,6 +282,10 @@ const SLUG_INDEXES = [
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_form_slug ON asdlc_form_design(project_id, slug)     WHERE slug IS NOT NULL",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_bl_slug   ON asdlc_business_logic(project_id, slug)  WHERE slug IS NOT NULL",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_cat_slug  ON asdlc_catalog_item(project_id, slug)    WHERE slug IS NOT NULL",
+  // Materialized BRD design elements
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_gr_slug  ON asdlc_guardrail(project_id, slug)    WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_ds_slug  ON asdlc_data_source(project_id, slug)  WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_us_slug  ON asdlc_user_story(project_id, slug)   WHERE slug IS NOT NULL",
 ];
 for (const idx of SLUG_INDEXES) {
   try { db.exec(idx); } catch (err) { console.error('[db] slug index failed:', err.message); }
@@ -260,6 +323,10 @@ const SLUG_TABLES = [
   { table: 'asdlc_form_design',       pk: 'form_design_id',    prefix: 'FORM' },
   { table: 'asdlc_business_logic',    pk: 'business_logic_id', prefix: 'BL'   },
   { table: 'asdlc_catalog_item',      pk: 'catalog_item_id',   prefix: 'CAT'  },
+  // Materialized BRD design elements
+  { table: 'asdlc_guardrail',         pk: 'guardrail_id',      prefix: 'GR'   },
+  { table: 'asdlc_data_source',       pk: 'data_source_id',    prefix: 'DS'   },
+  { table: 'asdlc_user_story',        pk: 'user_story_id',     prefix: 'US'   },
 ];
 
 function backfillSlugsFor(tableSpec) {

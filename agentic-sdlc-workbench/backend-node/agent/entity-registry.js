@@ -750,7 +750,10 @@ const REGISTRY = [
   //    not materialized. Add a table + flip materializable to wire them in later.
   {
     entity_type: 'guardrail',
-    order: 50, materializable: false, summarizable: false,
+    order: 50, materializable: true, summarizable: false, injectsIngestId: true,
+    table: 'asdlc_guardrail',
+    pk: 'guardrail_id',
+    slugPrefix: 'GR',
     nameKeys: ['rule_name'],
     tool: {
       name: 'extract_guardrail',
@@ -767,27 +770,60 @@ const REGISTRY = [
       },
       required: ['rule_name', 'rule_text', 'severity'],
     },
+    fieldMap: {
+      rule_name:            { col: 'rule_name' },
+      rule_text:            { col: 'rule_text' },
+      severity:             { col: 'severity' },
+      applies_to:           { col: 'applies_to' },
+      threshold_value:      { col: 'threshold_value' },
+      threshold_unit:       { col: 'threshold_unit' },
+      regulatory_reference: { col: 'regulatory_reference' },
+      action_if_triggered:  { col: 'action_if_triggered' },
+      ingest_id:            { col: 'ingest_id' },
+    },
+    parentLinks: [],
   },
   {
     entity_type: 'user_story',
-    order: 51, materializable: false, summarizable: false,
+    order: 51, materializable: true, summarizable: false, injectsIngestId: true,
+    table: 'asdlc_user_story',
+    pk: 'user_story_id',
+    slugPrefix: 'US',
     nameKeys: ['role', 'want'],
     tool: {
       name: 'extract_user_story',
-      description: 'Extract a user story in Role / Want / So-That format.',
+      description: 'Extract a user story in Role / Want / So-That format. A user story is an ' +
+        'organizational/backlog lens — capture its narrative and which requirements it is realized by. ' +
+        'The actual design (the testable conditions) lives in acceptance criteria and requirements, not here.',
       properties: {
         role:                { type: 'string', description: 'The type of user — their role or title' },
         want:                { type: 'string', description: 'What this user wants the system to do' },
         so_that:             { type: 'string', description: 'The business reason — why they want it' },
-        acceptance_criteria: { type: 'array',  items: { type: 'string' }, description: 'Testable conditions for completion' },
+        acceptance_criteria: { type: 'array',  items: { type: 'string' }, description: 'Testable conditions for completion (captured for reference; the canonical home is the acceptance-criterion entities)' },
         priority:            { type: 'string', enum: ['must-have', 'should-have', 'could-have'], description: 'Priority' },
+        requirement_refs:    { type: 'array',  items: { type: 'string' }, description: 'FR/NFR slugs from the "existing design" list that this story is realized by, e.g. ["FR-003","NFR-001"]. Only use slugs shown in the existing design — never invent one. Traceability references, not duplicated design.' },
       },
       required: ['role', 'want', 'so_that'],
     },
+    // NOTE: acceptance_criteria is intentionally NOT in fieldMap — it rides in the
+    // extraction JSON / Build Spec but is never materialized (no duplication; the
+    // canonical home is asdlc_acceptance_criterion).
+    fieldMap: {
+      role:             { col: 'role' },
+      want:             { col: 'want' },
+      so_that:          { col: 'so_that' },
+      priority:         { col: 'priority' },
+      requirement_refs: { col: 'requirement_refs', json: true },
+      ingest_id:        { col: 'ingest_id' },
+    },
+    parentLinks: [],
   },
   {
     entity_type: 'data_source',
-    order: 52, materializable: false, summarizable: false,
+    order: 52, materializable: true, summarizable: false, injectsIngestId: true,
+    table: 'asdlc_data_source',
+    pk: 'data_source_id',
+    slugPrefix: 'DS',
     nameKeys: ['source_name'],
     tool: {
       name: 'extract_data_source',
@@ -803,6 +839,17 @@ const REGISTRY = [
       },
       required: ['source_name', 'source_type'],
     },
+    fieldMap: {
+      source_name:         { col: 'source_name' },
+      source_type:         { col: 'source_type' },
+      description:         { col: 'description' },
+      access_type:         { col: 'access_type' },
+      access_requirements: { col: 'access_requirements', json: true },
+      contains_pii:        { col: 'contains_pii', transform: boolInt },
+      rate_limits:         { col: 'rate_limits' },
+      ingest_id:           { col: 'ingest_id' },
+    },
+    parentLinks: [],
   },
   {
     entity_type: 'process_segment',

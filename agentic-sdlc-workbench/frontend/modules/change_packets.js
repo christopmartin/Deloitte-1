@@ -1166,10 +1166,11 @@ function renderDetail(p, pane) {
                 const resultDiv = el('div', { style: 'margin-top:10px;padding:10px 12px;background:var(--color-accent-light);border:1px solid var(--color-accent);border-radius:6px;font-size:12px' });
                 resultDiv.appendChild(el('div', { style: 'font-weight:600;margin-bottom:6px;color:var(--color-accent)' }, '✓ Applied to design tables'));
                 const stats = [
-                  ar.applied  ? `${ar.applied} created`  : '',
-                  ar.updated  ? `${ar.updated} updated`  : '',
-                  ar.deleted  ? `${ar.deleted} retired`  : '',
-                  ar.skipped  ? `${ar.skipped} skipped`  : '',
+                  ar.applied   ? `${ar.applied} created`   : '',
+                  ar.updated   ? `${ar.updated} updated`   : '',
+                  ar.deleted   ? `${ar.deleted} retired`   : '',
+                  ar.evidence  ? `${ar.evidence} captured as supporting evidence` : '',
+                  ar.skipped   ? `${ar.skipped} skipped`   : '',
                 ].filter(Boolean);
                 resultDiv.appendChild(el('div', { style: 'color:var(--color-text)' }, stats.join(' · ') || 'No changes applied'));
                 if (ar.errors && ar.errors.length) {

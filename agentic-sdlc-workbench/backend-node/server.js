@@ -1030,7 +1030,7 @@ const TESTABLE_SCOPE_OF = { use_case: 'use_case', workflow: 'workflow', agent_sp
  * shape as applyChangePacket so callers can treat it uniformly.
  */
 function applyOneItem(item, cp, uid) {
-  const result = { applied: 0, updated: 0, deleted: 0, skipped: 0, errors: [], createdTestable: [] };
+  const result = { applied: 0, updated: 0, deleted: 0, skipped: 0, evidence: 0, errors: [], createdTestable: [] };
 
   const fp = item.field_path || '';
   if (!new RegExp(`^${item.entity_type}\\.(new_record|create|update|delete)$`).test(fp)) {
@@ -1042,8 +1042,8 @@ function applyOneItem(item, cp, uid) {
   let data; try { data = JSON.parse(item.new_value); } catch { data = {}; }
 
   if (!entity || !entity.materializable) {
-    markItemApplied(item.change_packet_item_id, '[not materialized — no target table in v1]');
-    result.skipped++;
+    markItemApplied(item.change_packet_item_id, '[captured as supporting evidence — no design table for this type]');
+    result.evidence++;
     return result;
   }
 
@@ -1181,7 +1181,7 @@ function applyChangePacket(cpId, uid) {
   );
 
   const idMap = {};
-  const result = { applied: 0, updated: 0, deleted: 0, skipped: 0, errors: [], createdTestable: [] };
+  const result = { applied: 0, updated: 0, deleted: 0, skipped: 0, evidence: 0, errors: [], createdTestable: [] };
 
   for (const item of ordered) {
     if (item.applied_at) { result.skipped++; continue; }
@@ -1202,8 +1202,8 @@ function applyChangePacket(cpId, uid) {
     let data; try { data = JSON.parse(item.new_value); } catch { data = {}; }
 
     if (!entity || !entity.materializable) {
-      markItemApplied(item.change_packet_item_id, '[not materialized — no target table in v1]');
-      result.skipped++;
+      markItemApplied(item.change_packet_item_id, '[captured as supporting evidence — no design table for this type]');
+      result.evidence++;
       continue;
     }
 
@@ -4926,10 +4926,34 @@ app.get('/api/v1/projects/:id/build-export', async (req, res) => {
     }
   }
 
-  // ── Extraction-based sections ──────────────────────────────────────────────
+  // ── Materialized BRD design elements (guardrails, data sources) ─────────────
+  // These now have real design tables, so read the canonical rows. Fall back to the
+  // latest ingest's extractions for older projects whose items predate materialization
+  // (so their Build Spec is unchanged).
+  const MATERIALIZED_BRD = {
+    guardrails:   { table: 'asdlc_guardrail',   type: 'guardrail',   json: [] },
+    data_sources: { table: 'asdlc_data_source', type: 'data_source', json: ['access_requirements'] },
+  };
+  for (const [sectionKey, spec] of Object.entries(MATERIALIZED_BRD)) {
+    if (!sections.includes(sectionKey)) continue;
+    const rows = db.prepare(
+      `SELECT * FROM ${spec.table} WHERE project_id = ? AND (lifecycle_status IS NULL OR lifecycle_status != 'retired') ORDER BY slug`
+    ).all(req.params.id);
+    if (rows.length) {
+      data[sectionKey] = rows.map(r => { const o = { ...r }; for (const c of spec.json) o[c] = parseJson(o[c]); return o; });
+    } else {
+      data[sectionKey] = ingestDoc
+        ? db.prepare('SELECT entity_data FROM asdlc_ingest_extraction WHERE ingest_id = ? AND entity_type = ? ORDER BY rowid')
+            .all(ingestDoc.ingest_id, spec.type).map(r => parseJson(r.entity_data) || {})
+        : [];
+    }
+  }
+
+  // ── Extraction-based (supporting-evidence) sections ─────────────────────────
+  // user_stories stays extraction-sourced on purpose: the materialized story table is
+  // a thin traceability home (narrative + requirement_refs) and intentionally omits the
+  // acceptance-criteria content the evidence section renders.
   const EXTRACTION_TYPES = {
-    guardrails:     'guardrail',
-    data_sources:   'data_source',
     test_scenarios: 'test_scenario',
     user_stories:   'user_story',
     governance:     'governance_control',
@@ -6070,14 +6094,15 @@ function buildExportMarkdown(project, baseline, sections, data) {
     if (!data.guardrails.length) {
       lines.push('*No guardrails defined.*'); lines.push('');
     } else {
-      lines.push('| ID | Name | Enforcement | Description |');
-      lines.push('|---|---|---|---|');
+      lines.push('| ID | Name | Severity | Action if Triggered | Rule |');
+      lines.push('|---|---|---|---|---|');
       for (const g of data.guardrails) {
-        const id   = g.guardrail_id_ref || g.guardrail_id || '';
-        const name = g.name || g.guardrail_name || '';
-        const enf  = mdCell(g.enforcement_level || g.enforcement);
-        const desc = mdCell(g.description || g.guardrail_description);
-        lines.push(`| ${mdCell(id)} | ${mdCell(name)} | ${enf} | ${desc} |`);
+        const id   = g.slug || g.guardrail_id_ref || g.guardrail_id || '';
+        const name = g.rule_name || g.name || g.guardrail_name || '';
+        const sev  = mdCell(g.severity);
+        const act  = mdCell(g.action_if_triggered || g.enforcement_level || g.enforcement);
+        const rule = mdCell(g.rule_text || g.description || g.guardrail_description);
+        lines.push(`| ${mdCell(id)} | ${mdCell(name)} | ${sev} | ${act} | ${rule} |`);
       }
       lines.push('');
     }
@@ -6090,15 +6115,18 @@ function buildExportMarkdown(project, baseline, sections, data) {
     if (!data.data_sources.length) {
       lines.push('*No data sources defined.*'); lines.push('');
     } else {
-      lines.push('| System | Access Type | Sensitivity | Owner | Key Fields |');
-      lines.push('|---|---|---|---|---|');
+      lines.push('| ID | System | Type | Access | Contains PII | Description |');
+      lines.push('|---|---|---|---|---|---|');
       for (const ds of data.data_sources) {
-        const system = mdCell(ds.source_system  || ds.system_name || ds.name);
-        const access = mdCell(ds.access_method  || ds.access_type);
-        const sens   = mdCell(ds.data_sensitivity || ds.sensitivity);
-        const owner  = mdCell(ds.data_owner     || ds.owner);
-        const fields = mdCell(ds.key_fields || ds.table_or_document);
-        lines.push(`| ${system} | ${access} | ${sens} | ${owner} | ${fields} |`);
+        const id     = ds.slug || ds.data_source_id || '';
+        const system = mdCell(ds.source_name || ds.source_system || ds.system_name || ds.name);
+        const type   = mdCell(ds.source_type);
+        const access = mdCell(ds.access_type || ds.access_method);
+        const pii    = (ds.contains_pii === 1 || ds.contains_pii === true) ? 'Yes'
+                     : (ds.contains_pii === 0 || ds.contains_pii === false) ? 'No'
+                     : mdCell(ds.data_sensitivity || ds.sensitivity);
+        const desc   = mdCell(ds.description);
+        lines.push(`| ${mdCell(id)} | ${system} | ${type} | ${access} | ${pii} | ${desc} |`);
       }
       lines.push('');
     }
@@ -6138,15 +6166,18 @@ function buildExportMarkdown(project, baseline, sections, data) {
       }
       for (const [sprint, stories] of Object.entries(bySprint)) {
         lines.push(`### Sprint ${sprint}`); lines.push('');
-        lines.push('| ID | Type | Title | Description | Acceptance Criteria |');
-        lines.push('|---|---|---|---|---|');
+        lines.push('| ID | Story | Priority | Acceptance Criteria |');
+        lines.push('|---|---|---|---|');
         for (const us of stories) {
-          const id    = us.story_id_ref || us.user_story_id || us.id || '';
-          const type  = us.story_type   || us.type          || '';
-          const title = mdCell(us.title || us.story_title);
-          const desc  = mdCell(us.description || us.story_description);
+          const id    = us.slug || us.story_id_ref || us.user_story_id || us.id || '';
+          // Render the canonical "As a X, I want Y, so that Z" narrative; fall back to
+          // legacy title/description if a story predates the role/want/so_that shape.
+          const story = us.role || us.want || us.so_that
+            ? `As a ${us.role || '—'}, I want ${us.want || '—'}${us.so_that ? `, so that ${us.so_that}` : ''}`
+            : (us.title || us.story_title || us.description || us.story_description || '');
+          const prio  = mdCell(us.priority || us.story_type || us.type);
           const ac    = mdCell(us.acceptance_criteria);
-          lines.push(`| ${mdCell(id)} | ${mdCell(type)} | ${title} | ${desc} | ${ac} |`);
+          lines.push(`| ${mdCell(id)} | ${mdCell(story)} | ${prio} | ${ac} |`);
         }
         lines.push('');
       }
