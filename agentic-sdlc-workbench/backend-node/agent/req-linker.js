@@ -28,7 +28,9 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const aiConfig  = require('./ai-config');
 
-const LINKER_MODEL = 'claude-haiku-4-5-20251001';
+// Model resolved at call-time so admin changes take effect without a restart.
+// Default: Haiku (fast/cheap lightweight inference). Configurable via Admin AI Settings.
+function linkerModel() { return aiConfig.resolveModel('req_linker'); }
 
 /**
  * Match orphan requirements to their parent use cases.
@@ -82,8 +84,9 @@ async function linkRequirements(orphanReqs, useCases, projectId) {
 
   let response;
   try {
+    const model = linkerModel();
     response = await client.messages.create({
-      model: LINKER_MODEL,
+      model,
       max_tokens: 1024,
       messages: [{ role: 'user', content: prompt }],
     });
@@ -99,7 +102,7 @@ async function linkRequirements(orphanReqs, useCases, projectId) {
         projectId,
         source: 'req_linker',
         refId:  null,
-        model:  LINKER_MODEL,
+        model:  linkerModel(),
         usage:  response.usage,
       });
     } catch { /* ignore */ }

@@ -1390,6 +1390,7 @@ app.post('/api/v1/change-packets/:id/send-back', async (req, res) => {
 // ──────────────────────────────────────────────
 const AI_SETTING_KEYS = [
   'extraction_model', 'quality_reviewer_model', 'prompt_drafter_model', 'build_review_model',
+  'req_linker_model',
   'extraction_thinking_enabled', 'extraction_thinking_budget', 'max_tokens',
 ];
 
@@ -1401,6 +1402,7 @@ app.get('/api/v1/settings/ai', (_req, res) => {
       quality_reviewer_model:      aiConfig.resolveModel('quality_reviewer'),
       prompt_drafter_model:        aiConfig.resolveModel('prompt_drafter'),
       build_review_model:          aiConfig.resolveModel('build_review'),
+      req_linker_model:            aiConfig.resolveModel('req_linker'),
       extraction_thinking_enabled: String(getSetting('extraction_thinking_enabled', 'false')) === 'true',
       extraction_thinking_budget:  parseInt(getSetting('extraction_thinking_budget', '4000'), 10),
       max_tokens:                  aiConfig.getMaxTokens(),
@@ -1452,10 +1454,30 @@ app.get('/api/v1/usage', (req, res) => {
 });
 
 app.get('/api/v1/projects/:id/usage', (req, res) => {
+  const pid = req.params.id;
   const rows = db.prepare(
-    "SELECT * FROM asdlc_ai_usage WHERE project_id = ? ORDER BY created_at DESC LIMIT 200"
-  ).all(req.params.id);
-  res.json(rows);
+    "SELECT * FROM asdlc_ai_usage WHERE project_id = ? ORDER BY created_at DESC LIMIT 50"
+  ).all(pid);
+  const totals = db.prepare(
+    `SELECT COUNT(*) AS runs,
+            COALESCE(SUM(input_tokens),0)  AS input_tokens,
+            COALESCE(SUM(output_tokens),0) AS output_tokens,
+            COALESCE(SUM(cost_usd),0)      AS cost_usd
+     FROM asdlc_ai_usage WHERE project_id = ?`
+  ).get(pid);
+  const byModel = db.prepare(
+    `SELECT model, COUNT(*) AS runs,
+            COALESCE(SUM(input_tokens),0)  AS input_tokens,
+            COALESCE(SUM(output_tokens),0) AS output_tokens,
+            COALESCE(SUM(cost_usd),0)      AS cost_usd
+     FROM asdlc_ai_usage WHERE project_id = ? GROUP BY model ORDER BY cost_usd DESC`
+  ).all(pid);
+  const bySource = db.prepare(
+    `SELECT source, COUNT(*) AS runs,
+            COALESCE(SUM(cost_usd),0) AS cost_usd
+     FROM asdlc_ai_usage WHERE project_id = ? GROUP BY source ORDER BY cost_usd DESC`
+  ).all(pid);
+  res.json({ rows, totals, by_model: byModel, by_source: bySource });
 });
 
 // Usage for a single ingest document (surfaced on the ingest detail screen)

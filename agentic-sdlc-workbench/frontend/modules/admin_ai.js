@@ -12,6 +12,7 @@ const ROLE_FIELDS = [
   { key: 'quality_reviewer_model', label: 'Quality reviewer',     hint: 'Audits design entities for gaps/conflicts' },
   { key: 'prompt_drafter_model',   label: 'Agent prompt drafter', hint: 'Drafts agent system prompts' },
   { key: 'build_review_model',     label: 'Build-spec AI review', hint: 'Optional review appended to the build export' },
+  { key: 'req_linker_model',       label: 'Requirement Linker',   hint: 'Infers use-case assignments for orphaned requirements at promote time (AI Agent)' },
 ];
 
 function fmtTokens(n) {
@@ -117,6 +118,7 @@ export async function render(container) {
         quality_reviewer_model:      inputs.quality_reviewer_model.value,
         prompt_drafter_model:        inputs.prompt_drafter_model.value,
         build_review_model:          inputs.build_review_model.value,
+        req_linker_model:            inputs.req_linker_model.value,
         extraction_thinking_enabled: inputs.extraction_thinking_enabled.checked,
         extraction_thinking_budget:  parseInt(inputs.extraction_thinking_budget.value, 10) || 4000,
         max_tokens:                  parseInt(inputs.max_tokens.value, 10) || 8192,

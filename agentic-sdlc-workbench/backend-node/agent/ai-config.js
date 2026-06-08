@@ -30,6 +30,7 @@ const ROLE_ENV = {
   quality_reviewer: 'CLAUDE_QUALITY_REVIEWER_MODEL',
   prompt_drafter:   'CLAUDE_PROMPT_DRAFTER_MODEL',
   build_review:     'CLAUDE_BUILD_REVIEW_MODEL',
+  req_linker:       'CLAUDE_REQ_LINKER_MODEL',
 };
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
@@ -41,6 +42,7 @@ const ROLE_DEFAULTS = {
   reverse_engineer:   'claude-opus-4-8',
   reconciler:         'claude-opus-4-8',
   reconcile_reviewer: 'claude-opus-4-8',
+  req_linker:         'claude-haiku-4-5-20251001',   // lightweight inference; fast + cheap
 };
 const ROLE_THINKING_DEFAULT = { reverse_engineer: 'true', reconciler: 'true', reconcile_reviewer: 'true' };
 const ROLE_THINKING_BUDGET  = { reverse_engineer: '8000', reconciler: '8000', reconcile_reviewer: '8000' }; // ≥8000 → effort 'high'

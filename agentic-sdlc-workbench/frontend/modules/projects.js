@@ -341,6 +341,92 @@ function renderDetail(p, pane) {
   footer.appendChild(saveBtn);
   body.appendChild(footer);
 
+  // ── AI Cost section (async-loaded) ──────────────────────────────────────────
+  const costSection = el('div', { className: 'detail-section' });
+  costSection.appendChild(el('h4', {}, 'AI Cost'));
+  const costBody = el('div', {});
+  costBody.appendChild(el('p', { className: 'text-muted text-sm' }, 'Loading…'));
+  costSection.appendChild(costBody);
+  body.appendChild(costSection);
+
+  // Load async — don't block render
+  apiFetch(`/projects/${p.project_id}/usage`).then(usage => {
+    costBody.innerHTML = '';
+    const t = usage.totals || {};
+    const fmtC = n => n == null ? '—' : '$' + Number(n).toFixed(4);
+    const fmtT = n => { n = Number(n || 0); return n >= 1000 ? (n/1000).toFixed(1)+'k' : String(n); };
+    const fmtSrc = s => (s || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+
+    // Summary stat chips
+    const stats = el('div', { style: 'display:flex;gap:20px;flex-wrap:wrap;margin-bottom:12px' });
+    [[fmtC(t.cost_usd), 'Est. total cost'], [String(t.runs||0), 'AI Agent runs'],
+     [fmtT(t.input_tokens), 'Input tokens'], [fmtT(t.output_tokens), 'Output tokens']
+    ].forEach(([val, lbl]) => stats.appendChild(el('div', {},
+      el('div', { style: 'font-size:20px;font-weight:700' }, val),
+      el('div', { style: 'font-size:11px;color:var(--text-muted)' }, lbl))));
+    costBody.appendChild(stats);
+
+    if (!(usage.rows||[]).length) {
+      costBody.appendChild(el('p', { className: 'text-muted text-sm' }, 'No AI activity recorded for this Application yet.'));
+      return;
+    }
+
+    // By AI Agent (source)
+    if ((usage.by_source||[]).length) {
+      costBody.appendChild(el('h5', { style: 'margin:10px 0 6px' }, 'By AI Agent'));
+      const tbl = el('table', { className: 'dr-compact-table', style: 'width:100%;margin-bottom:12px' });
+      tbl.appendChild(el('thead', {}, el('tr', {},
+        el('th', {}, 'AI Agent'), el('th', { style:'text-align:right' }, 'Runs'),
+        el('th', { style:'text-align:right' }, 'Est. Cost'))));
+      const tb = el('tbody');
+      usage.by_source.forEach(r => tb.appendChild(el('tr', {},
+        el('td', {}, fmtSrc(r.source)),
+        el('td', { style:'text-align:right' }, String(r.runs)),
+        el('td', { style:'text-align:right;font-family:monospace' }, fmtC(r.cost_usd)))));
+      tbl.appendChild(tb);
+      costBody.appendChild(tbl);
+    }
+
+    // By model
+    if ((usage.by_model||[]).length) {
+      costBody.appendChild(el('h5', { style: 'margin:10px 0 6px' }, 'By model'));
+      const tbl = el('table', { className: 'dr-compact-table', style: 'width:100%;margin-bottom:12px' });
+      tbl.appendChild(el('thead', {}, el('tr', {},
+        el('th', {}, 'Model'), el('th', { style:'text-align:right' }, 'Runs'),
+        el('th', { style:'text-align:right' }, 'In'), el('th', { style:'text-align:right' }, 'Out'),
+        el('th', { style:'text-align:right' }, 'Est. Cost'))));
+      const tb = el('tbody');
+      usage.by_model.forEach(r => tb.appendChild(el('tr', {},
+        el('td', {}, r.model || '—'),
+        el('td', { style:'text-align:right' }, String(r.runs)),
+        el('td', { style:'text-align:right;font-family:monospace' }, fmtT(r.input_tokens)),
+        el('td', { style:'text-align:right;font-family:monospace' }, fmtT(r.output_tokens)),
+        el('td', { style:'text-align:right;font-family:monospace' }, fmtC(r.cost_usd)))));
+      tbl.appendChild(tb);
+      costBody.appendChild(tbl);
+    }
+
+    // Recent runs
+    costBody.appendChild(el('h5', { style: 'margin:10px 0 6px' }, 'Recent runs'));
+    const tbl = el('table', { className: 'dr-compact-table', style: 'width:100%' });
+    tbl.appendChild(el('thead', {}, el('tr', {},
+      el('th', {}, 'When'), el('th', {}, 'AI Agent'), el('th', {}, 'Model'),
+      el('th', { style:'text-align:right' }, 'In'), el('th', { style:'text-align:right' }, 'Out'),
+      el('th', { style:'text-align:right' }, 'Cost'))));
+    const tb = el('tbody');
+    (usage.rows||[]).slice(0,15).forEach(r => tb.appendChild(el('tr', {},
+      el('td', { style:'white-space:nowrap' }, (r.created_at||'').slice(0,16).replace('T',' ')),
+      el('td', {}, el('span', { className: 'badge' }, fmtSrc(r.source))),
+      el('td', {}, r.model || '—'),
+      el('td', { style:'text-align:right;font-family:monospace' }, fmtT(r.input_tokens)),
+      el('td', { style:'text-align:right;font-family:monospace' }, fmtT(r.output_tokens)),
+      el('td', { style:'text-align:right;font-family:monospace' }, fmtC(r.cost_usd)))));
+    tbl.appendChild(tb);
+    costBody.appendChild(tbl);
+  }).catch(() => {
+    costBody.innerHTML = '<p class="text-muted text-sm">Could not load AI cost data.</p>';
+  });
+
   pane.appendChild(body);
 }
 
