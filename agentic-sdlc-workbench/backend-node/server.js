@@ -1240,6 +1240,33 @@ function applyChangePacket(cpId, uid) {
       throw err;   // fatal — caller rolls back the whole transaction
     }
   }
+  // ── Post-apply pass: link FRs/NFRs whose use_case_id is still NULL ────────────
+  // FRs/NFRs have order:0 and UCs have order:1, so FRs are materialised BEFORE the
+  // use case exists in idMap or the DB. resolveParents correctly reads use_case_title
+  // but finds nothing to link to. Now the full pass is done — UCs exist — fix them.
+  for (const item of ordered) {
+    if (!['functional_req', 'nonfunctional_req'].includes(item.entity_type)) continue;
+    if (item.operation !== 'create' || item.item_status === 'rejected') continue;
+    const entity = registry.byEntityType[item.entity_type];
+    if (!entity) continue;
+    try {
+      const row = db.prepare(`SELECT use_case_id FROM ${entity.table} WHERE ${entity.pk}=?`).get(item.entity_id);
+      if (!row || row.use_case_id !== null) continue;  // already linked or not found
+      let data; try { data = JSON.parse(item.new_value); } catch { data = {}; }
+      const ucTitle = data.use_case_title;
+      if (!ucTitle) continue;
+      const uc = db.prepare(
+        "SELECT use_case_id FROM asdlc_use_case WHERE project_id=? AND title=? " +
+        "AND (lifecycle_status IS NULL OR lifecycle_status != 'retired') LIMIT 1"
+      ).get(projectId, ucTitle);
+      if (uc) {
+        db.prepare(`UPDATE ${entity.table} SET use_case_id=? WHERE ${entity.pk}=?`)
+          .run(uc.use_case_id, item.entity_id);
+        console.log(`[apply] post-pass linked ${item.entity_type} "${ucTitle}" → UC`);
+      }
+    } catch { /* non-fatal: don't abort the whole apply for a missed link */ }
+  }
+
   return result;
 }
 
