@@ -1528,7 +1528,11 @@ app.post('/api/v1/projects/:id/mass-approve', (req, res) => {
   const newVersionString = bumpVersion(proj.version_string, rType);
   const projBefore = { ...proj };
 
-  // Approve all specified CPs that belong to this project
+  // Approve + MATERIALIZE all specified CPs in ONE transaction so a release is atomic:
+  // status flip + design materialization (applyChangePacket — the previously-missing
+  // pipeline) + project version bump + baseline all commit together, or roll back
+  // together. Test generation / feedback run AFTER commit (Claude calls must not run
+  // inside the DB transaction).
   const approveStmt = db.prepare(`
     UPDATE asdlc_change_packet
     SET status             = 'approved',
@@ -1538,64 +1542,94 @@ app.post('/api/v1/projects/:id/mass-approve', (req, res) => {
         version            = version + 1
     WHERE change_packet_id = ? AND project_id = ? AND status != 'approved'
   `);
+
   let approvedCount = 0;
-  for (const cpId of change_packet_ids) {
-    const cpBefore = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(cpId);
-    if (!cpBefore || cpBefore.project_id !== req.params.id) continue;
-    const info = approveStmt.run(uid, cpId, req.params.id);
-    if (info.changes > 0) {
+  const approvedCpIds  = [];
+  const createdTestable = [];
+  const applyErrors     = [];
+  let baseline = null;
+
+  db.exec('BEGIN');
+  try {
+    for (const cpId of change_packet_ids) {
+      const cpBefore = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(cpId);
+      if (!cpBefore || cpBefore.project_id !== req.params.id) continue;
+      const info = approveStmt.run(uid, cpId, req.params.id);
+      if (info.changes === 0) continue;
+
+      // Materialize this packet into the real design tables (was missing → CPs were
+      // marked approved/released but nothing was written). Fatal errors bubble to the
+      // outer catch and roll back the whole release; SoftSkips are collected.
+      const ar = applyChangePacket(cpId, uid);
+      if (ar.errors && ar.errors.length) applyErrors.push(...ar.errors.map(e => ({ change_packet_id: cpId, ...e })));
+      if (ar.createdTestable && ar.createdTestable.length) createdTestable.push(...ar.createdTestable);
+
       const cpAfter = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(cpId);
       auditLog('asdlc_change_packet', cpId, 'UPDATE', cpBefore, cpAfter, uid);
+      approvedCpIds.push(cpId);
       approvedCount++;
     }
-  }
-  if (approvedCount === 0) {
-    return res.status(400).json({ error: 'No eligible change packets found for this project' });
-  }
 
-  // Bump version_string and integer version on the project
-  db.prepare(`
-    UPDATE asdlc_project
-    SET version_string = ?,
-        version        = version + 1,
-        updated_at     = datetime('now'),
-        updated_by     = ?
-    WHERE project_id = ?
-  `).run(newVersionString, uid, req.params.id);
-  const projAfter = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(req.params.id);
-  auditLog('asdlc_project', req.params.id, 'UPDATE', projBefore, projAfter, uid);
+    if (approvedCount === 0) {
+      db.exec('ROLLBACK');
+      return res.status(400).json({ error: 'No eligible change packets found for this project' });
+    }
 
-  // Create a baseline record to represent this release
-  const baselineId = generateId();
-  const relLabel = rType.charAt(0).toUpperCase() + rType.slice(1);
-  const baselineName = `v${newVersionString} — ${relLabel} Release`;
-  try {
+    // Bump version_string and integer version on the project
     db.prepare(`
-      INSERT INTO asdlc_baseline
-        (baseline_id, project_id, baseline_name, baseline_type, baseline_status,
-         locked_at, created_by, updated_by)
-      VALUES (?, ?, ?, ?, 'approved', datetime('now'), ?, ?)
-    `).run(baselineId, req.params.id, baselineName, rType, uid, uid);
-  } catch (e) {
-    // baseline_type enum may reject 'major'/'minor'/'patch' — fall back to 'production'
+      UPDATE asdlc_project
+      SET version_string = ?, version = version + 1, updated_at = datetime('now'), updated_by = ?
+      WHERE project_id = ?
+    `).run(newVersionString, uid, req.params.id);
+    const projAfter = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(req.params.id);
+    auditLog('asdlc_project', req.params.id, 'UPDATE', projBefore, projAfter, uid);
+
+    // Create a baseline record to represent this release (non-fatal if it fails)
+    const baselineId = generateId();
+    const relLabel = rType.charAt(0).toUpperCase() + rType.slice(1);
+    const baselineName = `v${newVersionString} — ${relLabel} Release`;
     try {
       db.prepare(`
-        INSERT INTO asdlc_baseline
-          (baseline_id, project_id, baseline_name, baseline_type, baseline_status,
-           locked_at, created_by, updated_by)
-        VALUES (?, ?, ?, 'production', 'approved', datetime('now'), ?, ?)
-      `).run(baselineId, req.params.id, baselineName, uid, uid);
-    } catch (e2) {
-      console.warn('[mass-approve] Could not create baseline:', e2.message);
+        INSERT INTO asdlc_baseline (baseline_id, project_id, baseline_name, baseline_type, baseline_status, locked_at, created_by, updated_by)
+        VALUES (?, ?, ?, ?, 'approved', datetime('now'), ?, ?)
+      `).run(baselineId, req.params.id, baselineName, rType, uid, uid);
+    } catch (e) {
+      // baseline_type enum may reject 'major'/'minor'/'patch' — fall back to 'production'
+      try {
+        db.prepare(`
+          INSERT INTO asdlc_baseline (baseline_id, project_id, baseline_name, baseline_type, baseline_status, locked_at, created_by, updated_by)
+          VALUES (?, ?, ?, 'production', 'approved', datetime('now'), ?, ?)
+        `).run(baselineId, req.params.id, baselineName, uid, uid);
+      } catch (e2) { console.warn('[mass-approve] Could not create baseline:', e2.message); }
     }
+    baseline = db.prepare('SELECT * FROM asdlc_baseline WHERE baseline_id = ?').get(baselineId) || null;
+
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    console.error('[mass-approve] failed — rolled back:', err.message);
+    return res.status(500).json({ error: `Mass-approve failed (no changes applied): ${err.message}` });
   }
-  const baseline = db.prepare('SELECT * FROM asdlc_baseline WHERE baseline_id = ?').get(baselineId);
+
+  // ── Post-commit side effects (outside the transaction) ──────────────────────
+  for (const cpId of approvedCpIds) {
+    try { recordFeedbackForCp(db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(cpId), 'accepted_asis', uid); }
+    catch (e) { console.error('[mass-approve feedback]', e.message); }
+  }
+  if (createdTestable.length) {
+    Promise.allSettled(createdTestable.map(e => generateAndInsertTests(req.params.id, e.scope, e.entityId, uid)))
+      .then(rs => {
+        const n = rs.reduce((a, r) => a + (r.status === 'fulfilled' ? (r.value.created || 0) : 0), 0);
+        if (n) console.log(`[mass-approve] generated ${n} test case(s) across ${createdTestable.length} entit(ies)`);
+      });
+  }
 
   res.json({
     version_string: newVersionString,
     previous_version_string: proj.version_string || '1.0.0',
     release_type: rType,
     approved_count: approvedCount,
+    apply_errors: applyErrors,
     notes: notes || null,
     baseline,
   });
