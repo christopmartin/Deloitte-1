@@ -6458,6 +6458,75 @@ app.post('/api/v1/ingest-documents/:id/promote', (req, res) => {
     });
   }
 
+  // ── Orphan guard: never silently drop a REQUIRED parent and half-materialize the subtree.
+  // A staged child whose required parent (registry parentLinks, required:true) is neither being
+  // promoted here nor already materialized would fail to materialize on apply, cascading to its
+  // children (the use_case → workflow → steps/agents bug). Pull in a HIGH-CONFIDENCE parent that
+  // is merely needs_clarification (its flag is incidental); HARD-BLOCK a genuinely unresolved one.
+  {
+    const thrRow = db.prepare('SELECT confidence_threshold FROM asdlc_project WHERE project_id=?').get(doc.project_id);
+    const threshold = (thrRow && typeof thrRow.confidence_threshold === 'number') ? thrRow.confidence_threshold : 0.75;
+    const allEx = db.prepare('SELECT * FROM asdlc_ingest_extraction WHERE ingest_id=?')
+      .all(req.params.id).map(r => ({ ...r, entity_data: parseJson(r.entity_data) || {} }));
+    const nameOf = (type, data) => {
+      const e = registry.byEntityType[type];
+      for (const k of ((e && e.nameKeys) || ['title', 'name'])) if (data && data[k]) return data[k];
+      return (data && (data.title || data.name)) || null;
+    };
+    const parentAvailable = (parentType, name) => {
+      if (!name) return false;
+      if (extractions.some(e => e.entity_type === parentType && nameOf(parentType, e.entity_data) === name)) return true;
+      const e = registry.byEntityType[parentType];
+      if (e && e.materializable && e.table) {
+        const col = (e.nameKeys && e.nameKeys[0]) || 'name';
+        try { if (db.prepare(`SELECT 1 FROM ${e.table} WHERE project_id=? AND ${col}=? LIMIT 1`).get(doc.project_id, name)) return true; } catch { /* table without that col */ }
+      }
+      return false;
+    };
+    const pulledIn = [];
+    // Fixpoint: pulling in a parent may itself reference a (grand)parent.
+    let added = true, guard = 0;
+    while (added && guard++ < 12) {
+      added = false;
+      for (const child of [...extractions]) {
+        const e = registry.byEntityType[child.entity_type];
+        for (const link of ((e && e.parentLinks) || [])) {
+          if (!link.required) continue;
+          const pname = child.entity_data[link.nameKeyInData];
+          if (!pname || parentAvailable(link.parentType, pname)) continue;
+          const cand = allEx.find(x => x.entity_type === link.parentType && nameOf(link.parentType, x.entity_data) === pname
+            && !['staged', 'promoted'].includes(x.status) && !extractions.some(s => s.extraction_id === x.extraction_id));
+          if (cand && cand.confidence >= threshold) {
+            cand.status = 'staged'; extractions.push(cand); pulledIn.push(cand);
+            db.prepare("UPDATE asdlc_ingest_extraction SET status='staged' WHERE extraction_id=?").run(cand.extraction_id);
+            added = true;
+          }
+        }
+      }
+    }
+    if (pulledIn.length) console.log(`[promote] pulled in ${pulledIn.length} high-confidence required parent(s) flagged needs_clarification: ` +
+      pulledIn.map(p => `${p.entity_type} "${nameOf(p.entity_type, p.entity_data)}"`).join(', '));
+    const orphans = [];
+    for (const child of extractions) {
+      const e = registry.byEntityType[child.entity_type];
+      for (const link of ((e && e.parentLinks) || [])) {
+        if (!link.required) continue;
+        const pname = child.entity_data[link.nameKeyInData];
+        if (!pname || parentAvailable(link.parentType, pname)) continue;
+        const cand = allEx.find(x => x.entity_type === link.parentType && nameOf(link.parentType, x.entity_data) === pname);
+        orphans.push({ child: nameOf(child.entity_type, child.entity_data) || child.entity_type, child_type: child.entity_type,
+          requires: link.parentType, parent_name: pname, parent_status: cand ? cand.status : 'missing', parent_confidence: cand ? cand.confidence : null });
+      }
+    }
+    if (orphans.length) {
+      return res.status(409).json({
+        error: 'Cannot promote: required parent(s) are unresolved — promoting would orphan their children and leave a half-materialized design. ' +
+          'Answer/dismiss the parent\'s clarification (or raise its confidence) so it can be staged, then promote.',
+        orphans,
+      });
+    }
+  }
+
   // ONE CP per ingest iteration. Each extraction becomes a change_packet_item
   // carrying its operation (create/update/delete), the resolved target for
   // update/delete, the prior value (old_value) and a conflict classification.
