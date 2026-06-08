@@ -101,6 +101,52 @@ const EDIT_CONFIGS = {
         options: ['draft', 'in_review', 'approved', 'rejected'] },
     ],
   },
+  // ── ServiceNow round-trip: Level-1 design types ──
+  data_model: {
+    endpoint: (pid, eid) => `/projects/${pid}/data-models/${eid}`,
+    idKey: 'data_model_id', nameKey: 'name', label: 'Data Model',
+    fields: [
+      { key: 'name',          label: 'Name',                  type: 'text'     },
+      { key: 'purpose',       label: 'Purpose',               type: 'textarea' },
+      { key: 'physical_name', label: 'ServiceNow Table Name', type: 'text'     },
+      { key: 'extends_table', label: 'Extends Table',         type: 'text'     },
+    ],
+  },
+  form_design: {
+    endpoint: (pid, eid) => `/projects/${pid}/form-designs/${eid}`,
+    idKey: 'form_design_id', nameKey: 'name', label: 'Form Design',
+    fields: [
+      { key: 'name',             label: 'Name',                            type: 'text'      },
+      { key: 'view_name',        label: 'View',                            type: 'text'      },
+      { key: 'mandatory_fields', label: 'Mandatory Fields (one per line)', type: 'json-list' },
+      { key: 'readonly_fields',  label: 'Read-only Fields (one per line)', type: 'json-list' },
+      { key: 'behavior_notes',   label: 'Behavior Notes',                  type: 'textarea'  },
+    ],
+  },
+  business_logic: {
+    endpoint: (pid, eid) => `/projects/${pid}/business-logic/${eid}`,
+    idKey: 'business_logic_id', nameKey: 'name', label: 'Business Logic',
+    fields: [
+      { key: 'logic_type',    label: 'Type', type: 'select',
+        options: ['business_rule', 'client_script', 'script_include', 'ui_action', 'scheduled_job', 'ui_policy'] },
+      { key: 'name',          label: 'Name',                         type: 'text'     },
+      { key: 'plain_english', label: 'What it does (plain English)', type: 'textarea' },
+      { key: 'when_runs',     label: 'When it runs',                 type: 'text'     },
+      { key: 'conditions',    label: 'Conditions',                   type: 'textarea' },
+      { key: 'run_order',     label: 'Order',                        type: 'number'   },
+    ],
+  },
+  catalog_item: {
+    endpoint: (pid, eid) => `/projects/${pid}/catalog-items/${eid}`,
+    idKey: 'catalog_item_id', nameKey: 'name', label: 'Catalog Item',
+    fields: [
+      { key: 'name',              label: 'Name',             type: 'text'     },
+      { key: 'short_description', label: 'Short Description', type: 'textarea' },
+      { key: 'category',          label: 'Category',         type: 'text'     },
+      { key: 'who_can_order',     label: 'Who Can Order',    type: 'text'     },
+      { key: 'delivery_time',     label: 'Delivery Time',    type: 'text'     },
+    ],
+  },
   workflow: {
     endpoint: (pid, eid) => `/projects/${pid}/workflows/${eid}`,
     idKey:    'workflow_id',
@@ -328,6 +374,10 @@ export async function render(container) {
     { id: 'workflows',      label: 'Workflows',       group: 'design'   },
     { id: 'agents',         label: 'Agents',          group: 'design'   },
     { id: 'tools',          label: 'Tools',           group: 'design'   },
+    { id: 'data-models',    label: 'Data Model',      group: 'design'   },
+    { id: 'form-designs',   label: 'Forms',           group: 'design'   },
+    { id: 'business-logic', label: 'Business Logic',  group: 'design'   },
+    { id: 'catalog-items',  label: 'Catalog Items',   group: 'design'   },
     { id: 'guardrails',     label: 'Guardrails',      group: 'evidence' },
     { id: 'data-sources',   label: 'Data Sources',    group: 'evidence' },
     { id: 'test-scenarios', label: 'Test Scenarios',  group: 'evidence' },
@@ -675,6 +725,10 @@ const REPORT_META = {
   governance:        { title: 'Governance Controls',       noun: 'governance control'},
   relationships:     { title: 'Entity Relationship Map',   noun: 'relationship'      },
   requirements:    { title: 'Requirements',          noun: 'requirement'     },
+  'data-models':    { title: 'Data Model',            noun: 'table'        },
+  'form-designs':   { title: 'Form Designs',          noun: 'form'         },
+  'business-logic': { title: 'Business Logic',        noun: 'logic item'   },
+  'catalog-items':  { title: 'Catalog Items',         noun: 'catalog item' },
 };
 
 function detectTypeKey(data) {
@@ -682,6 +736,10 @@ function detectTypeKey(data) {
   if (data.workflows)         return 'workflows';
   if (data.tools)             return 'tools';
   if (data.use_cases)         return 'use-cases';
+  if (data.data_models)       return 'data-models';
+  if (data.form_designs)      return 'form-designs';
+  if (data.business_logic)    return 'business-logic';
+  if (data.catalog_items)     return 'catalog-items';
   if (data.guardrails)        return 'guardrails';
   if (data.data_sources)      return 'data-sources';
   if (data.test_scenarios)    return 'test-scenarios';
@@ -707,6 +765,10 @@ function buildReport(data) {
     'user-stories':   'user_stories',
     'governance':     'governance_controls',
     'requirements':   'requirements',
+    'data-models':    'data_models',
+    'form-designs':   'form_designs',
+    'business-logic': 'business_logic',
+    'catalog-items':  'catalog_items',
   };
   const dataKey = DATA_KEY_MAP[typeKey] || typeKey;
   const items = data[dataKey] || [];
@@ -786,6 +848,14 @@ function buildReport(data) {
     wrap.appendChild(buildUserStoriesSection(data.user_stories, data.ingest_document));
   } else if (data.governance_controls) {
     wrap.appendChild(buildGovernanceSection(data.governance_controls, data.ingest_document));
+  } else if (data.data_models) {
+    wrap.appendChild(buildDataModelsSection(data.data_models));
+  } else if (data.form_designs) {
+    wrap.appendChild(buildFormDesignsSection(data.form_designs));
+  } else if (data.business_logic) {
+    wrap.appendChild(buildBusinessLogicSection(data.business_logic));
+  } else if (data.catalog_items) {
+    wrap.appendChild(buildCatalogItemsSection(data.catalog_items));
   } else if (data.relationships) {
     wrap.appendChild(buildRelationshipsSection(data.relationships, data.functional_reqs || [], data.nonfunctional_reqs || [], data.use_case_map || {}));
   } else if (data.functional_reqs !== undefined || data.nonfunctional_reqs !== undefined) {
@@ -2809,6 +2879,193 @@ function buildGovernanceSection(items, ingestDoc) {
  * Click an item in column N to fill column N+1 with that item's children.
  * Each item also has a "→" drill link that switches to the entity's own tab.
  */
+// ─── ServiceNow round-trip: Level-1 design renderers ─────────────────────────
+// Read the materialized design (data model / forms / business logic / catalog)
+// at a business altitude. Level-2 provenance (source_*) is intentionally not shown.
+function rtHeader(section, entityType, obj) {
+  const hdr = el('div', { className: 'dr-agent-header' });
+  const nameEl = el('div', { className: 'dr-agent-name' });
+  const sb = slugBadge(obj.slug);
+  if (sb) nameEl.appendChild(sb);
+  nameEl.appendChild(document.createTextNode(obj.name || '(unnamed)'));
+  hdr.appendChild(nameEl);
+  const badges = el('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } });
+  badges.appendChild(statusPill(obj.lifecycle_status));
+  const editBtn = buildEditBtn(entityType, obj);
+  if (editBtn) badges.appendChild(editBtn);
+  hdr.appendChild(badges);
+  section.appendChild(hdr);
+}
+
+function buildDataModelsSection(items) {
+  const wrap = el('div', { className: 'dr-agent' });
+  items.forEach((dm, idx) => {
+    if (idx > 0) wrap.appendChild(el('div', { className: 'dr-page-break' }));
+    const section = el('div', { className: 'dr-agent' });
+    section.id = `dr-entity-${dm.data_model_id || idx}`;
+    rtHeader(section, 'data_model', dm);
+    const s = subSection('Overview');
+    const grid = el('div', { className: 'dr-kv-grid' });
+    kvRow(grid, 'Purpose', dm.purpose);
+    kvRow(grid, 'ServiceNow Table', dm.physical_name);
+    kvRow(grid, 'Extends', dm.extends_table);
+    kvRow(grid, 'Audited', dm.audited ? 'Yes' : 'No');
+    s.appendChild(grid);
+    section.appendChild(s);
+    const fields = asArray(dm.fields);
+    const fs = subSection(`Fields (${fields.length})`);
+    if (fields.length) {
+      const tbl = el('table', { className: 'dr-table' });
+      tbl.innerHTML = '<thead><tr><th>Field</th><th>Meaning</th><th style="width:110px">Type</th><th style="width:80px">Required</th><th>Choices / Ref</th></tr></thead>';
+      const tb = el('tbody');
+      fields.forEach(f => {
+        tb.appendChild(el('tr', {},
+          el('td', { style: { fontWeight: '600' } }, f.label || '—'),
+          el('td', { style: { fontSize: '12px' } }, f.meaning || '—'),
+          el('td', {}, f.type_business || '—'),
+          el('td', {}, f.mandatory ? 'Yes' : 'No'),
+          el('td', { style: { fontSize: '12px' } },
+            Array.isArray(f.choices) && f.choices.length ? f.choices.join(', ') : (f.references ? `→ ${f.references}` : '—'))
+        ));
+      });
+      tbl.appendChild(tb);
+      fs.appendChild(tbl);
+    } else {
+      fs.appendChild(el('div', { style: 'color:var(--text-muted);font-style:italic;font-size:12px' }, '— (no fields recorded)'));
+    }
+    section.appendChild(fs);
+    const rels = asArray(dm.relationships);
+    if (rels.length) {
+      const rsec = subSection(`Relationships (${rels.length})`);
+      rsec.appendChild(el('ul', { className: 'dr-numbered-list' },
+        ...rels.map(r => el('li', {}, `${r.kind || 'related'} → ${r.target || '?'}${r.description ? ' — ' + r.description : ''}`))));
+      section.appendChild(rsec);
+    }
+    wrap.appendChild(section);
+  });
+  return wrap;
+}
+
+function buildFormDesignsSection(items) {
+  const wrap = el('div', { className: 'dr-agent' });
+  items.forEach((fd, idx) => {
+    if (idx > 0) wrap.appendChild(el('div', { className: 'dr-page-break' }));
+    const section = el('div', { className: 'dr-agent' });
+    section.id = `dr-entity-${fd.form_design_id || idx}`;
+    rtHeader(section, 'form_design', fd);
+    const s = subSection('Overview');
+    const grid = el('div', { className: 'dr-kv-grid' });
+    kvRow(grid, 'View', fd.view_name);
+    kvRow(grid, 'Mandatory Fields', asArray(fd.mandatory_fields).join(', '));
+    kvRow(grid, 'Read-only Fields', asArray(fd.readonly_fields).join(', '));
+    kvRow(grid, 'Behavior', fd.behavior_notes);
+    s.appendChild(grid);
+    section.appendChild(s);
+    const secs = asArray(fd.sections);
+    const ss = subSection(`Sections (${secs.length})`);
+    if (secs.length) {
+      const tbl = el('table', { className: 'dr-table' });
+      tbl.innerHTML = '<thead><tr><th style="width:200px">Section</th><th>Fields</th><th style="width:80px">Columns</th></tr></thead>';
+      const tb = el('tbody');
+      secs.forEach(sec => {
+        tb.appendChild(el('tr', {},
+          el('td', { style: { fontWeight: '600' } }, sec.section_label || '—'),
+          el('td', { style: { fontSize: '12px' } }, Array.isArray(sec.fields) ? sec.fields.join(', ') : '—'),
+          el('td', {}, sec.columns != null ? String(sec.columns) : '—')
+        ));
+      });
+      tbl.appendChild(tb);
+      ss.appendChild(tbl);
+    } else {
+      ss.appendChild(el('div', { style: 'color:var(--text-muted);font-style:italic;font-size:12px' }, '— (no sections recorded)'));
+    }
+    section.appendChild(ss);
+    const rls = asArray(fd.related_lists);
+    if (rls.length) {
+      const rsec = subSection(`Related Lists (${rls.length})`);
+      rsec.appendChild(el('ul', { className: 'dr-numbered-list' },
+        ...rls.map(r => el('li', {}, `${r.label || r.table || '—'}${r.table && r.label ? ' (' + r.table + ')' : ''}`))));
+      section.appendChild(rsec);
+    }
+    wrap.appendChild(section);
+  });
+  return wrap;
+}
+
+function buildBusinessLogicSection(items) {
+  const wrap = el('div', { className: 'dr-agent' });
+  const TYPE_LABEL = { business_rule: 'Business Rule', client_script: 'Client Script', script_include: 'Script Include', ui_action: 'UI Action', scheduled_job: 'Scheduled Job', ui_policy: 'UI Policy' };
+  items.forEach((bl, idx) => {
+    if (idx > 0) wrap.appendChild(el('div', { className: 'dr-page-break' }));
+    const section = el('div', { className: 'dr-agent' });
+    section.id = `dr-entity-${bl.business_logic_id || idx}`;
+    const hdr = el('div', { className: 'dr-agent-header' });
+    const nameEl = el('div', { className: 'dr-agent-name' });
+    const sb = slugBadge(bl.slug);
+    if (sb) nameEl.appendChild(sb);
+    nameEl.appendChild(document.createTextNode(bl.name || '(unnamed)'));
+    hdr.appendChild(nameEl);
+    const badges = el('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } });
+    badges.appendChild(el('span', { className: 'tag tag-info', style: { fontSize: '10px' } }, TYPE_LABEL[bl.logic_type] || bl.logic_type || '—'));
+    badges.appendChild(statusPill(bl.lifecycle_status));
+    const editBtn = buildEditBtn('business_logic', bl);
+    if (editBtn) badges.appendChild(editBtn);
+    hdr.appendChild(badges);
+    section.appendChild(hdr);
+    const s = subSection('Overview');
+    const grid = el('div', { className: 'dr-kv-grid' });
+    kvRow(grid, 'What it does', bl.plain_english);
+    kvRow(grid, 'When it runs', bl.when_runs);
+    kvRow(grid, 'Conditions', bl.conditions);
+    kvRow(grid, 'Order', bl.run_order != null ? String(bl.run_order) : null);
+    s.appendChild(grid);
+    section.appendChild(s);
+    wrap.appendChild(section);
+  });
+  return wrap;
+}
+
+function buildCatalogItemsSection(items) {
+  const wrap = el('div', { className: 'dr-agent' });
+  items.forEach((ci, idx) => {
+    if (idx > 0) wrap.appendChild(el('div', { className: 'dr-page-break' }));
+    const section = el('div', { className: 'dr-agent' });
+    section.id = `dr-entity-${ci.catalog_item_id || idx}`;
+    rtHeader(section, 'catalog_item', ci);
+    const s = subSection('Overview');
+    const grid = el('div', { className: 'dr-kv-grid' });
+    kvRow(grid, 'Short Description', ci.short_description);
+    kvRow(grid, 'Category', ci.category);
+    kvRow(grid, 'Who Can Order', ci.who_can_order);
+    kvRow(grid, 'Delivery Time', ci.delivery_time);
+    s.appendChild(grid);
+    section.appendChild(s);
+    const vars = asArray(ci.variables);
+    const vs = subSection(`Variables (${vars.length})`);
+    if (vars.length) {
+      const tbl = el('table', { className: 'dr-table' });
+      tbl.innerHTML = '<thead><tr><th>Question</th><th style="width:110px">Type</th><th style="width:80px">Required</th><th>Choices / Help</th></tr></thead>';
+      const tb = el('tbody');
+      vars.forEach(v => {
+        tb.appendChild(el('tr', {},
+          el('td', { style: { fontWeight: '600' } }, v.label || '—'),
+          el('td', {}, v.type_business || '—'),
+          el('td', {}, v.mandatory ? 'Yes' : 'No'),
+          el('td', { style: { fontSize: '12px' } },
+            Array.isArray(v.choices) && v.choices.length ? v.choices.join(', ') : (v.help || '—'))
+        ));
+      });
+      tbl.appendChild(tb);
+      vs.appendChild(tbl);
+    } else {
+      vs.appendChild(el('div', { style: 'color:var(--text-muted);font-style:italic;font-size:12px' }, '— (no variables recorded)'));
+    }
+    section.appendChild(vs);
+    wrap.appendChild(section);
+  });
+  return wrap;
+}
+
 function buildRelationshipsSection(relationships, functionalReqs = [], nonfunctionalReqs = [], useCaseMap = {}) {
   const wrap = el('div', { className: 'dr-agent' });
 

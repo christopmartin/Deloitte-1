@@ -153,9 +153,14 @@ function buildExistingDesignSummary(projectId) {
 
     let rows;
     try {
+      // FR/NFR tables use 'status' instead of 'lifecycle_status'; fall back gracefully.
+      const sc = e.statusCol || 'lifecycle_status';
+      const notRetired = sc === 'status'
+        ? `${sc} != 'deleted'`
+        : `(${sc} IS NULL OR ${sc} != 'retired')`;
       rows = db.prepare(
         `SELECT slug, ${nameCol} AS nm FROM ${e.table}
-         WHERE project_id = ? AND (lifecycle_status IS NULL OR lifecycle_status != 'retired')
+         WHERE project_id = ? AND ${notRetired}
          ORDER BY slug`
       ).all(projectId);
     } catch { continue; }
@@ -218,9 +223,22 @@ function upsertExtraction(ingestId, entityType, entityData, confidence, status, 
 
 /** Write a clarification question — skip if an open question already exists for the same field. */
 function writeClarification(ingestId, round, q) {
+  q = q || {};
+  // The model may omit question_text or name it differently. node:sqlite cannot bind
+  // `undefined`, so coerce to a safe string and skip (rather than crash the whole
+  // extraction) when there is genuinely no question to ask.
+  const questionText = String(q.question_text || q.question || q.text || '').trim();
+  if (!questionText) {
+    console.warn('[claude-processor] raise_clarification with no question text — skipping');
+    return false;
+  }
+  const targetEntityType = String(q.target_entity_type || 'general');
+  const targetField      = String(q.target_field || 'general');
+  const contextSnippet   = String(q.context_snippet || q.why_uncertain || '').slice(0, 500);
+
   const already = db.prepare(
     "SELECT 1 FROM asdlc_ingest_clarification WHERE ingest_id=? AND target_entity_type=? AND target_field=? AND answer_text IS NULL"
-  ).get(ingestId, q.target_entity_type || 'general', q.target_field || 'general');
+  ).get(ingestId, targetEntityType, targetField);
   if (already) return false;
 
   db.prepare(`
@@ -230,10 +248,7 @@ function writeClarification(ingestId, round, q) {
     VALUES (?,?,?,?,?,?,?,datetime('now'))
   `).run(
     generateId(), ingestId, round,
-    q.question_text,
-    (q.context_snippet || q.why_uncertain || '').slice(0, 500),
-    q.target_entity_type || 'general',
-    q.target_field        || 'general'
+    questionText, contextSnippet, targetEntityType, targetField
   );
   return true;
 }
@@ -706,36 +721,41 @@ async function processDocument(ingestId) {
   const itemKeyToExId = new Map();       // "<type>::<target_slug>" → extraction_id (for reconcile replacement)
 
   for (const { name, input } of allToolUses) {
+    // One malformed tool call must never abort the whole extraction round — log and
+    // continue so the remaining (good) entities are still staged.
+    try {
+      // ── Clarification question ────────────────────────────────────────────
+      if (name === 'raise_clarification') {
+        if (writeClarification(ingestId, round, input)) clarified++;
+        continue;
+      }
 
-    // ── Clarification question ────────────────────────────────────────────
-    if (name === 'raise_clarification') {
-      if (writeClarification(ingestId, round, input)) clarified++;
-      continue;
-    }
+      const entityType = TOOL_TO_ENTITY[name];
+      if (!entityType) {
+        console.warn(`[claude-processor] Unknown tool name: ${name} — skipping`);
+        continue;
+      }
 
-    const entityType = TOOL_TO_ENTITY[name];
-    if (!entityType) {
-      console.warn(`[claude-processor] Unknown tool name: ${name} — skipping`);
-      continue;
-    }
+      // Strip meta fields before storing entity_data
+      const { confidence = 0, confidence_notes, ...entityData } = input;
+      const status = confidence >= threshold ? 'staged' : 'needs_clarification';
 
-    // Strip meta fields before storing entity_data
-    const { confidence = 0, confidence_notes, ...entityData } = input;
-    const status = confidence >= threshold ? 'staged' : 'needs_clarification';
+      const exId = upsertExtraction(ingestId, entityType, entityData, confidence, status, round);
+      pass1Items.push({ exId, entityType, entityData, confidence });
+      if (entityData.target_slug) itemKeyToExId.set(`${entityType}::${entityData.target_slug}`, exId);
 
-    const exId = upsertExtraction(ingestId, entityType, entityData, confidence, status, round);
-    pass1Items.push({ exId, entityType, entityData, confidence });
-    if (entityData.target_slug) itemKeyToExId.set(`${entityType}::${entityData.target_slug}`, exId);
-
-    if (status !== 'staged' && confidence_notes) {
-      // Claude signalled uncertainty but didn't raise a question — auto-generate one
-      const autoRaised = writeClarification(ingestId, round, {
-        question_text:      `The "${entityData.name || entityData.title || entityData.rule_name || entityType}" extraction has low confidence (${Math.round(confidence * 100)}%). ${confidence_notes} Can you provide more detail?`,
-        target_entity_type: entityType,
-        target_field:       'general',
-        context_snippet:    confidence_notes,
-      });
-      if (autoRaised) clarified++;
+      if (status !== 'staged' && confidence_notes) {
+        // Claude signalled uncertainty but didn't raise a question — auto-generate one
+        const autoRaised = writeClarification(ingestId, round, {
+          question_text:      `The "${entityData.name || entityData.title || entityData.rule_name || entityType}" extraction has low confidence (${Math.round(confidence * 100)}%). ${confidence_notes} Can you provide more detail?`,
+          target_entity_type: entityType,
+          target_field:       'general',
+          context_snippet:    confidence_notes,
+        });
+        if (autoRaised) clarified++;
+      }
+    } catch (err) {
+      console.error(`[claude-processor] tool call "${name}" failed — skipping this item: ${err.message}`);
     }
   }
 

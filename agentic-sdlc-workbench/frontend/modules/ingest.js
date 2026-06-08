@@ -64,6 +64,31 @@ let allDocs = [];
 let filterStatus = '';
 let filterType   = '';
 let filterArchived = false;   // when true, the catalog shows cancelled docs
+let _processingPoll = null;   // active setInterval id while a doc is 'processing'
+
+// ── Processing poll lifecycle ─────────────────────────────────────────────────
+// While a document is 'processing', poll its status every few seconds and re-render
+// the detail pane the moment it resolves (staged | review_required | failed). A new
+// renderDetail (or navigating away) supersedes any prior poll.
+function stopProcessingPoll() {
+  if (_processingPoll) { clearInterval(_processingPoll); _processingPoll = null; }
+}
+function startProcessingPoll(doc, pane) {
+  stopProcessingPoll();
+  _processingPoll = setInterval(async () => {
+    // Navigated away — the pane was detached. Stop polling.
+    if (!document.body.contains(pane)) { stopProcessingPoll(); return; }
+    let fresh;
+    try { fresh = await apiFetch(`/ingest-documents/${doc.ingest_id}`); }
+    catch { return; }   // transient network error — keep polling
+    if (fresh && fresh.ingest_status !== 'processing') {
+      stopProcessingPoll();
+      const cb = document.getElementById('ingest-catalog-body');
+      if (cb) refreshCatalog(cb, pane).catch(() => {});   // update the left-list status chip
+      renderDetail(fresh, pane);                           // render the resolved state
+    }
+  }, 4000);
+}
 
 // ── Render ────────────────────────────────────────────────────────────────────
 export async function render(container) {
@@ -174,6 +199,10 @@ function buildSubmitPanel() {
     <option value="test_scenarios">Test Scenarios</option>
     <option value="governance">Governance Controls</option>
     <option value="user_stories">User Stories</option>
+    <option value="data_model">Data Model / Schema (ServiceNow)</option>
+    <option value="form_design">Forms &amp; UI (ServiceNow)</option>
+    <option value="business_logic">Business Logic (ServiceNow)</option>
+    <option value="catalog_item">Catalog Items (ServiceNow)</option>
   `;
   scopeGroup.appendChild(scopeSelect);
 
@@ -478,6 +507,8 @@ function renderCatalog(catalogBody, paneRight) {
 
 // ── Detail pane ───────────────────────────────────────────────────────────────
 async function renderDetail(doc, pane) {
+  // A fresh render supersedes any in-flight processing poll (e.g. switching docs).
+  stopProcessingPoll();
   pane.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div></div>';
 
   // Fetch live state + extractions + clarifications + AI usage in parallel
@@ -558,6 +589,7 @@ async function renderDetail(doc, pane) {
 
   } else if (fresh.ingest_status === 'processing') {
     body.appendChild(buildProcessingSection());
+    startProcessingPoll(fresh, pane);   // auto-refresh when extraction resolves
 
   } else if (fresh.ingest_status === 'review_required') {
     const openQ = clarifications.filter(c => !c.answer_text);
@@ -670,20 +702,33 @@ function buildTriggerSection(doc, pane) {
   sec.appendChild(note);
 
   if (doc.ingest_status === 'failed') {
-    sec.appendChild(el('p', { style: { color: 'var(--color-danger)', fontSize: '13px', marginBottom: '10px' } },
+    const failBox = el('div', { style: {
+      color: 'var(--color-danger)', fontSize: '13px', marginBottom: '10px',
+      background: 'var(--color-bg)', border: '1px solid var(--color-danger, #C62828)',
+      borderLeft: '3px solid var(--color-danger, #C62828)', borderRadius: 'var(--radius)', padding: '10px 12px',
+    } });
+    failBox.appendChild(el('div', { style: { fontWeight: '600', marginBottom: doc.processing_notes ? '4px' : '0' } },
       '⚠ Previous run failed. You can re-queue the document below.'));
+    if (doc.processing_notes) {
+      failBox.appendChild(el('div', { style: { fontWeight: '400', whiteSpace: 'pre-wrap' } }, doc.processing_notes));
+    }
+    sec.appendChild(failBox);
   }
 
-  const startBtn = el('button', { className: 'btn btn-primary' }, '▶ Start Extraction');
+  const startBtn = el('button', { className: 'btn btn-primary' },
+    doc.ingest_status === 'failed' ? '▶ Re-run Extraction' : '▶ Start Extraction');
   startBtn.addEventListener('click', async () => {
     startBtn.disabled = true; startBtn.textContent = 'Starting…';
     try {
+      // /process returns 202 immediately; the run continues in the background and
+      // renderDetail() will show the spinner + poll until it resolves.
       await apiFetch(`/ingest-documents/${doc.ingest_id}/process`, { method: 'POST' });
-      showToast('Extraction started.', 'success');
+      showToast('Extraction started — this can take 1–3 minutes.', 'success');
       await renderDetail(doc, pane);
     } catch (err) {
       showToast(`Error: ${err.message}`, 'error');
-      startBtn.disabled = false; startBtn.textContent = '▶ Start Extraction';
+      startBtn.disabled = false;
+      startBtn.textContent = doc.ingest_status === 'failed' ? '▶ Re-run Extraction' : '▶ Start Extraction';
     }
   });
   sec.appendChild(startBtn);
@@ -697,6 +742,8 @@ function buildProcessingSection() {
   row.appendChild(el('div', { className: 'loading-spinner', style: { width: '14px', height: '14px', borderWidth: '2px' } }));
   row.appendChild(document.createTextNode('Agent is reading and interpreting this document…'));
   sec.appendChild(row);
+  sec.appendChild(el('p', { style: { fontSize: '12px', color: 'var(--color-text-muted)', marginTop: '8px' } },
+    'This typically takes 1–3 minutes for a full document. This view refreshes automatically when extraction completes — you can navigate away and come back.'));
   return sec;
 }
 

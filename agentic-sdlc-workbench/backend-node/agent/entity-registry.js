@@ -85,6 +85,36 @@ const j = (v, fallback) => JSON.stringify(v === undefined || v === null ? fallba
 // Columns that expect a JSON OBJECT but the tool may emit a plain string.
 const wrapText  = (v) => j(typeof v === 'string' ? { text: v }  : v, {});
 const wrapModel = (v) => j(typeof v === 'string' ? { model: v } : v, {});
+// node:sqlite cannot bind a JS boolean — coerce to 0/1 for INTEGER columns.
+const boolInt   = (v) => (v === true || v === 'true' || v === 1 || v === '1' ? 1 : 0);
+
+// ── ServiceNow round-trip: Level-2 provenance ────────────────────────────────
+// Hidden construct/identity metadata carried on each ServiceNow-sourced design
+// record so it can be regenerated & redeployed. Merged into the design tools'
+// properties + fieldMap so they materialize into real (hidden) columns.
+// NOTE (v1): the model copies these verbatim from per-construct provenance
+// headers the Fluent ingest adapter emits. A future hardening pass should have
+// the adapter attach source_sys_id deterministically (from keys.ts) rather than
+// relying on the model — sys_id is the round-trip identity key and must be exact.
+const PROVENANCE_FIELDS = {
+  source_sys_id: { type: 'string', description: 'ServiceNow sys_id of the source record. Copy VERBATIM from the "source_sys_id:" line in the provenance header above this construct. Never invent or guess one.' },
+  source_table:  { type: 'string', description: 'Originating ServiceNow metadata table (e.g. sys_db_object, sys_script, sys_ui_form, sc_cat_item). Copy verbatim from the "source_table:" line in the provenance header.' },
+  source_scope:  { type: 'string', description: 'Application scope, e.g. x_dnllp_airport_ca. Copy verbatim from the "source_scope:" line in the provenance header.' },
+  source_fluent: { type: 'string', description: 'The raw Fluent code snippet for this exact record, copied verbatim from the source.' },
+};
+const PROVENANCE_FIELDMAP = {
+  source_system: { col: 'source_system' },  // deterministic-only (e.g. 'servicenow'); never model-emitted
+  source_sys_id: { col: 'source_sys_id' },
+  source_table:  { col: 'source_table' },
+  source_scope:  { col: 'source_scope' },
+  source_fluent: { col: 'source_fluent' },
+  // source_hash is set DETERMINISTICALLY by the sync engine (Phase F) — the content
+  // hash of the captured ServiceNow artifact — so a later sync's tier-0 pre-diff can
+  // detect "unchanged" and skip the LLM. It is intentionally absent from
+  // PROVENANCE_FIELDS (the model-facing schema), so it is never model-emitted; it only
+  // needs a fieldMap entry so deterministic injection into entity_data materializes it.
+  source_hash:   { col: 'source_hash' },
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // THE REGISTRY
@@ -107,6 +137,7 @@ const REGISTRY = [
     materializable: true,
     summarizable: true,       // include in existing-design summary so AI can detect updates
     injectsIngestId: true,    // /promote injects doc.ingest_id before storing new_value
+    statusCol: 'status',      // uses 'status' not 'lifecycle_status' — must match buildExistingDesignSummary
     table: 'asdlc_functional_req',
     pk: 'fr_id',
     slugPrefix: 'FR',
@@ -124,7 +155,7 @@ const REGISTRY = [
         postconditions:  { type: 'string',  description: 'What is guaranteed to be true after successful fulfilment' },
         priority:        { type: 'string',  enum: ['must_have','should_have','could_have','wont_have'], description: 'MoSCoW priority' },
         source:          { type: 'string',  description: 'Citation — person name, meeting date, document section, etc.' },
-        use_case_title:  { type: 'string',  description: 'Title of the Use Case this requirement belongs to, if one is identifiable' },
+        use_case_title:  { type: 'string',  description: 'Title of the Use Case this requirement belongs to. ALWAYS populate this when a use case is identifiable — it is used to link the requirement to the correct use case and prevents orphaned records.' },
         dependencies:    { type: 'array',   items: { type: 'string' }, description: 'FR or NFR slugs this requirement depends on, e.g. ["FR-002","NFR-001"]' },
       },
       required: ['title', 'description'],
@@ -141,7 +172,7 @@ const REGISTRY = [
       ingest_id:      { col: 'ingest_id' },   // populated at promote time, not by AI
     },
     parentLinks: [
-      { col: 'use_case_id', parentType: 'use_case', nameKeyInData: 'use_case_title', required: false },
+      { col: 'use_case_id', parentType: 'use_case', nameKeyInData: 'use_case_title', required: false, tryFallback: true },
     ],
   },
 
@@ -151,6 +182,7 @@ const REGISTRY = [
     materializable: true,
     summarizable: true,
     injectsIngestId: true,
+    statusCol: 'status',      // uses 'status' not 'lifecycle_status' — must match buildExistingDesignSummary
     table: 'asdlc_nonfunctional_req',
     pk: 'nfr_id',
     slugPrefix: 'NFR',
@@ -168,7 +200,7 @@ const REGISTRY = [
         verification_method: { type: 'string', description: 'How this NFR will be verified — load test, audit, penetration test, etc.' },
         priority:            { type: 'string', enum: ['must_have','should_have','could_have','wont_have'], description: 'MoSCoW priority' },
         source:              { type: 'string', description: 'Citation — person name, meeting date, document section, etc.' },
-        use_case_title:      { type: 'string', description: 'Title of the Use Case this NFR constrains, if identifiable' },
+        use_case_title:      { type: 'string', description: 'Title of the Use Case this NFR constrains. ALWAYS populate this when a use case is identifiable — it is used to link the NFR to the correct use case and prevents orphaned records.' },
         dependencies:        { type: 'array',  items: { type: 'string' }, description: 'FR or NFR slugs this requirement depends on' },
       },
       required: ['title', 'category', 'description', 'measurable_target'],
@@ -185,7 +217,7 @@ const REGISTRY = [
       ingest_id:           { col: 'ingest_id' },
     },
     parentLinks: [
-      { col: 'use_case_id', parentType: 'use_case', nameKeyInData: 'use_case_title', required: false },
+      { col: 'use_case_id', parentType: 'use_case', nameKeyInData: 'use_case_title', required: false, tryFallback: true },
     ],
   },
 
@@ -514,11 +546,216 @@ const REGISTRY = [
     parentLinks: [],     // scope_entity_id resolved via scopeResolution path in mtCreate
   },
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ServiceNow round-trip: Level-1 design types (orders 9–12).
+  // Populated by ingesting a ServiceNow app's transformed Fluent source.
+  // data_model is the parent of form_design / business_logic, so it materializes
+  // first (lower order). Each carries hidden Level-2 provenance columns.
+  // ═══════════════════════════════════════════════════════════════════════════
+  {
+    entity_type: 'data_model',
+    order: 9,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_data_model',
+    pk: 'data_model_id',
+    slugPrefix: 'DM',
+    nameKeys: ['name'],
+    tool: {
+      name: 'extract_data_model',
+      description: 'Extract a ServiceNow data model — one database table and its fields, described at a business level. Maps to asdlc_data_model.',
+      properties: {
+        name:          { type: 'string', description: 'Business label for the table, e.g. "Flight"' },
+        purpose:       { type: 'string', description: 'What business object this table represents and why it exists' },
+        physical_name: { type: 'string', description: 'ServiceNow table name, e.g. x_dnllp_airport_ca_flight (copy from the construct if shown)' },
+        extends_table: { type: 'string', description: 'Parent table it extends (e.g. task), if any' },
+        fields: {
+          type: 'array',
+          description: 'The columns, described for a business reader',
+          items: { type: 'object', properties: {
+            label:         { type: 'string',  description: 'Business label of the field' },
+            meaning:       { type: 'string',  description: 'What the field captures, in business terms' },
+            type_business: { type: 'string',  description: 'Business-friendly type: text, number, date, choice, reference, true/false, etc.' },
+            mandatory:     { type: 'boolean', description: 'Whether the field is required' },
+            choices:       { type: 'array', items: { type: 'string' }, description: 'Choice values, if a choice field' },
+            references:    { type: 'string',  description: 'For a reference field, the table it points to' },
+          } },
+        },
+        relationships: {
+          type: 'array',
+          description: 'Relationships to other tables',
+          items: { type: 'object', properties: {
+            kind:        { type: 'string', description: 'reference / extends / one-to-many / many-to-many' },
+            target:      { type: 'string', description: 'The related table (business label)' },
+            description: { type: 'string', description: 'What the relationship means' },
+          } },
+        },
+        audited:       { type: 'boolean', description: 'Whether record changes are audited' },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:          { col: 'name' },
+      purpose:       { col: 'purpose' },
+      physical_name: { col: 'physical_name' },
+      extends_table: { col: 'extends_table' },
+      fields:        { col: 'fields', json: true },
+      relationships: { col: 'relationships', json: true },
+      audited:       { col: 'audited', transform: boolInt },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  {
+    entity_type: 'form_design',
+    order: 10,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_form_design',
+    pk: 'form_design_id',
+    slugPrefix: 'FORM',
+    nameKeys: ['name'],
+    tool: {
+      name: 'extract_form_design',
+      description: 'Extract a ServiceNow form/view design — how a record is laid out on screen, including section layout and dynamic behavior. Maps to asdlc_form_design.',
+      properties: {
+        name:            { type: 'string', description: 'Name of the form/view' },
+        data_model_name: { type: 'string', description: 'Business label of the table this form is for (links to a data model)' },
+        view_name:       { type: 'string', description: 'Which view — Default, Mobile, etc.' },
+        sections: {
+          type: 'array',
+          description: 'Form sections in order',
+          items: { type: 'object', properties: {
+            section_label: { type: 'string',  description: 'Section heading' },
+            fields:        { type: 'array', items: { type: 'string' }, description: 'Field labels shown in this section, in order' },
+            columns:       { type: 'integer', description: 'Number of columns in the section layout' },
+          } },
+        },
+        related_lists: {
+          type: 'array',
+          description: 'Related lists shown on the form',
+          items: { type: 'object', properties: {
+            label: { type: 'string' }, table: { type: 'string' },
+          } },
+        },
+        mandatory_fields: { type: 'array', items: { type: 'string' }, description: 'Field labels that are mandatory on this form' },
+        readonly_fields:  { type: 'array', items: { type: 'string' }, description: 'Field labels that are read-only on this form' },
+        behavior_notes:   { type: 'string', description: 'UI-policy / dynamic behavior in plain English (e.g. "Cancellation reason becomes mandatory when Status = Cancelled")' },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:             { col: 'name' },
+      view_name:        { col: 'view_name' },
+      sections:         { col: 'sections', json: true },
+      related_lists:    { col: 'related_lists', json: true },
+      mandatory_fields: { col: 'mandatory_fields', json: true },
+      readonly_fields:  { col: 'readonly_fields', json: true },
+      behavior_notes:   { col: 'behavior_notes' },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [
+      { col: 'data_model_id', parentType: 'data_model', nameKeyInData: 'data_model_name', required: false },
+    ],
+  },
+
+  {
+    entity_type: 'business_logic',
+    order: 11,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_business_logic',
+    pk: 'business_logic_id',
+    slugPrefix: 'BL',
+    nameKeys: ['name'],
+    tool: {
+      name: 'extract_business_logic',
+      description: 'Extract a piece of business logic — a business rule, client script, script include, UI action, scheduled job, or UI policy — described in plain English. The actual script body stays in provenance, not a Level-1 field. Maps to asdlc_business_logic.',
+      properties: {
+        name:            { type: 'string', description: 'Name of the logic artifact' },
+        logic_type:      { type: 'string', enum: ['business_rule','client_script','script_include','ui_action','scheduled_job','ui_policy'], description: 'Kind of logic' },
+        data_model_name: { type: 'string', description: 'Business label of the table this logic runs on, if any' },
+        plain_english:   { type: 'string', description: 'What this logic does, in plain business language' },
+        when_runs:       { type: 'string', description: 'When it runs (e.g. "after a Flight record is updated", "when the form loads")' },
+        conditions:      { type: 'string', description: 'The condition under which it applies, in business terms' },
+        run_order:       { type: 'integer', description: 'Execution order, if relevant' },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name', 'logic_type'],
+    },
+    fieldMap: {
+      name:          { col: 'name' },
+      logic_type:    { col: 'logic_type' },
+      plain_english: { col: 'plain_english' },
+      when_runs:     { col: 'when_runs' },
+      conditions:    { col: 'conditions' },
+      run_order:     { col: 'run_order' },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [
+      { col: 'data_model_id', parentType: 'data_model', nameKeyInData: 'data_model_name', required: false },
+    ],
+  },
+
+  {
+    entity_type: 'catalog_item',
+    order: 12,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_catalog_item',
+    pk: 'catalog_item_id',
+    slugPrefix: 'CAT',
+    nameKeys: ['name'],
+    tool: {
+      name: 'extract_catalog_item',
+      description: 'Extract a Service Catalog item or record producer — something users can request, its variables, and how it is fulfilled. Maps to asdlc_catalog_item.',
+      properties: {
+        name:              { type: 'string', description: 'Name of the catalog item' },
+        short_description: { type: 'string', description: 'Short description shown to requesters' },
+        category:          { type: 'string', description: 'Catalog category' },
+        workflow_name:     { type: 'string', description: 'Name of the workflow/flow that fulfills this request, if any' },
+        variables: {
+          type: 'array',
+          description: 'The questions/variables the requester fills in',
+          items: { type: 'object', properties: {
+            label:         { type: 'string' },
+            type_business: { type: 'string',  description: 'text, choice, reference, date, yes/no, etc.' },
+            mandatory:     { type: 'boolean' },
+            choices:       { type: 'array', items: { type: 'string' } },
+            help:          { type: 'string',  description: 'Help text shown to the requester' },
+          } },
+        },
+        who_can_order:     { type: 'string', description: 'Roles or groups who can order this item' },
+        delivery_time:     { type: 'string', description: 'Expected delivery / fulfillment time' },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:              { col: 'name' },
+      short_description: { col: 'short_description' },
+      category:          { col: 'category' },
+      variables:         { col: 'variables', json: true },
+      who_can_order:     { col: 'who_can_order' },
+      delivery_time:     { col: 'delivery_time' },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [
+      { col: 'workflow_id', parentType: 'workflow', nameKeyInData: 'workflow_name', required: false },
+    ],
+  },
+
   // ── Types WITHOUT a dedicated table (v1): extracted + promoted for review, but
   //    not materialized. Add a table + flip materializable to wire them in later.
   {
     entity_type: 'guardrail',
-    order: 50, materializable: false, summarizable: false,
+    order: 50, materializable: true, summarizable: false, injectsIngestId: true,
+    table: 'asdlc_guardrail',
+    pk: 'guardrail_id',
+    slugPrefix: 'GR',
     nameKeys: ['rule_name'],
     tool: {
       name: 'extract_guardrail',
@@ -535,27 +772,60 @@ const REGISTRY = [
       },
       required: ['rule_name', 'rule_text', 'severity'],
     },
+    fieldMap: {
+      rule_name:            { col: 'rule_name' },
+      rule_text:            { col: 'rule_text' },
+      severity:             { col: 'severity' },
+      applies_to:           { col: 'applies_to' },
+      threshold_value:      { col: 'threshold_value' },
+      threshold_unit:       { col: 'threshold_unit' },
+      regulatory_reference: { col: 'regulatory_reference' },
+      action_if_triggered:  { col: 'action_if_triggered' },
+      ingest_id:            { col: 'ingest_id' },
+    },
+    parentLinks: [],
   },
   {
     entity_type: 'user_story',
-    order: 51, materializable: false, summarizable: false,
+    order: 51, materializable: true, summarizable: false, injectsIngestId: true,
+    table: 'asdlc_user_story',
+    pk: 'user_story_id',
+    slugPrefix: 'US',
     nameKeys: ['role', 'want'],
     tool: {
       name: 'extract_user_story',
-      description: 'Extract a user story in Role / Want / So-That format.',
+      description: 'Extract a user story in Role / Want / So-That format. A user story is an ' +
+        'organizational/backlog lens — capture its narrative and which requirements it is realized by. ' +
+        'The actual design (the testable conditions) lives in acceptance criteria and requirements, not here.',
       properties: {
         role:                { type: 'string', description: 'The type of user — their role or title' },
         want:                { type: 'string', description: 'What this user wants the system to do' },
         so_that:             { type: 'string', description: 'The business reason — why they want it' },
-        acceptance_criteria: { type: 'array',  items: { type: 'string' }, description: 'Testable conditions for completion' },
+        acceptance_criteria: { type: 'array',  items: { type: 'string' }, description: 'Testable conditions for completion (captured for reference; the canonical home is the acceptance-criterion entities)' },
         priority:            { type: 'string', enum: ['must-have', 'should-have', 'could-have'], description: 'Priority' },
+        requirement_refs:    { type: 'array',  items: { type: 'string' }, description: 'FR/NFR slugs from the "existing design" list that this story is realized by, e.g. ["FR-003","NFR-001"]. Only use slugs shown in the existing design — never invent one. Traceability references, not duplicated design.' },
       },
       required: ['role', 'want', 'so_that'],
     },
+    // NOTE: acceptance_criteria is intentionally NOT in fieldMap — it rides in the
+    // extraction JSON / Build Spec but is never materialized (no duplication; the
+    // canonical home is asdlc_acceptance_criterion).
+    fieldMap: {
+      role:             { col: 'role' },
+      want:             { col: 'want' },
+      so_that:          { col: 'so_that' },
+      priority:         { col: 'priority' },
+      requirement_refs: { col: 'requirement_refs', json: true },
+      ingest_id:        { col: 'ingest_id' },
+    },
+    parentLinks: [],
   },
   {
     entity_type: 'data_source',
-    order: 52, materializable: false, summarizable: false,
+    order: 52, materializable: true, summarizable: false, injectsIngestId: true,
+    table: 'asdlc_data_source',
+    pk: 'data_source_id',
+    slugPrefix: 'DS',
     nameKeys: ['source_name'],
     tool: {
       name: 'extract_data_source',
@@ -571,6 +841,17 @@ const REGISTRY = [
       },
       required: ['source_name', 'source_type'],
     },
+    fieldMap: {
+      source_name:         { col: 'source_name' },
+      source_type:         { col: 'source_type' },
+      description:         { col: 'description' },
+      access_type:         { col: 'access_type' },
+      access_requirements: { col: 'access_requirements', json: true },
+      contains_pii:        { col: 'contains_pii', transform: boolInt },
+      rate_limits:         { col: 'rate_limits' },
+      ingest_id:           { col: 'ingest_id' },
+    },
+    parentLinks: [],
   },
   {
     entity_type: 'process_segment',
@@ -607,6 +888,17 @@ const REGISTRY = [
   },
 ];
 
+// ── ServiceNow round-trip (Round 2): attach Level-2 provenance to the REUSED
+// design types so agents/workflows/tools extracted from ServiceNow also carry
+// sys_id identity. Done here (not inline) to keep it in one place; fields are
+// optional and clearly SN-only, so transcript ingestion is unaffected.
+for (const et of ['use_case', 'agent_spec', 'tool', 'workflow', 'workflow_step']) {
+  const e = REGISTRY.find(r => r.entity_type === et);
+  if (!e) continue;
+  e.tool.properties = { ...e.tool.properties, ...PROVENANCE_FIELDS };
+  e.fieldMap = { ...e.fieldMap, ...PROVENANCE_FIELDMAP };
+}
+
 // ── Derived lookups ───────────────────────────────────────────────────────────
 const byEntityType = {};
 const byToolName    = {};
@@ -627,17 +919,28 @@ for (const e of REGISTRY) {
 // PUBLIC HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Build the full Claude API tool definitions (entity tools + merged common fields). */
+/** Build the full Claude API tool definitions (entity tools + merged common fields).
+ *  Level-2 provenance (source_sys_id, source_table, source_scope, source_fluent) is
+ *  intentionally STRIPPED from the schema sent to the model. It is set DETERMINISTICALLY
+ *  by the sync engine (matched to the captured ServiceNow artifact) — never copied by
+ *  the model, which produced false sys_id links (e.g. a synthesized workflow inheriting
+ *  a use case's sys_id). fieldMap keeps the provenance columns so deterministic injection
+ *  into entity_data still materializes them. */
+const PROVENANCE_KEYS = Object.keys(PROVENANCE_FIELDS);
 function buildApiTools() {
-  return REGISTRY.map(e => ({
-    name: e.tool.name,
-    description: e.tool.description,
-    input_schema: {
-      type: 'object',
-      properties: { ...e.tool.properties, ...COMMON_TOOL_FIELDS },
-      required: [...(e.tool.required || []), 'confidence'],
-    },
-  }));
+  return REGISTRY.map(e => {
+    const properties = { ...e.tool.properties, ...COMMON_TOOL_FIELDS };
+    for (const k of PROVENANCE_KEYS) delete properties[k];   // provenance is deterministic, never model-emitted
+    return {
+      name: e.tool.name,
+      description: e.tool.description,
+      input_schema: {
+        type: 'object',
+        properties,
+        required: [...(e.tool.required || []), 'confidence'],
+      },
+    };
+  });
 }
 
 /** Map of extraction tool name → entity_type. */

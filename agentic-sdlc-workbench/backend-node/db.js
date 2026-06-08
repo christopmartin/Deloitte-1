@@ -120,6 +120,142 @@ const MIGRATIONS = [
   // Index must come AFTER the column is added (runs post-schema-exec, so it is
   // safe on both fresh and existing databases).
   "CREATE INDEX IF NOT EXISTS idx_ingest_lifecycle ON asdlc_ingest_document(lifecycle_status)",
+
+  // ── ServiceNow round-trip (Round 2): Level-2 provenance on the REUSED design
+  // types so ServiceNow-extracted agents/workflows/tools also carry sys_id
+  // identity. Nullable, no default — existing (transcript-sourced) rows stay NULL
+  // (= not ServiceNow-sourced). SN-sourced records are identified by source_sys_id.
+  "ALTER TABLE asdlc_agent_spec    ADD COLUMN source_system TEXT",
+  "ALTER TABLE asdlc_agent_spec    ADD COLUMN source_sys_id TEXT",
+  "ALTER TABLE asdlc_agent_spec    ADD COLUMN source_table  TEXT",
+  "ALTER TABLE asdlc_agent_spec    ADD COLUMN source_scope  TEXT",
+  "ALTER TABLE asdlc_agent_spec    ADD COLUMN source_fluent TEXT",
+  "ALTER TABLE asdlc_agent_spec    ADD COLUMN source_hash   TEXT",
+  "ALTER TABLE asdlc_tool          ADD COLUMN source_system TEXT",
+  "ALTER TABLE asdlc_tool          ADD COLUMN source_sys_id TEXT",
+  "ALTER TABLE asdlc_tool          ADD COLUMN source_table  TEXT",
+  "ALTER TABLE asdlc_tool          ADD COLUMN source_scope  TEXT",
+  "ALTER TABLE asdlc_tool          ADD COLUMN source_fluent TEXT",
+  "ALTER TABLE asdlc_tool          ADD COLUMN source_hash   TEXT",
+  "ALTER TABLE asdlc_workflow      ADD COLUMN source_system TEXT",
+  "ALTER TABLE asdlc_workflow      ADD COLUMN source_sys_id TEXT",
+  "ALTER TABLE asdlc_workflow      ADD COLUMN source_table  TEXT",
+  "ALTER TABLE asdlc_workflow      ADD COLUMN source_scope  TEXT",
+  "ALTER TABLE asdlc_workflow      ADD COLUMN source_fluent TEXT",
+  "ALTER TABLE asdlc_workflow      ADD COLUMN source_hash   TEXT",
+  "ALTER TABLE asdlc_workflow_step ADD COLUMN source_system TEXT",
+  "ALTER TABLE asdlc_workflow_step ADD COLUMN source_sys_id TEXT",
+  "ALTER TABLE asdlc_workflow_step ADD COLUMN source_table  TEXT",
+  "ALTER TABLE asdlc_workflow_step ADD COLUMN source_scope  TEXT",
+  "ALTER TABLE asdlc_workflow_step ADD COLUMN source_fluent TEXT",
+  "ALTER TABLE asdlc_workflow_step ADD COLUMN source_hash   TEXT",
+  // use_case is a ServiceNow-synced reuse type too (sn_aia_usecase). Without provenance
+  // it could not be matched on re-sync and was re-created as a duplicate every sync.
+  "ALTER TABLE asdlc_use_case      ADD COLUMN source_system TEXT",
+  "ALTER TABLE asdlc_use_case      ADD COLUMN source_sys_id TEXT",
+  "ALTER TABLE asdlc_use_case      ADD COLUMN source_table  TEXT",
+  "ALTER TABLE asdlc_use_case      ADD COLUMN source_scope  TEXT",
+  "ALTER TABLE asdlc_use_case      ADD COLUMN source_fluent TEXT",
+  "ALTER TABLE asdlc_use_case      ADD COLUMN source_hash   TEXT",
+  "CREATE INDEX IF NOT EXISTS idx_agent_sysid ON asdlc_agent_spec(source_sys_id)",
+  "CREATE INDEX IF NOT EXISTS idx_tool_sysid  ON asdlc_tool(source_sys_id)",
+  "CREATE INDEX IF NOT EXISTS idx_wf_sysid    ON asdlc_workflow(source_sys_id)",
+  "CREATE INDEX IF NOT EXISTS idx_step_sysid  ON asdlc_workflow_step(source_sys_id)",
+  "CREATE INDEX IF NOT EXISTS idx_usecase_sysid ON asdlc_use_case(source_sys_id)",
+
+  // ── Per-item decisions on change packets ─────────────────────────────────────
+  // Product owners can individually approve or reject CP items (rather than only
+  // approving/rejecting the whole packet at once). 'pending' = no decision yet
+  // (= Keep on List). Applied items also get item_status='approved'.
+  "ALTER TABLE asdlc_change_packet_item ADD COLUMN item_status TEXT NOT NULL DEFAULT 'pending'",
+  "ALTER TABLE asdlc_change_packet_item ADD COLUMN item_decision_notes TEXT",
+  "ALTER TABLE asdlc_change_packet_item ADD COLUMN item_decided_by TEXT",
+  "ALTER TABLE asdlc_change_packet_item ADD COLUMN item_decided_at TEXT",
+
+  // ── Change-packet origin (ServiceNow round-trip Phase 2 OUTBOUND) ────────────
+  // Distinguishes CPs that came FROM ServiceNow (inbound sync) from Workbench-authored
+  // CPs (manual edits, document ingestion). The outbound SN delta export must NEVER
+  // push inbound-origin CPs back to ServiceNow — that content originated in SN, so
+  // pushing it back is a redundant/destructive round-trip. NULL = Workbench-origin
+  // (outbound-eligible); 'sn_inbound' = came from a ServiceNow sync (excluded outbound).
+  "ALTER TABLE asdlc_change_packet ADD COLUMN cp_origin TEXT",
+  // One-time idempotent backfill for CPs created before this column existed. A CP is
+  // inbound-origin if its summary is the deterministic 'SN to WB synch …' label OR any
+  // of its items carry the deterministic '[SN sync ·' rationale prefix (set by the sync
+  // orchestrator for drift/new/changed items). Runs every boot but only ever touches
+  // still-NULL rows matching those signals, so it converges and is safe to re-run.
+  "UPDATE asdlc_change_packet SET cp_origin = 'sn_inbound' " +
+    "WHERE cp_origin IS NULL AND (" +
+    "summary LIKE 'SN to WB synch%' " +
+    "OR change_packet_id IN (SELECT DISTINCT change_packet_id FROM asdlc_change_packet_item WHERE rationale LIKE '[SN sync %'))",
+
+  // ── ServiceNow round-trip (Round 2): Application ↔ ServiceNow app link on the
+  // project, so a Workbench Application can be created/linked to a scoped app and
+  // re-synced. sn_last_synced_at is stamped after each successful extraction ingest.
+  "ALTER TABLE asdlc_project ADD COLUMN servicenow_scope TEXT",
+  "ALTER TABLE asdlc_project ADD COLUMN servicenow_sys_app_id TEXT",
+  "ALTER TABLE asdlc_project ADD COLUMN servicenow_instance TEXT",
+  "ALTER TABLE asdlc_project ADD COLUMN sn_last_synced_at TEXT",
+  "CREATE INDEX IF NOT EXISTS idx_project_sn_sysapp ON asdlc_project(servicenow_sys_app_id)",
+
+  // ── Materialize core design elements from BRD ingest ─────────────────────────
+  // Guardrails + data sources become first-class design rows; user stories get a
+  // thin traceability home (narrative + requirement_refs slugs, no duplicated AC
+  // content). Mirrors the CREATE TABLEs in schema.sql so existing DBs get them too.
+  // No CHECK constraints on enum columns — never crash materialization on model output.
+  `CREATE TABLE IF NOT EXISTS asdlc_guardrail (
+     guardrail_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     ingest_id TEXT REFERENCES asdlc_ingest_document(ingest_id),
+     slug TEXT,
+     rule_name TEXT NOT NULL,
+     rule_text TEXT NOT NULL DEFAULT '',
+     severity TEXT NOT NULL DEFAULT 'medium',
+     applies_to TEXT,
+     threshold_value TEXT,
+     threshold_unit TEXT,
+     regulatory_reference TEXT,
+     action_if_triggered TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT',
+     lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+     version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_data_source (
+     data_source_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     ingest_id TEXT REFERENCES asdlc_ingest_document(ingest_id),
+     slug TEXT,
+     source_name TEXT NOT NULL,
+     source_type TEXT NOT NULL DEFAULT 'other',
+     description TEXT NOT NULL DEFAULT '',
+     access_type TEXT,
+     access_requirements TEXT NOT NULL DEFAULT '[]',
+     contains_pii INTEGER NOT NULL DEFAULT 0,
+     rate_limits TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT',
+     lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+     version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_user_story (
+     user_story_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     ingest_id TEXT REFERENCES asdlc_ingest_document(ingest_id),
+     slug TEXT,
+     role TEXT NOT NULL DEFAULT '',
+     want TEXT NOT NULL DEFAULT '',
+     so_that TEXT NOT NULL DEFAULT '',
+     priority TEXT,
+     requirement_refs TEXT NOT NULL DEFAULT '[]',
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT',
+     lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+     version INTEGER NOT NULL DEFAULT 1
+   )`,
 ];
 for (const migration of MIGRATIONS) {
   try { db.exec(migration); } catch { /* column already exists — safe to ignore */ }
@@ -141,6 +277,15 @@ const SLUG_INDEXES = [
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_path_slug ON asdlc_workflow_path(project_id, slug)         WHERE slug IS NOT NULL",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_fr_slug  ON asdlc_functional_req(project_id, slug)   WHERE slug IS NOT NULL",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_nfr_slug ON asdlc_nonfunctional_req(project_id, slug) WHERE slug IS NOT NULL",
+  // ServiceNow round-trip: Level-1 design tables
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_dm_slug   ON asdlc_data_model(project_id, slug)      WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_form_slug ON asdlc_form_design(project_id, slug)     WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_bl_slug   ON asdlc_business_logic(project_id, slug)  WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_cat_slug  ON asdlc_catalog_item(project_id, slug)    WHERE slug IS NOT NULL",
+  // Materialized BRD design elements
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_gr_slug  ON asdlc_guardrail(project_id, slug)    WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_ds_slug  ON asdlc_data_source(project_id, slug)  WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_us_slug  ON asdlc_user_story(project_id, slug)   WHERE slug IS NOT NULL",
 ];
 for (const idx of SLUG_INDEXES) {
   try { db.exec(idx); } catch (err) { console.error('[db] slug index failed:', err.message); }
@@ -173,6 +318,15 @@ const SLUG_TABLES = [
   { table: 'asdlc_workflow_path',        pk: 'workflow_path_id',        prefix: 'PATH' },
   { table: 'asdlc_functional_req',    pk: 'fr_id',   prefix: 'FR'  },
   { table: 'asdlc_nonfunctional_req', pk: 'nfr_id',  prefix: 'NFR' },
+  // ServiceNow round-trip: Level-1 design tables
+  { table: 'asdlc_data_model',        pk: 'data_model_id',     prefix: 'DM'   },
+  { table: 'asdlc_form_design',       pk: 'form_design_id',    prefix: 'FORM' },
+  { table: 'asdlc_business_logic',    pk: 'business_logic_id', prefix: 'BL'   },
+  { table: 'asdlc_catalog_item',      pk: 'catalog_item_id',   prefix: 'CAT'  },
+  // Materialized BRD design elements
+  { table: 'asdlc_guardrail',         pk: 'guardrail_id',      prefix: 'GR'   },
+  { table: 'asdlc_data_source',       pk: 'data_source_id',    prefix: 'DS'   },
+  { table: 'asdlc_user_story',        pk: 'user_story_id',     prefix: 'US'   },
 ];
 
 function backfillSlugsFor(tableSpec) {

@@ -11,6 +11,10 @@ const SECTION_GROUPS = [
       { id: 'workflows',  label: 'Workflows'  },
       { id: 'agents',     label: 'Agents'     },
       { id: 'tools',      label: 'Tools'      },
+      { id: 'data_models',    label: 'Data Model (SN)'     },
+      { id: 'form_designs',   label: 'Form Designs (SN)'   },
+      { id: 'business_logic', label: 'Business Logic (SN)' },
+      { id: 'catalog_items',  label: 'Catalog Items (SN)'  },
     ],
   },
   {
@@ -41,6 +45,8 @@ const SECTION_GROUPS = [
 let _projectId       = null;
 let _baselineSelect  = null;
 let _downloadBtn     = null;
+let _snDeltaBtn      = null;
+let _snDeltaNote     = null;
 let _previewEl       = null;
 let _allCheckboxes   = [];
 let _aiReviewChk     = null;
@@ -243,6 +249,30 @@ function injectStyles() {
       color: var(--color-text-muted);
       font-size: 14px;
     }
+
+    /* SN Delta button */
+    .be-sn-delta-btn {
+      width: 100%;
+      margin-top: 8px;
+      padding: 10px 12px;
+      background: transparent;
+      color: var(--color-accent);
+      border: 1.5px solid var(--color-accent);
+      border-radius: var(--radius);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+    .be-sn-delta-btn:hover:not(:disabled) { background: var(--color-accent); color: #fff; }
+    .be-sn-delta-btn:disabled { opacity: .4; cursor: not-allowed; }
+    .be-sn-delta-note {
+      margin-top: 6px;
+      font-size: 11px;
+      color: var(--color-text-muted);
+      line-height: 1.4;
+      text-align: center;
+    }
   `;
   document.head.appendChild(style);
 }
@@ -360,10 +390,19 @@ function buildControls(card, projects) {
   card.appendChild(el('div', { style: 'font-size:11px;color:var(--text-muted);margin:-4px 0 10px 0' },
     'Adds an AI-written Executive Summary, gaps/completeness review, and implementation notes after the deterministic spec.'));
 
-  // ── Download button ───────────────────────────────────────────────────────
-  _downloadBtn = el('button', { className: 'be-download-btn' }, '⬇  Download Build Spec');
+  // ── Download button (Full Build Spec) ────────────────────────────────────
+  _downloadBtn = el('button', { className: 'be-download-btn' }, '⬇  Full Build Spec');
   _downloadBtn.addEventListener('click', handleDownload);
   card.appendChild(_downloadBtn);
+
+  // ── SN Delta export button ────────────────────────────────────────────────
+  _snDeltaBtn = el('button', { className: 'be-sn-delta-btn', style: 'display:none', disabled: true },
+    '⬇  Export SN Delta');
+  _snDeltaBtn.addEventListener('click', handleSnDeltaDownload);
+  card.appendChild(_snDeltaBtn);
+
+  _snDeltaNote = el('div', { className: 'be-sn-delta-note', style: 'display:none' }, '');
+  card.appendChild(_snDeltaNote);
 
   // ── Wire project change ───────────────────────────────────────────────────
   projectSelect.addEventListener('change', async () => {
@@ -372,9 +411,10 @@ function buildControls(card, projects) {
     _baselineSelect.innerHTML = '';
     _baselineSelect.appendChild(el('option', { value: '' }, 'Current live design (recommended)'));
     if (_projectId) {
-      await Promise.all([loadBaselines(_projectId), loadPreview(_projectId)]);
+      await Promise.all([loadBaselines(_projectId), loadPreview(_projectId), loadSnDeltaInfo(_projectId)]);
     } else {
       renderPreviewEmpty();
+      hideSnDeltaBtn();
     }
   });
 
@@ -386,8 +426,52 @@ function buildControls(card, projects) {
     // Fire initial load without waiting (renders spinner then data)
     loadBaselines(currentPid);
     loadPreview(currentPid);
+    loadSnDeltaInfo(currentPid);
   } else {
     renderPreviewEmpty();
+  }
+}
+
+// ─── SN Delta helpers ─────────────────────────────────────────────────────────
+
+function hideSnDeltaBtn() {
+  if (_snDeltaBtn)  { _snDeltaBtn.style.display  = 'none'; _snDeltaBtn.disabled = true; }
+  if (_snDeltaNote) { _snDeltaNote.style.display = 'none'; _snDeltaNote.textContent = ''; }
+}
+
+async function loadSnDeltaInfo(projectId) {
+  hideSnDeltaBtn();
+  if (!projectId) return;
+  try {
+    const info = await apiFetch(`/projects/${projectId}/servicenow/delta-info`);
+    if (!info.enabled) return; // not an SN-linked project — keep hidden
+
+    _snDeltaBtn.style.display = 'block';
+
+    if (!info.has_changes) {
+      _snDeltaBtn.disabled = true;
+      _snDeltaBtn.textContent = '⬇  Export SN Delta';
+      _snDeltaNote.style.display = 'block';
+      if (!info.has_last_sync) {
+        _snDeltaNote.textContent = 'SN-linked project — no approved CPs yet.';
+      } else if (info.delta_cp_count === 0) {
+        _snDeltaNote.textContent = `No new changes since last sync (${info.sn_last_synced_at ? info.sn_last_synced_at.slice(0, 10) : 'unknown'}).`;
+      } else {
+        _snDeltaNote.textContent = 'All CP items were rejected — nothing to deploy.';
+      }
+    } else {
+      _snDeltaBtn.disabled = false;
+      const parts = [];
+      if (info.update_count > 0) parts.push(`${info.update_count} update${info.update_count > 1 ? 's' : ''}`);
+      if (info.create_count  > 0) parts.push(`${info.create_count} new`);
+      _snDeltaBtn.textContent = `⬇  Export SN Delta  (${parts.join(', ')})`;
+      _snDeltaNote.style.display = 'block';
+      const since = info.sn_last_synced_at ? info.sn_last_synced_at.slice(0, 10) : 'first sync';
+      _snDeltaNote.textContent = `${info.delta_cp_count} approved CP${info.delta_cp_count > 1 ? 's' : ''} since ${since}. Includes delta spec + deployment instructions.`;
+    }
+  } catch (err) {
+    // Non-fatal — SN delta is optional; hide button silently
+    console.warn('[build_export] delta-info fetch failed:', err.message);
   }
 }
 
@@ -521,4 +605,14 @@ function handleDownload() {
 
   // Direct navigation triggers browser file download (Content-Disposition: attachment)
   window.location.href = `/api/v1/projects/${_projectId}/build-export?${params.toString()}`;
+}
+
+// ─── SN Delta download handler ────────────────────────────────────────────────
+function handleSnDeltaDownload() {
+  if (!_projectId) {
+    showToast('Please select an application first', 'warn');
+    return;
+  }
+  showToast('Preparing SN delta export…', 'info');
+  window.location.href = `/api/v1/projects/${_projectId}/servicenow/delta-export`;
 }
