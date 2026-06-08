@@ -209,18 +209,8 @@ function buildSubmitPanel() {
   row2.appendChild(descGroup);
   row2.appendChild(scopeGroup);
   body.appendChild(row2);
-
-  // AI mode dial — Faithful (transcribe only) ⟷ Suggestive (propose best-practice additions).
-  const modeGroupNew = el('div', { className: 'form-group', style: { margin: '0 0 16px 0' } });
-  modeGroupNew.appendChild(el('label', { className: 'form-label' }, 'AI mode'));
-  const modeSelectNew = el('select', { className: 'form-select', style: { maxWidth: '520px' } });
-  [
-    ['faithful',   'Faithful — extract only what the document states'],
-    ['balanced',   'Balanced — also fill obviously-implied empty fields'],
-    ['suggestive', 'Suggestive — also propose best-practice additions (✨ flagged for review)'],
-  ].forEach(([v, l]) => modeSelectNew.appendChild(el('option', { value: v }, l)));
-  modeGroupNew.appendChild(modeSelectNew);
-  body.appendChild(modeGroupNew);
+  // NOTE: the AI-mode dial lives on the doc's "Start Extraction" panel (buildTriggerSection),
+  // NOT here — "Submit for Analysis" only queues the document; no AI runs at this step.
 
   // Row 3: file drop zone  —OR—  text entry (side by side)
   const inputRow = el('div', { style: { display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: '0', alignItems: 'stretch', marginBottom: '16px' } });
@@ -392,7 +382,6 @@ async function doSubmit(appSelect, typeSelect, titleInput, descInput, scopeSelec
       fd.append('file_name',      droppedFile.name);
       fd.append('file_type',      droppedFile.name.split('.').pop().toLowerCase());
       if (descInput.value.trim()) fd.append('description', descInput.value.trim());
-      fd.append('enrichment_level', modeSelectNew.value);
       fetchOpts = { method: 'POST', body: fd };
     } else {
       // ── JSON — typed/pasted text, prepend scope hint if set ───────────────
@@ -408,7 +397,6 @@ async function doSubmit(appSelect, typeSelect, titleInput, descInput, scopeSelec
           document_type:  typeSelect.value,
           description:    descInput.value.trim() || null,
           raw_text:       fullText,
-          enrichment_level: modeSelectNew.value,
         }),
       };
     }
