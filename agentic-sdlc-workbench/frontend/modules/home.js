@@ -42,14 +42,39 @@ export async function render(container) {
 // Plan D — banner when a recently-applied change packet has unresolved post-apply
 // findings (residual references to a term it changed). Names the packets so they're
 // findable even though approved CPs are hidden from the default Change Packets view.
+const POST_APPLY_DISMISS_KEY = 'postApplyBannerDismissed';
+
+function getDismissedPostApply() {
+  try { return JSON.parse(localStorage.getItem(POST_APPLY_DISMISS_KEY) || '[]'); }
+  catch { return []; }
+}
+
 function renderPostApplyBanner(container, data) {
   container.innerHTML = '';
   const changes = data.recent_changes || data.recent_repository_changes || [];
   const flagged = changes.filter(c => c.post_apply_status === 'flagged');
   if (flagged.length === 0) return;
 
-  const banner = el('div', { style: 'border:1px solid var(--color-danger);border-left:3px solid var(--color-danger);background:var(--color-danger-bg);border-radius:8px;padding:12px 14px;margin-bottom:16px;cursor:pointer' });
-  banner.appendChild(el('div', { style: 'font-weight:600;color:var(--color-danger);margin-bottom:4px' },
+  // Dismissal persists per flagged-packet set: stays hidden on reload, but
+  // re-shows if a new packet gets flagged.
+  const ids = flagged.map(c => c.packet_code || c.change_packet_id);
+  const dismissed = getDismissedPostApply();
+  if (ids.every(id => dismissed.includes(id))) return;
+
+  const banner = el('div', { style: 'position:relative;border:1px solid var(--color-danger);border-left:3px solid var(--color-danger);background:var(--color-danger-bg);border-radius:8px;padding:12px 14px;margin-bottom:16px;cursor:pointer' });
+
+  const closeBtn = el('button', {
+    title: 'Dismiss',
+    'aria-label': 'Dismiss',
+    style: 'position:absolute;top:8px;right:10px;border:none;background:transparent;color:var(--color-danger);font-size:18px;line-height:1;cursor:pointer;padding:2px 6px'
+  }, '×');
+  closeBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    localStorage.setItem(POST_APPLY_DISMISS_KEY, JSON.stringify([...new Set([...dismissed, ...ids])]));
+    container.innerHTML = '';
+  });
+  banner.appendChild(closeBtn);
+  banner.appendChild(el('div', { style: 'font-weight:600;color:var(--color-danger);margin-bottom:4px;padding-right:24px' },
     `⚠ ${flagged.length} recently-applied change packet${flagged.length !== 1 ? 's' : ''} need a post-apply review`));
   banner.appendChild(el('div', { style: 'font-size:12px;color:var(--color-text-muted);margin-bottom:6px' },
     'A change was applied but other design elements may still reference the old term. Open the packet to review residual references.'));
