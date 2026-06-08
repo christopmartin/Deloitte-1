@@ -4240,6 +4240,7 @@ app.get('/api/v1/projects/:id/design-report/workflows', (req, res) => {
       name: wf.name,
       lifecycle_status: wf.lifecycle_status,
       readiness: wf.readiness,
+      system_generated: wf.system_generated ? 1 : 0,
       trigger:        parseJson(wf.trigger_def)     || {},
       sla_hours:      wf.sla_hours,
       handoffs:       parseJson(wf.handoffs)         || [],
@@ -4273,6 +4274,7 @@ app.get('/api/v1/projects/:id/design-report/workflows', (req, res) => {
           step_number:  s.step_number,
           name:         s.name,
           actor_role:   s.actor_role,
+          system_generated: s.system_generated ? 1 : 0,
           inputs:       parseJson(s.inputs)        || {},
           outputs:      parseJson(s.outputs)       || {},
           decisions:    parseJson(s.decisions_list) || [],
@@ -4345,6 +4347,7 @@ app.get('/api/v1/projects/:id/design-report/tools', (req, res) => {
     slug:                 t.slug,                                 // Phase 1
     name:                 t.name,
     lifecycle_status:     t.lifecycle_status,
+    system_generated:     t.system_generated ? 1 : 0,
     contract:             parseJson(t.contract)    || {},
     inputs:               parseJson(t.inputs)      || {},
     outputs:              parseJson(t.outputs)     || {},
@@ -4621,6 +4624,7 @@ app.get('/api/v1/projects/:id/design-report/use-cases', (req, res) => {
     constraints_list:  parseJson(uc.constraints_list) || [],
     volume_assumptions: parseJson(uc.volume_assumptions) || {},
     supervision_model: uc.supervision_model || null,
+    system_generated:  uc.system_generated ? 1 : 0,
     // ── Phase 1 additions ───────────────────────────────────────────
     risk_tier:                uc.risk_tier || null,
     owner:                    uc.owner || null,

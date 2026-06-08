@@ -913,6 +913,8 @@ function buildRequirementsSection(frs, nfrs, useCaseMap) {
 
       const titleCell = el('td');
       titleCell.appendChild(el('strong', {}, escHtml(req.title)));
+      const reqSg = aiSuggestedBadge(req);
+      if (reqSg) { titleCell.appendChild(document.createTextNode(' ')); titleCell.appendChild(reqSg); }
       if (req.description) {
         titleCell.appendChild(el('div', { style: { fontSize: '12px', color: '#555', marginTop: '3px' } }, escHtml(req.description)));
       }
@@ -1505,8 +1507,11 @@ function buildDataSourcesBlock(sources, ingestDoc = null) {
     const owner  = ds.data_owner || ds.owner || '—';
     const desc   = ds.table_or_document || ds.description || ds.summary || '';
 
+    const nameCell = el('td', { style: { fontWeight: '600', whiteSpace: 'nowrap' } }, name);
+    const dsSg = aiSuggestedBadge(ds);
+    if (dsSg) { nameCell.appendChild(document.createTextNode(' ')); nameCell.appendChild(dsSg); }
     const row = el('tr', {},
-      el('td', { style: { fontWeight: '600', whiteSpace: 'nowrap' } }, name),
+      nameCell,
       el('td', {}, type !== '—' ? el('span', { className: 'tag tag-info', style: { fontSize: '10px' } }, capitalise(type)) : el('span', { className: 'dr-muted' }, '—')),
       el('td', { style: { fontSize: '12px', color: 'var(--color-text-muted)' } }, access),
       el('td', { style: { fontSize: '12px' } }, owner),
@@ -1579,6 +1584,18 @@ function statusPill(status) {
 function slugBadge(slug) {
   if (!slug) return null;
   return el('span', { className: 'dr-slug-badge', title: 'Methodology ID (per project)' }, slug);
+}
+
+// "✨ AI-suggested" badge — entities the AI Agent proposed in Suggestive mode
+// (system_generated=1) that a human has not yet vetted. Same visual language as the
+// Change-Packet review badge. Returns null for human/document-evidenced rows.
+function aiSuggestedBadge(row) {
+  if (!row || !(row.system_generated === 1 || row.system_generated === true)) return null;
+  return el('span', {
+    className: 'tag',
+    title: 'Proposed by the AI Agent in Suggestive mode — review and confirm or remove.',
+    style: 'font-size:10px;background:#ede9fe;color:#6d28d9;border:1px solid #ddd6fe',
+  }, '✨ AI-suggested');
 }
 
 // Phase 5: visibility scope indicator for tools (and any future cross-project entity).
@@ -1674,6 +1691,7 @@ function buildWorkflowSection(wf) {
   hdr.appendChild(wfNameEl);
   const badges = el('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } });
   badges.appendChild(statusPill(wf.lifecycle_status));
+  const wfSg = aiSuggestedBadge(wf); if (wfSg) badges.appendChild(wfSg);
   if (wf.readiness && wf.readiness !== 'draft') {
     badges.appendChild(el('span', { className: 'tag tag-info' }, capitalise(wf.readiness)));
   }
@@ -1969,6 +1987,7 @@ function buildStepCard(step) {
   nameEl.appendChild(el('span', { className: 'dr-step-card-name' }, step.name || '—'));
   const stepIssue = dataIssueBadge('workflow_step', step.workflow_step_id);
   if (stepIssue) nameEl.appendChild(stepIssue);
+  const stepSg = aiSuggestedBadge(step); if (stepSg) nameEl.appendChild(stepSg);
   hdr.appendChild(nameEl);
   const metaChips = el('div', { className: 'dr-step-card-meta' });
   // Phase 1: step_type chip
@@ -2164,6 +2183,7 @@ function buildToolsSection(tools) {
     if (toolIssue) nameEl.appendChild(toolIssue);
     hdr.appendChild(nameEl);
     const badges = el('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } });
+    const toolSg = aiSuggestedBadge(tool); if (toolSg) badges.appendChild(toolSg);
     if (tool.execution_mode) badges.appendChild(el('span', { className: 'tag tag-info' }, capitalise(tool.execution_mode)));
     badges.appendChild(scopeBadge(tool.visibility_scope));
     if (tool.dev_status) badges.appendChild(el('span', { className: 'tag tag-muted' }, tool.dev_status));
@@ -2620,6 +2640,7 @@ function buildUseCaseSection(uc) {
   hdr.appendChild(ucNameEl);
   const badges = el('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } });
   badges.appendChild(statusPill(uc.lifecycle_status));
+  const ucSg = aiSuggestedBadge(uc); if (ucSg) badges.appendChild(ucSg);
   if (uc.readiness) badges.appendChild(el('span', { className: 'tag tag-info' }, capitalise(uc.readiness)));
   if (uc.risk_tier) {
     const riskColor = uc.risk_tier === 'High' ? 'error' : uc.risk_tier === 'Medium' ? 'warn' : 'success';
