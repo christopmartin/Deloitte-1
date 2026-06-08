@@ -6432,7 +6432,7 @@ app.post('/api/v1/ingest-documents/:id/clarifications/answer', async (req, res) 
 });
 
 // Promote staged extractions → Change Packets
-app.post('/api/v1/ingest-documents/:id/promote', (req, res) => {
+app.post('/api/v1/ingest-documents/:id/promote', async (req, res) => {
   const uid = userId(req);
   const doc = db.prepare('SELECT * FROM asdlc_ingest_document WHERE ingest_id=?').get(req.params.id);
   if (!doc) return res.status(404).json({ error: 'Ingest document not found' });
@@ -6524,6 +6524,51 @@ app.post('/api/v1/ingest-documents/:id/promote', (req, res) => {
           'Answer/dismiss the parent\'s clarification (or raise its confidence) so it can be staged, then promote.',
         orphans,
       });
+    }
+  }
+
+  // ── AI requirement re-linker: fill missing use_case_title on orphan FRs/NFRs ────
+  // The extraction AI Agent extracts FRs before it knows use case titles; this
+  // AI Agent pass runs Haiku to infer the link. Non-fatal — promote continues
+  // even if it fails. Updates entity_data in memory AND in the extraction row
+  // so re-promotes also carry the inferred link.
+  {
+    const orphanReqs = extractions.filter(ex =>
+      (ex.entity_type === 'functional_req' || ex.entity_type === 'nonfunctional_req') &&
+      !(ex.entity_data && ex.entity_data.use_case_title)
+    );
+    if (orphanReqs.length > 0) {
+      const useCasesInPacket = extractions
+        .filter(ex => ex.entity_type === 'use_case')
+        .map(ex => ({ title: (ex.entity_data || {}).title, summary: (ex.entity_data || {}).summary }))
+        .filter(uc => uc.title);
+      const useCasesInDb = (() => {
+        try {
+          return db.prepare(
+            "SELECT title, summary FROM asdlc_use_case WHERE project_id=? AND (lifecycle_status IS NULL OR lifecycle_status != 'retired') ORDER BY created_at"
+          ).all(doc.project_id);
+        } catch { return []; }
+      })();
+      const allUseCases = [...useCasesInPacket, ...useCasesInDb].filter(uc => uc.title);
+
+      if (allUseCases.length > 0) {
+        try {
+          const { linkRequirements } = require('./agent/req-linker');
+          const links = await linkRequirements(orphanReqs, allUseCases, doc.project_id);
+          const updateEx = db.prepare("UPDATE asdlc_ingest_extraction SET entity_data=? WHERE extraction_id=?");
+          for (const ex of extractions) {
+            if ((ex.entity_type === 'functional_req' || ex.entity_type === 'nonfunctional_req') &&
+                !(ex.entity_data && ex.entity_data.use_case_title) &&
+                links[(ex.entity_data || {}).title]) {
+              ex.entity_data = { ...ex.entity_data, use_case_title: links[ex.entity_data.title] };
+              // Persist so re-promote also carries the inferred link
+              updateEx.run(JSON.stringify(ex.entity_data), ex.extraction_id);
+            }
+          }
+        } catch (err) {
+          console.warn('[promote] req-linker failed (non-fatal):', err.message);
+        }
+      }
     }
   }
 

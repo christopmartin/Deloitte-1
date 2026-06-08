@@ -24,7 +24,7 @@
 | #4 | Fix report formatting for Tools, Agents, Workflows, Use Cases |
 | #17 | CP action buttons (Approve / Reject / Send Back) remain active after a terminal action — should be greyed out |
 | #18 | Cost projections not updated after a CP approval adds or modifies Assist-consuming entities (Agents, Workflows, Use Cases) |
-| #22 | Orphan requirements — BRD-extracted FR/NFR can materialize with `use_case_id = NULL` when the AI Agent omits `use_case_title` (or it doesn't match a same-packet use case). Strengthen prompt/linking so requirements attach to their use case. |
+| ~~#22~~ | ✅ Resolved — two-layer fix: (1) extraction prompt now instructs the AI Agent to scan for use cases BEFORE extracting FRs/NFRs so it can set `use_case_title` correctly; (2) at promote time, any still-orphan FRs/NFRs are passed to a Haiku AI Agent (`req-linker.js`) that infers the parent use case and updates `entity_data` before the CP items are written (non-fatal). |
 
 ---
 
