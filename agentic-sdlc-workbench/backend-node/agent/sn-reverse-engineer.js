@@ -20,6 +20,7 @@
 'use strict';
 const Anthropic = require('@anthropic-ai/sdk');
 const aiConfig = require('./ai-config');
+const registry = require('./entity-registry');
 
 let _client;
 function getClient() {
@@ -29,6 +30,43 @@ function getClient() {
 }
 
 const DESIGN_TYPES = ['data_model', 'form_design', 'business_logic', 'catalog_item', 'agent_spec', 'tool', 'workflow', 'use_case', 'other'];
+
+// ServiceNow source table → Workbench design type. We reverse-engineer by reusing the SAME
+// forward extract_* tool for that type, so a round-tripped design reaches the same Level-1
+// richness a BRD-authored one does (one shared L1 contract for both directions).
+const SN_TABLE_TO_TYPE = {
+  sn_aia_agent: 'agent_spec', sn_aia_usecase: 'use_case', sn_aia_tool: 'tool',
+  sys_db_object: 'data_model', sys_ui_form: 'form_design', sys_ui_policy: 'form_design',
+  sc_cat_item: 'catalog_item', sys_hub_flow: 'workflow',
+  sys_script: 'business_logic', sys_script_client: 'business_logic',
+  sys_script_include: 'business_logic', sys_ui_action: 'business_logic',
+};
+// For business_logic, the SN table also tells us the logic_type deterministically.
+const SN_TABLE_TO_LOGIC_TYPE = {
+  sys_script: 'business_rule', sys_script_client: 'client_script',
+  sys_script_include: 'script_include', sys_ui_action: 'ui_action',
+};
+
+// Forward extraction tools indexed by name (L2 provenance already stripped by buildApiTools).
+let _forwardToolsByName = null;
+function forwardTool(designType) {
+  if (!_forwardToolsByName) {
+    _forwardToolsByName = {};
+    for (const t of registry.buildApiTools()) _forwardToolsByName[t.name] = t;
+  }
+  return _forwardToolsByName[`extract_${designType}`] || null;
+}
+
+// Prompt for the forward-tool reverse path: infer the FULL Level-1 design from the artifact.
+const REVERSE_SYSTEM_PROMPT = [
+  'You are reverse-engineering ONE artifact from a live ServiceNow application into the Workbench\'s',
+  'business-level (Level-1) design. Call the provided extract_* tool exactly once and fill EVERY field the',
+  'artifact actually evidences — e.g. a table\'s columns → data_model.fields; a form\'s layout → form_design.sections;',
+  'a script\'s logic → business_logic.plain_english / when_runs / conditions; a tool\'s signature → inputs / outputs / errors.',
+  'Infer ONLY what the implementation supports — never fabricate detail not evidenced by the artifact. ServiceNow is a',
+  'lossy, narrower view, so leaving a field empty when the artifact does not evidence it is correct. Set confidence (0–1)',
+  'honestly. Do NOT emit any source_* / provenance fields — those are set deterministically. Do not write a prose reply.',
+].join('\n');
 
 // ── Static, cache-friendly system guidance (byte-identical across all calls) ──
 const SYSTEM_PROMPT = [
@@ -102,21 +140,64 @@ function userMessageFor(artifact) {
   return lines.join('\n');
 }
 
+// Minimal per-type Level-1 entity_data — used by the offline stub and as a floor. Mirrors the
+// historic thin mapping so behaviour is unchanged without an API key.
+function stubEntityData(designType, name, purpose, behavior, artifact) {
+  const desc = [purpose, behavior].filter(Boolean).join('\n\n') || name;
+  switch (designType) {
+    case 'use_case':       return { title: name, summary: purpose || name, business_objective: behavior };
+    case 'workflow':       return { name, trigger: { description: behavior || purpose || 'See ServiceNow source' } };
+    case 'agent_spec':     return { name, scope: purpose || name, instructions: behavior };
+    case 'tool':           return { name, contract: desc };
+    case 'data_model':     return { name, purpose: desc };
+    case 'form_design':    return { name, behavior_notes: desc };
+    case 'business_logic': return { name, logic_type: SN_TABLE_TO_LOGIC_TYPE[artifact.source_table] || 'business_rule', plain_english: desc };
+    case 'catalog_item':   return { name, short_description: purpose || name };
+    default:               return null;
+  }
+}
+
 // Offline deterministic skeleton (no API key) — keeps the pipeline testable for free.
 function stubInference(artifact) {
-  const map = { sys_aia_agent: 'agent_spec', sn_aia_agent: 'agent_spec', sn_aia_tool: 'tool', sn_aia_usecase: 'use_case',
-    sys_db_object: 'data_model', sys_ui_form: 'form_design', sc_cat_item: 'catalog_item', sys_hub_flow: 'workflow',
-    sys_script: 'business_logic', sys_script_client: 'business_logic', sys_script_include: 'business_logic' };
+  const designType = SN_TABLE_TO_TYPE[artifact.source_table] || 'other';
+  const name = artifact.name || '(unnamed)';
+  const purpose = `[stub] inferred from ${artifact.source_table || 'unknown'} "${name}"`;
+  const behavior = '[stub — no ANTHROPIC_API_KEY; offline skeleton]';
   return {
-    design_type: map[artifact.source_table] || 'other',
-    name: artifact.name || '(unnamed)',
-    purpose: `[stub] inferred from ${artifact.source_table || 'unknown'} "${artifact.name || ''}"`,
-    behavior: '[stub — no ANTHROPIC_API_KEY; offline skeleton]',
-    key_details: Object.keys(artifact.salient || {}),
+    design_type: designType, name, purpose, behavior,
+    key_details: Object.keys(artifact.salient || {}), relates_to: [],
+    confidence: 0.5, rationale: '[stub] deterministic offline inference', _stub: true,
+    entity_data: stubEntityData(designType, name, purpose, behavior, artifact),
+  };
+}
+
+// Convert a forward extract_* tool's output into the inferred envelope (kept for reconcile / review /
+// materiality) PLUS the rich `entity_data` that materializes the Level-1 record. Strips meta + any
+// provenance the model shouldn't set; derives business_logic.logic_type from the SN source table.
+function buildInferred(designType, input, artifact) {
+  const entity_data = { ...input };
+  for (const k of ['operation', 'target_slug', 'conflict_classification', 'conflict_rationale',
+    'confidence', 'confidence_notes', 'system_generated', 'implements_requirements',
+    'source_system', 'source_sys_id', 'source_table', 'source_scope', 'source_fluent', 'source_hash']) {
+    delete entity_data[k];
+  }
+  if (designType === 'business_logic' && !entity_data.logic_type) {
+    entity_data.logic_type = SN_TABLE_TO_LOGIC_TYPE[artifact.source_table] || 'business_rule';
+  }
+  const name = entity_data.name || entity_data.title || entity_data.source_name || entity_data.rule_name || artifact.name || '(unnamed)';
+  const trig = entity_data.trigger && typeof entity_data.trigger === 'object' ? entity_data.trigger : {};
+  return {
+    design_type: designType,
+    name,
+    purpose: entity_data.summary || entity_data.purpose || entity_data.scope || entity_data.short_description || name,
+    behavior: entity_data.plain_english || entity_data.behavior_notes || entity_data.description || entity_data.instructions || trig.description || '',
+    key_details: Array.isArray(entity_data.fields) ? entity_data.fields.map(f => f.label || f).filter(Boolean).slice(0, 12)
+      : Array.isArray(entity_data.variables) ? entity_data.variables.map(v => v.label || v).filter(Boolean).slice(0, 12)
+      : [],
     relates_to: [],
-    confidence: 0.5,
-    rationale: '[stub] deterministic offline inference',
-    _stub: true,
+    confidence: typeof input.confidence === 'number' ? input.confidence : 0.7,
+    rationale: input.confidence_notes || '',
+    entity_data,
   };
 }
 
@@ -127,10 +208,14 @@ function parseFallback(resp) {
   return { design_type: 'other', name: '(unparsed)', purpose: text.slice(0, 200), confidence: 0.2, rationale: 'model did not call the tool', _unparsed: true };
 }
 
-/** Reverse-engineer ONE artifact → { source_sys_id, inferred, usage?, stub? }. */
+/** Reverse-engineer ONE artifact → { source_sys_id, inferred, usage?, stub? }.
+ *  Reuses the forward extract_<type> tool so the inferred design carries the FULL Level-1 field
+ *  set (not a 1–2 field skeleton). Falls back to the offline stub with no API key / unknown type. */
 async function reverseEngineerOne(artifact, ctx = {}) {
   const client = getClient();
-  if (!client) return { source_sys_id: artifact.source_sys_id, inferred: stubInference(artifact), stub: true };
+  const designType = SN_TABLE_TO_TYPE[artifact.source_table] || 'other';
+  const tool = designType !== 'other' ? forwardTool(designType) : null;
+  if (!client || !tool) return { source_sys_id: artifact.source_sys_id, inferred: stubInference(artifact), stub: !client };
 
   const model = aiConfig.resolveModel('reverse_engineer');
   const thinkCfg = aiConfig.getThinkingConfig('reverse_engineer');
@@ -139,9 +224,9 @@ async function reverseEngineerOne(artifact, ctx = {}) {
   const req = {
     model,
     max_tokens: maxTokens,
-    system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }], // cached prefix (tools render before system → both cached)
-    tools: [EMIT_TOOL],
-    tool_choice: { type: 'auto' },
+    system: [{ type: 'text', text: REVERSE_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+    tools: [tool],
+    tool_choice: { type: 'tool', name: tool.name },
     messages: [{ role: 'user', content: userMessageFor(artifact) }],
   };
   if (thinkCfg) { req.thinking = thinkCfg.thinking; if (thinkCfg.outputConfig) req.output_config = thinkCfg.outputConfig; }
@@ -149,8 +234,8 @@ async function reverseEngineerOne(artifact, ctx = {}) {
   const resp = await client.messages.create(req);
   aiConfig.logUsage({ projectId: ctx.projectId, source: 'sn_reverse_engineer', refId: artifact.source_sys_id, model, usage: resp.usage });
 
-  const tu = (resp.content || []).find(b => b.type === 'tool_use' && b.name === 'emit_inferred_design');
-  const inferred = tu ? tu.input : parseFallback(resp);
+  const tu = (resp.content || []).find(b => b.type === 'tool_use' && b.name === tool.name);
+  const inferred = tu ? buildInferred(designType, tu.input, artifact) : stubInference(artifact);
   return { source_sys_id: artifact.source_sys_id, inferred, usage: resp.usage, model };
 }
 
@@ -161,4 +246,4 @@ async function reverseEngineer(artifacts, ctx = {}) {
   return results;
 }
 
-module.exports = { reverseEngineer, reverseEngineerOne, SYSTEM_PROMPT, EMIT_TOOL, DESIGN_TYPES };
+module.exports = { reverseEngineer, reverseEngineerOne, buildInferred, stubInference, SN_TABLE_TO_TYPE, SN_TABLE_TO_LOGIC_TYPE, SYSTEM_PROMPT, EMIT_TOOL, DESIGN_TYPES };

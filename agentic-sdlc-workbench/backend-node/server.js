@@ -6619,13 +6619,24 @@ function colToDataKey(entity, field) {
 // enriches the rest later. Returns null for types we cannot materialize faithfully.
 function inferredToEntityData(inferred) {
   if (!inferred) return null;
+  // Phase 2 (reverse L1 parity): the reverse-engineer reused the forward extract_* tool, so the
+  // FULL Level-1 entity_data is already present — strip meta/provenance and return it as-is. This
+  // is what lifts round-tripped designs to parity (data_model.fields[], tool inputs/outputs, etc.).
+  if (inferred.entity_data && typeof inferred.entity_data === 'object') {
+    const ed = { ...inferred.entity_data };
+    for (const k of ['operation', 'target_slug', 'conflict_classification', 'conflict_rationale',
+      'confidence', 'confidence_notes', 'implements_requirements', 'system_generated',
+      'source_system', 'source_sys_id', 'source_table', 'source_scope', 'source_fluent', 'source_hash']) delete ed[k];
+    return Object.keys(ed).length ? ed : null;
+  }
+  // Legacy thin fallback (no entity_data — e.g. an old cached inference).
   const name = inferred.name || '(unnamed)';
   const purpose = inferred.purpose || '';
   const behavior = inferred.behavior || '';
   const desc = [purpose, behavior].filter(Boolean).join('\n\n') || name;
   switch (inferred.design_type) {
     case 'use_case':       return { title: name, summary: purpose || name, business_objective: behavior };
-    case 'workflow':       return { name, trigger: behavior || purpose || 'See ServiceNow source' };
+    case 'workflow':       return { name, trigger: { description: behavior || purpose || 'See ServiceNow source' } };
     case 'agent_spec':     return { name, scope: purpose || name, instructions: behavior };
     case 'tool':           return { name, contract: desc };
     case 'data_model':     return { name, purpose: desc };
