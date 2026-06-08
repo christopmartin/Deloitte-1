@@ -137,6 +137,7 @@ const REGISTRY = [
     materializable: true,
     summarizable: true,       // include in existing-design summary so AI can detect updates
     injectsIngestId: true,    // /promote injects doc.ingest_id before storing new_value
+    statusCol: 'status',      // uses 'status' not 'lifecycle_status' — must match buildExistingDesignSummary
     table: 'asdlc_functional_req',
     pk: 'fr_id',
     slugPrefix: 'FR',
@@ -154,7 +155,7 @@ const REGISTRY = [
         postconditions:  { type: 'string',  description: 'What is guaranteed to be true after successful fulfilment' },
         priority:        { type: 'string',  enum: ['must_have','should_have','could_have','wont_have'], description: 'MoSCoW priority' },
         source:          { type: 'string',  description: 'Citation — person name, meeting date, document section, etc.' },
-        use_case_title:  { type: 'string',  description: 'Title of the Use Case this requirement belongs to, if one is identifiable' },
+        use_case_title:  { type: 'string',  description: 'Title of the Use Case this requirement belongs to. ALWAYS populate this when a use case is identifiable — it is used to link the requirement to the correct use case and prevents orphaned records.' },
         dependencies:    { type: 'array',   items: { type: 'string' }, description: 'FR or NFR slugs this requirement depends on, e.g. ["FR-002","NFR-001"]' },
       },
       required: ['title', 'description'],
@@ -171,7 +172,7 @@ const REGISTRY = [
       ingest_id:      { col: 'ingest_id' },   // populated at promote time, not by AI
     },
     parentLinks: [
-      { col: 'use_case_id', parentType: 'use_case', nameKeyInData: 'use_case_title', required: false },
+      { col: 'use_case_id', parentType: 'use_case', nameKeyInData: 'use_case_title', required: false, tryFallback: true },
     ],
   },
 
@@ -181,6 +182,7 @@ const REGISTRY = [
     materializable: true,
     summarizable: true,
     injectsIngestId: true,
+    statusCol: 'status',      // uses 'status' not 'lifecycle_status' — must match buildExistingDesignSummary
     table: 'asdlc_nonfunctional_req',
     pk: 'nfr_id',
     slugPrefix: 'NFR',
@@ -198,7 +200,7 @@ const REGISTRY = [
         verification_method: { type: 'string', description: 'How this NFR will be verified — load test, audit, penetration test, etc.' },
         priority:            { type: 'string', enum: ['must_have','should_have','could_have','wont_have'], description: 'MoSCoW priority' },
         source:              { type: 'string', description: 'Citation — person name, meeting date, document section, etc.' },
-        use_case_title:      { type: 'string', description: 'Title of the Use Case this NFR constrains, if identifiable' },
+        use_case_title:      { type: 'string', description: 'Title of the Use Case this NFR constrains. ALWAYS populate this when a use case is identifiable — it is used to link the NFR to the correct use case and prevents orphaned records.' },
         dependencies:        { type: 'array',  items: { type: 'string' }, description: 'FR or NFR slugs this requirement depends on' },
       },
       required: ['title', 'category', 'description', 'measurable_target'],
@@ -215,7 +217,7 @@ const REGISTRY = [
       ingest_id:           { col: 'ingest_id' },
     },
     parentLinks: [
-      { col: 'use_case_id', parentType: 'use_case', nameKeyInData: 'use_case_title', required: false },
+      { col: 'use_case_id', parentType: 'use_case', nameKeyInData: 'use_case_title', required: false, tryFallback: true },
     ],
   },
 

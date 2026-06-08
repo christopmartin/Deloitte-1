@@ -153,9 +153,14 @@ function buildExistingDesignSummary(projectId) {
 
     let rows;
     try {
+      // FR/NFR tables use 'status' instead of 'lifecycle_status'; fall back gracefully.
+      const sc = e.statusCol || 'lifecycle_status';
+      const notRetired = sc === 'status'
+        ? `${sc} != 'deleted'`
+        : `(${sc} IS NULL OR ${sc} != 'retired')`;
       rows = db.prepare(
         `SELECT slug, ${nameCol} AS nm FROM ${e.table}
-         WHERE project_id = ? AND (lifecycle_status IS NULL OR lifecycle_status != 'retired')
+         WHERE project_id = ? AND ${notRetired}
          ORDER BY slug`
       ).all(projectId);
     } catch { continue; }

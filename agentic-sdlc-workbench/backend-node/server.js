@@ -887,6 +887,9 @@ function resolveParents(entity, data, projectId, idMap) {
     if (!parentId && link.required) {
       throw new SoftSkip(`${entity.entity_type}: could not resolve required parent ${link.parentType} (${link.nameKeyInData}="${nameVal || ''}")`);
     }
+    // tryFallback: optional link that still benefits from unambiguous auto-assignment
+    // (e.g. FR/NFR when AI omits use_case_title but there is only one UC in the packet/DB)
+    if (!parentId && !link.required && link.tryFallback) parentId = fallbackParent(link.parentType, projectId, idMap) || null;
     if (parentId) fks[link.col] = parentId;
   }
   return fks;
