@@ -210,6 +210,18 @@ function buildSubmitPanel() {
   row2.appendChild(scopeGroup);
   body.appendChild(row2);
 
+  // AI mode dial — Faithful (transcribe only) ⟷ Suggestive (propose best-practice additions).
+  const modeGroupNew = el('div', { className: 'form-group', style: { margin: '0 0 16px 0' } });
+  modeGroupNew.appendChild(el('label', { className: 'form-label' }, 'AI mode'));
+  const modeSelectNew = el('select', { className: 'form-select', style: { maxWidth: '520px' } });
+  [
+    ['faithful',   'Faithful — extract only what the document states'],
+    ['balanced',   'Balanced — also fill obviously-implied empty fields'],
+    ['suggestive', 'Suggestive — also propose best-practice additions (✨ flagged for review)'],
+  ].forEach(([v, l]) => modeSelectNew.appendChild(el('option', { value: v }, l)));
+  modeGroupNew.appendChild(modeSelectNew);
+  body.appendChild(modeGroupNew);
+
   // Row 3: file drop zone  —OR—  text entry (side by side)
   const inputRow = el('div', { style: { display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: '0', alignItems: 'stretch', marginBottom: '16px' } });
 
@@ -380,6 +392,7 @@ async function doSubmit(appSelect, typeSelect, titleInput, descInput, scopeSelec
       fd.append('file_name',      droppedFile.name);
       fd.append('file_type',      droppedFile.name.split('.').pop().toLowerCase());
       if (descInput.value.trim()) fd.append('description', descInput.value.trim());
+      fd.append('enrichment_level', modeSelectNew.value);
       fetchOpts = { method: 'POST', body: fd };
     } else {
       // ── JSON — typed/pasted text, prepend scope hint if set ───────────────
@@ -395,6 +408,7 @@ async function doSubmit(appSelect, typeSelect, titleInput, descInput, scopeSelec
           document_type:  typeSelect.value,
           description:    descInput.value.trim() || null,
           raw_text:       fullText,
+          enrichment_level: modeSelectNew.value,
         }),
       };
     }
@@ -701,6 +715,22 @@ function buildTriggerSection(doc, pane) {
   );
   sec.appendChild(note);
 
+  // ── AI mode dial: Faithful ⟷ Balanced ⟷ Suggestive ────────────────────────
+  const modeGroup = el('div', { className: 'form-group', style: { margin: '0 0 14px 0', maxWidth: '460px' } });
+  modeGroup.appendChild(el('label', { className: 'form-label' }, 'AI mode'));
+  const modeSel = el('select', { className: 'form-select' });
+  [
+    ['faithful',   'Faithful — extract only what the document states'],
+    ['balanced',   'Balanced — also fill obviously-implied empty fields'],
+    ['suggestive', 'Suggestive — also propose best-practice additions (✨ flagged for review)'],
+  ].forEach(([v, label]) => modeSel.appendChild(el('option', { value: v }, label)));
+  modeSel.value = ['faithful', 'balanced', 'suggestive'].includes(doc.enrichment_level) ? doc.enrichment_level : 'faithful';
+  modeGroup.appendChild(modeSel);
+  modeGroup.appendChild(el('p', { style: { fontSize: '11px', color: 'var(--color-text-muted)', marginTop: '4px' } },
+    'Suggestive lets the AI Agent act as a design consultant — adding standard agentic NFRs, implied data ' +
+    'sources, and richer detail, each flagged ✨ system-generated so you can keep or delete it.'));
+  sec.appendChild(modeGroup);
+
   if (doc.ingest_status === 'failed') {
     const failBox = el('div', { style: {
       color: 'var(--color-danger)', fontSize: '13px', marginBottom: '10px',
@@ -722,8 +752,10 @@ function buildTriggerSection(doc, pane) {
     try {
       // /process returns 202 immediately; the run continues in the background and
       // renderDetail() will show the spinner + poll until it resolves.
-      await apiFetch(`/ingest-documents/${doc.ingest_id}/process`, { method: 'POST' });
-      showToast('Extraction started — this can take 1–3 minutes.', 'success');
+      await apiFetch(`/ingest-documents/${doc.ingest_id}/process`, {
+        method: 'POST', body: JSON.stringify({ enrichment_level: modeSel.value }),
+      });
+      showToast(`Extraction started (${modeSel.value} mode) — this can take 1–3 minutes.`, 'success');
       await renderDetail(doc, pane);
     } catch (err) {
       showToast(`Error: ${err.message}`, 'error');

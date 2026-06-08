@@ -62,6 +62,12 @@ const COMMON_TOOL_FIELDS = {
     type: 'string',
     description: 'What you are uncertain about, if anything.',
   },
+  system_generated: {
+    type: 'boolean',
+    description: 'Set TRUE only when you INFERRED this entity as a best-practice or clearly-implied ' +
+      'addition that is NOT explicitly stated in the document (suggestive mode), so a human can ' +
+      'review / keep / delete it. Leave false or omit for anything the document actually states.',
+  },
 };
 
 // Optional traceability field merged into the DERIVED-entity tools (workflow,
@@ -215,6 +221,7 @@ const REGISTRY = [
       source:              { col: 'source' },
       dependencies:        { col: 'dependencies', json: true },
       ingest_id:           { col: 'ingest_id' },
+      system_generated:    { col: 'system_generated', transform: boolInt },
     },
     parentLinks: [
       { col: 'use_case_id', parentType: 'use_case', nameKeyInData: 'use_case_title', required: false, tryFallback: true },
@@ -257,6 +264,7 @@ const REGISTRY = [
       constraints_list:   { col: 'constraints_list', json: true },
       supervision_model:  { col: 'supervision_model',
         enumMap: { Assisted: 'Supervised HITL', Automated: 'Autonomous', 'Human-led': 'Advisory-only' } },
+      system_generated:   { col: 'system_generated', transform: boolInt },
     },
     parentLinks: [],
   },
@@ -290,6 +298,7 @@ const REGISTRY = [
       handoffs:       { col: 'handoffs', json: true },
       decisions:      { col: 'decisions', json: true },
       fallback_paths: { col: 'fallback_paths', json: true },
+      system_generated: { col: 'system_generated', transform: boolInt },
     },
     parentLinks: [
       { col: 'use_case_id', parentType: 'use_case', nameKeyInData: 'use_case_title', required: true },
@@ -329,6 +338,7 @@ const REGISTRY = [
       inputs:         { col: 'inputs', json: true },
       outputs:        { col: 'outputs', json: true },
       decisions_list: { col: 'decisions_list', json: true },
+      system_generated: { col: 'system_generated', transform: boolInt },
     },
     parentLinks: [
       { col: 'workflow_id', parentType: 'workflow', nameKeyInData: 'workflow_name', required: true },
@@ -460,6 +470,7 @@ const REGISTRY = [
       boundaries:          { col: 'boundaries', json: true },
       execution_mode:      { col: 'execution_mode' },
       dev_status:          { col: 'dev_status' },
+      system_generated:    { col: 'system_generated', transform: boolInt },
     },
     parentLinks: [],
   },
@@ -852,6 +863,7 @@ const REGISTRY = [
       contains_pii:        { col: 'contains_pii', transform: boolInt },
       rate_limits:         { col: 'rate_limits' },
       ingest_id:           { col: 'ingest_id' },
+      system_generated:    { col: 'system_generated', transform: boolInt },
     },
     parentLinks: [],
   },

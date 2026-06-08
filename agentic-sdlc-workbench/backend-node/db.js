@@ -209,6 +209,19 @@ const MIGRATIONS = [
   "ALTER TABLE asdlc_project ADD COLUMN materiality_min_confidence REAL",
   "ALTER TABLE asdlc_project ADD COLUMN materiality_disallow_types TEXT NOT NULL DEFAULT '[]'",
 
+  // ── Faithful↔Suggestive ingest dial (WS1) ────────────────────────────────────
+  // Per-ingest AI mode: faithful (transcribe only) | balanced (fill implied empty
+  // fields) | suggestive (also propose best-practice / implied net-new elements,
+  // flagged system_generated). Net-new INFERRED entities carry system_generated=1
+  // on the design table so the Design Review can distinguish AI-suggested rows.
+  "ALTER TABLE asdlc_ingest_document ADD COLUMN enrichment_level TEXT NOT NULL DEFAULT 'faithful'",
+  "ALTER TABLE asdlc_nonfunctional_req ADD COLUMN system_generated INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE asdlc_use_case          ADD COLUMN system_generated INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE asdlc_workflow           ADD COLUMN system_generated INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE asdlc_workflow_step      ADD COLUMN system_generated INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE asdlc_tool               ADD COLUMN system_generated INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE asdlc_data_source        ADD COLUMN system_generated INTEGER NOT NULL DEFAULT 0",
+
   // ── Materialize core design elements from BRD ingest ─────────────────────────
   // Guardrails + data sources become first-class design rows; user stories get a
   // thin traceability home (narrative + requirement_refs slugs, no duplicated AC

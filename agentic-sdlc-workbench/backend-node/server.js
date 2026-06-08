@@ -6339,6 +6339,12 @@ app.post('/api/v1/ingest-documents/:id/process', (req, res) => {
   if (doc.lifecycle_status === 'cancelled') return res.status(409).json({ error: 'Document is cancelled — restore it before processing.' });
   if (doc.ingest_status === 'processing') return res.status(409).json({ error: 'Document is already being processed.' });
 
+  // Optional AI-mode override on (re-)run: faithful | balanced | suggestive. Persist it so
+  // processDocument (which re-loads the doc) picks it up, and re-runs honour the chosen dial.
+  if (['faithful','balanced','suggestive'].includes(req.body && req.body.enrichment_level)) {
+    db.prepare("UPDATE asdlc_ingest_document SET enrichment_level=? WHERE ingest_id=?").run(req.body.enrichment_level, id);
+  }
+
   // Mark 'processing' BEFORE responding so the client's immediate poll sees it (no race).
   db.prepare("UPDATE asdlc_ingest_document SET ingest_status='processing', processing_notes=NULL, updated_at=datetime('now') WHERE ingest_id=?").run(id);
   res.status(202).json({ status: 'processing', ingest_id: id });
@@ -6959,6 +6965,9 @@ app.post('/api/v1/ingest-documents', upload.single('file'), (req, res) => {
   const file_path      = req.file ? req.file.path : null;
   // raw_text may be supplied directly (requirements update panel — no file attachment)
   const raw_text       = req.body.raw_text || null;
+  // AI mode dial: faithful (default) | balanced | suggestive. Anything else → faithful.
+  const enrichment_level = ['faithful','balanced','suggestive'].includes(req.body.enrichment_level)
+    ? req.body.enrichment_level : 'faithful';
 
   if (!project_id || !document_title) {
     if (req.file) require('fs').unlinkSync(req.file.path);   // clean up orphan
@@ -6983,11 +6992,11 @@ app.post('/api/v1/ingest-documents', upload.single('file'), (req, res) => {
   db.prepare(`
     INSERT INTO asdlc_ingest_document
       (ingest_id, project_id, document_title, file_name, file_type, document_type,
-       description, ingest_status, uploaded_by, file_path, raw_text,
+       description, ingest_status, enrichment_level, uploaded_by, file_path, raw_text,
        uploaded_at, created_at, updated_at)
-    VALUES (?,?,?,?,?,?,?,'pending',?,?,?,datetime('now'),datetime('now'),datetime('now'))
+    VALUES (?,?,?,?,?,?,?,'pending',?,?,?,?,datetime('now'),datetime('now'),datetime('now'))
   `).run(id, project_id, document_title, file_name, file_type,
-         document_type, description, uploadedBy, file_path, raw_text);
+         document_type, description, enrichment_level, uploadedBy, file_path, raw_text);
 
   auditLog('asdlc_ingest_document', id, 'INSERT', null,
     { project_id, document_title, file_name, document_type }, uploadedBy);

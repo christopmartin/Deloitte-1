@@ -359,6 +359,46 @@ function buildSystemPrompt(doc, threshold, answeredClarifications, existingSumma
     `  - Do not stop early — read the entire document before concluding`,
   );
 
+  // ── AI mode dial (Faithful ↔ Balanced ↔ Suggestive) ────────────────────────
+  const level = String(doc.enrichment_level || 'faithful').toLowerCase();
+  if (level === 'balanced' || level === 'suggestive') {
+    lines.push(
+      ``,
+      `## AI mode: ${level.toUpperCase()} — go beyond verbatim transcription`,
+      `Stakeholders write incomplete documents. In this mode you act as a senior agentic-SDLC architect,`,
+      `not just a transcriber. FILL the obviously-implied EMPTY fields on the entities you extract — but`,
+      `NEVER overwrite or contradict something the document actually states:`,
+      `  - use_case: owner, primary_success_metric, risk_tier, success_criteria, users, urgency`,
+      `  - workflow_step: actor_role (the role/system that performs it), step_purpose, preconditions, inputs, outputs`,
+      `  - nonfunctional_req: measurable_target, verification_method, category`,
+      `  - tool: contract, inputs, outputs, errors, access_requirements, boundaries, dev_status`,
+      `  - workflow: trigger, handoffs, decisions, fallback_paths, risk_tier`,
+      `Base every inferred value on what the design clearly implies, and keep confidence honest (lower it`,
+      `for inferred values). Filling an empty field on a document-evidenced entity does NOT make that`,
+      `entity system_generated — leave that flag false for it.`,
+    );
+  }
+  if (level === 'suggestive') {
+    lines.push(
+      ``,
+      `### SUGGESTIVE additions — propose clearly-implied NET-NEW elements`,
+      `Here the "do not invent" rule above is RELAXED, but ONLY for elements you explicitly label. Propose`,
+      `the best-practice and clearly-implied elements a senior architect would add to make THIS design`,
+      `production-ready, and set system_generated=true (operation="create") on EACH so a human can review,`,
+      `keep, or delete it:`,
+      `  - Standard agentic NON-FUNCTIONAL REQUIREMENTS this document omits: risk tiering, latency / SLA,`,
+      `    throughput & volume, security & PII handling, observability / audit logging, human-oversight &`,
+      `    fallback behaviour, cost / rate limits. One nonfunctional_req per concern, each with a`,
+      `    measurable_target placeholder for a human to confirm.`,
+      `  - IMPLIED DATA SOURCES the agents must read or write that the document never named (e.g. a`,
+      `    catalog/inventory an agent must look up, or a system of record it must query).`,
+      `  - Any obviously-missing supporting TOOL an agent needs to perform a stated step.`,
+      `Stay grounded: propose only what THIS design genuinely implies — never pad with generic boilerplate`,
+      `that does not fit. Every suggestive net-new entity MUST carry system_generated=true; never set that`,
+      `flag on something the document actually states.`,
+    );
+  }
+
   // ── Conflict detection against existing design ──────────────────────────────
   lines.push(
     ``,
@@ -770,7 +810,9 @@ async function processDocument(ingestId) {
 
       // Strip meta fields before storing entity_data
       const { confidence = 0, confidence_notes, ...entityData } = input;
-      const status = confidence >= threshold ? 'staged' : 'needs_clarification';
+      // Suggestive (system_generated) items are proposals for human keep/delete review — always stage
+      // them and never auto-raise a clarification (confidence just informs the reviewer's decision).
+      const status = (entityData.system_generated || confidence >= threshold) ? 'staged' : 'needs_clarification';
 
       const exId = upsertExtraction(ingestId, entityType, entityData, confidence, status, round);
       pass1Items.push({ exId, entityType, entityData, confidence });

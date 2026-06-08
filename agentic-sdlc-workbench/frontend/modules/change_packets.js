@@ -771,6 +771,12 @@ function renderChangeItem(item, cpStatus, cpId, onDecision) {
   const hdr = el('div', { style: 'display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--color-bg)' });
   hdr.appendChild(el('span', { className: `tag ${opCfg.cls}`, style: 'font-family:monospace;font-size:11px;white-space:nowrap' }, opCfg.label));
   hdr.appendChild(el('span', { style: 'font-size:11px;color:var(--color-text-muted);font-family:monospace' }, item.entity_type));
+  if (newData && newData.system_generated) {
+    hdr.appendChild(el('span', {
+      title: 'Proposed by the AI Agent in Suggestive mode — review and keep or reject.',
+      style: 'font-size:10px;white-space:nowrap;padding:1px 6px;border-radius:10px;background:#ede9fe;color:#6d28d9;border:1px solid #ddd6fe',
+    }, '✨ AI-suggested'));
+  }
   hdr.appendChild(el('span', { style: 'font-weight:600;font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, displayName));
   if (item.applied_at && !itemDecision) hdr.appendChild(el('span', { className: 'tag tag-ok', style: 'font-size:10px' }, '✓ applied'));
   if (itemDecision === 'approved') hdr.appendChild(el('span', { className: 'tag tag-ok', style: 'font-size:10px' }, '✓ Approved'));
