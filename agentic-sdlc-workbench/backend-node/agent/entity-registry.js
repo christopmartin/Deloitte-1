@@ -528,13 +528,16 @@ const REGISTRY = [
     parentLinks: [],
   },
 
-  // ── Acceptance Criteria (order 7 — after design entities, requires UC parent) ──
+  // ── Acceptance Criteria (order 60 — after user_story at 51, requires UC/US parent) ──
   // Kept in the Testing module. AI only extracts AC when a Use Case can be named.
   // `staticColumns` are injected by mtCreate alongside the fieldMap columns.
   // `req_slug` links the AC back to the FR or NFR it satisfies (loose FK via slug).
+  // ORDER NOTE: must be > 51 (user_story) so that when a CP contains both AC and US
+  // items, user_story rows exist in idMap before acceptance_criterion tries to resolve
+  // its parent_id. Previously order:7 caused 11 orphaned ACs in the DB.
   {
     entity_type: 'acceptance_criterion',
-    order: 7,
+    order: 60,
     materializable: true,
     summarizable: false,          // too many to enumerate in the existing-design context
     staticColumns: { parent_type: 'use_case', source: 'generated' },
@@ -934,6 +937,24 @@ const REGISTRY = [
         sequence_order: { type: 'integer', description: 'Position of this segment in the overall process' },
       },
       required: ['segment_name'],
+    },
+  },
+  // ── test_scenario (legacy alias, order 55 — non-materializable) ─────────────
+  // Pre-2026 entity type name, superseded by test_case. 18 CPI rows exist with
+  // this type; they are intentionally captured as supporting evidence (no table).
+  // Registering explicitly so the apply handler logs a clean label instead of
+  // treating it as an unknown type.
+  {
+    entity_type: 'test_scenario',
+    order: 55, materializable: false, summarizable: false,
+    nameKeys: ['title'],
+    tool: {
+      name: 'extract_test_scenario',
+      description: 'Legacy alias for test_case (pre-2026). Do not use in new extractions.',
+      properties: {
+        title: { type: 'string', description: 'Scenario title' },
+      },
+      required: ['title'],
     },
   },
   {

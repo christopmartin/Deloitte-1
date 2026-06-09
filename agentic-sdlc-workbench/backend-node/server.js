@@ -8,6 +8,8 @@ const fs = require('fs');
 const express = require('express');
 const { db, generateId, auditLog, nextSlug, getSetting, setSetting } = require('./db');
 const registry = require('./agent/entity-registry');
+const { deriveSwimlane } = require('./agent/swimlane-deriver');
+const { relinkOrphanRequirements, repairProjectDesign } = require('./agent/design-repair');
 const aiConfig = require('./agent/ai-config');
 const reviewQueue = require('./agent/review-queue');
 
@@ -753,6 +755,25 @@ function approveAndApplyCp(cpId, uid, opts = {}) {
         if (n) console.log(`[test-gen] materialize: generated ${n} test case(s) across ${toGenerate.length} entit(ies) for CP ${updated.packet_code}`);
       });
   }
+
+  // AI RASIC inference for touched workflows — fire-and-forget AFTER commit.
+  // Runs after deriveSwimlane (participants + owner_participant_id already set).
+  // Skips any workflow that already has RASIC rows (preserves manual edits).
+  const touchedWfs = applyResult && applyResult.touchedWorkflows
+    ? [...applyResult.touchedWorkflows]
+    : [];
+  if (touchedWfs.length && existing.project_id) {
+    const { inferRasicMatrix } = require('./agent/rasic-deriver');
+    Promise.allSettled(
+      touchedWfs.map(wfId =>
+        inferRasicMatrix(wfId, existing.project_id, uid).then(r => {
+          if (!r.skipped && r.cellsCreated > 0)
+            console.log(`[rasic-deriver] apply: ${r.cellsCreated} cell(s) inferred for workflow ${wfId}`);
+        })
+      )
+    ).catch(() => {});
+  }
+
   return { existing, updated, applyResult, postApply };
 }
 
@@ -1025,7 +1046,7 @@ function markItemApplied(itemId, note) {
 }
 
 // Registry entity_type → test_case.scope (the entities tests can target).
-const TESTABLE_SCOPE_OF = { use_case: 'use_case', workflow: 'workflow', agent_spec: 'agent', tool: 'tool' };
+const TESTABLE_SCOPE_OF = { use_case: 'use_case', workflow: 'workflow', agent_spec: 'agent_spec', tool: 'tool' };
 
 /**
  * Apply a single CP item using the same materializer as applyChangePacket, but
@@ -1184,7 +1205,8 @@ function applyChangePacket(cpId, uid) {
   );
 
   const idMap = {};
-  const result = { applied: 0, updated: 0, deleted: 0, skipped: 0, evidence: 0, errors: [], createdTestable: [] };
+  const touchedWorkflows = new Set();   // workflows that gained/changed steps → derive swimlane + RASIC after
+  const result = { applied: 0, updated: 0, deleted: 0, skipped: 0, evidence: 0, errors: [], createdTestable: [], touchedWorkflows };
 
   for (const item of ordered) {
     if (item.applied_at) { result.skipped++; continue; }
@@ -1205,6 +1227,10 @@ function applyChangePacket(cpId, uid) {
     let data; try { data = JSON.parse(item.new_value); } catch { data = {}; }
 
     if (!entity || !entity.materializable) {
+      if (!entity) {
+        // Completely unknown type — may indicate a stale/renamed entity_type in the CPI.
+        console.warn(`[apply] unknown entity_type '${item.entity_type}' in CPI ${item.change_packet_item_id} — captured as evidence`);
+      }
       markItemApplied(item.change_packet_item_id, '[captured as supporting evidence — no design table for this type]');
       result.evidence++;
       continue;
@@ -1222,9 +1248,11 @@ function applyChangePacket(cpId, uid) {
           markItemApplied(item.change_packet_item_id, `[non-destructive: kept richer Workbench values for ${r.protected.join(', ')}]`);
         }
         materializeRequirementLinks(entity.entity_type, item.entity_id, data, projectId, uid);
+        recordTouchedWorkflow(entity.entity_type, item.entity_id, touchedWorkflows);
       } else {
         const newId = mtCreate(entity, data, projectId, uid, idMap, item); result.applied++;
         materializeRequirementLinks(entity.entity_type, newId, data, projectId, uid);
+        recordTouchedWorkflow(entity.entity_type, newId, touchedWorkflows);
         // Record newly-created testable entities so the caller can auto-generate
         // test coverage AFTER the transaction commits (Claude calls must not run
         // inside the DB transaction).
@@ -1244,30 +1272,42 @@ function applyChangePacket(cpId, uid) {
   // FRs/NFRs have order:0 and UCs have order:1, so FRs are materialised BEFORE the
   // use case exists in idMap or the DB. resolveParents correctly reads use_case_title
   // but finds nothing to link to. Now the full pass is done — UCs exist — fix them.
-  for (const item of ordered) {
-    if (!['functional_req', 'nonfunctional_req'].includes(item.entity_type)) continue;
-    if (item.operation !== 'create' || item.item_status === 'rejected') continue;
-    const entity = registry.byEntityType[item.entity_type];
-    if (!entity) continue;
+  // This delegates to the same idempotent relinker used for backfill so the logic
+  // (exact-title match → single-UC fallback) lives in ONE place and can never drift.
+  try {
+    const r = relinkOrphanRequirements(projectId, uid);
+    if (r.linked) console.log(`[apply] post-pass linked ${r.linked} orphan requirement(s) to their use case`);
+  } catch (err) {
+    console.warn('[apply] orphan-requirement relink failed (non-fatal):', err.message);
+  }
+
+  // ── Post-apply pass: derive swimlane structure for touched workflows ──────────
+  // Ingest extracts steps with an `actor_role` string but never creates participants,
+  // step owners, or paths — so the swimlane renders everything in a single
+  // "Missing Owner" lane with no arrows. Derive that structure deterministically.
+  for (const wfId of touchedWorkflows) {
     try {
-      const row = db.prepare(`SELECT use_case_id FROM ${entity.table} WHERE ${entity.pk}=?`).get(item.entity_id);
-      if (!row || row.use_case_id !== null) continue;  // already linked or not found
-      let data; try { data = JSON.parse(item.new_value); } catch { data = {}; }
-      const ucTitle = data.use_case_title;
-      if (!ucTitle) continue;
-      const uc = db.prepare(
-        "SELECT use_case_id FROM asdlc_use_case WHERE project_id=? AND title=? " +
-        "AND (lifecycle_status IS NULL OR lifecycle_status != 'retired') LIMIT 1"
-      ).get(projectId, ucTitle);
-      if (uc) {
-        db.prepare(`UPDATE ${entity.table} SET use_case_id=? WHERE ${entity.pk}=?`)
-          .run(uc.use_case_id, item.entity_id);
-        console.log(`[apply] post-pass linked ${item.entity_type} "${ucTitle}" → UC`);
+      const s = deriveSwimlane(wfId, projectId, uid);
+      if (s.participantsCreated || s.ownersSet || s.pathsCreated) {
+        console.log(`[apply] swimlane derived for workflow ${wfId}: +${s.participantsCreated} lanes, ${s.ownersSet} owners, +${s.pathsCreated} paths`);
       }
-    } catch { /* non-fatal: don't abort the whole apply for a missed link */ }
+    } catch (err) {
+      console.warn(`[apply] swimlane derivation failed for ${wfId} (non-fatal):`, err.message);
+    }
   }
 
   return result;
+}
+
+/** Add a step/workflow's parent workflow id to the touched set (for swimlane derivation). */
+function recordTouchedWorkflow(entityType, entityId, set) {
+  try {
+    if (entityType === 'workflow') { set.add(entityId); return; }
+    if (entityType === 'workflow_step') {
+      const row = db.prepare('SELECT workflow_id FROM asdlc_workflow_step WHERE workflow_step_id = ?').get(entityId);
+      if (row && row.workflow_id) set.add(row.workflow_id);
+    }
+  } catch { /* non-fatal */ }
 }
 
 /** Learning loop: record proposed-vs-final for AI-sourced (ingest) change packets. */
@@ -1276,11 +1316,14 @@ function recordFeedbackForCp(cp, outcome, uid) {
   const items = db.prepare("SELECT * FROM asdlc_change_packet_item WHERE change_packet_id = ?").all(cp.change_packet_id);
   if (items.length === 0) return;
   const model = aiConfig.resolveModel('extraction');
+  // Determine whether uid is a real user or a system-agent label (e.g. 'sn-extract').
+  // Real users go in reviewer_id (FK-compatible); agent labels go in source_agent.
+  const isRealUser = uid && !!db.prepare("SELECT 1 FROM asdlc_user WHERE user_id=?").get(uid);
   const ins = db.prepare(`
     INSERT INTO asdlc_ingest_feedback
       (feedback_id, project_id, ingest_id, extraction_id, change_packet_id, entity_type,
-       model, confidence, outcome, proposed_value, final_value, reviewer_id, created_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
+       model, confidence, outcome, proposed_value, final_value, reviewer_id, source_agent, created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
   `);
   for (const it of items) {
     let finalValue = null;
@@ -1291,7 +1334,9 @@ function recordFeedbackForCp(cp, outcome, uid) {
       }
     }
     ins.run(generateId(), cp.project_id, null, it.entity_id, cp.change_packet_id,
-      it.entity_type, model, null, outcome, it.new_value, finalValue, uid);
+      it.entity_type, model, null, outcome, it.new_value, finalValue,
+      isRealUser ? uid : null,   // reviewer_id — only when uid is a real user
+      isRealUser ? null : uid);  // source_agent — system-agent label otherwise
   }
 }
 
@@ -2053,6 +2098,93 @@ app.post('/api/v1/projects/:id/validate/owners', (req, res) => {
     console.error('[validate/owners]', err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// One-click deterministic repair: relink orphan requirements + derive swimlane
+// structure (participants, step owners, sequential paths) for every workflow.
+// Idempotent — heals projects ingested before the apply-time fix existed.
+app.post('/api/v1/projects/:id/repair-design', async (req, res) => {
+  const uid = userId(req);
+  const projectId = req.params.id;
+  db.exec('BEGIN');
+  let summary;
+  try {
+    summary = repairProjectDesign(projectId, uid);
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    console.error('[repair-design]', err);
+    return res.status(500).json({ error: err.message });
+  }
+  // Refresh missing-owner exceptions now that owners may have been assigned (own txn).
+  try { syncOwnerExceptions(db, projectId, uid); } catch { /* non-fatal */ }
+
+  // AI RASIC inference for all workflows in the project — runs AFTER transaction commits
+  // (Claude calls must not run inside the DB txn). Skips workflows that already have
+  // RASIC rows so manual edits are never overwritten.
+  let rasicCells = 0;
+  try {
+    const { inferRasicMatrix } = require('./agent/rasic-deriver');
+    const wfIds = db.prepare(
+      "SELECT workflow_id FROM asdlc_workflow WHERE project_id = ? AND (lifecycle_status IS NULL OR lifecycle_status != 'retired')"
+    ).all(projectId).map(r => r.workflow_id);
+    if (wfIds.length) {
+      const results = await Promise.allSettled(wfIds.map(id => inferRasicMatrix(id, projectId, uid)));
+      rasicCells = results.reduce((sum, r) => sum + (r.status === 'fulfilled' ? (r.value.cellsCreated || 0) : 0), 0);
+    }
+  } catch (err) {
+    console.error('[repair-design] RASIC inference failed (non-fatal):', err.message);
+  }
+
+  res.json({ ok: true, ...summary, rasicCells });
+});
+
+// Re-materialize CPIs that were previously marked as 'supporting evidence' for an
+// entity type that was non-materializable at the time of approval but is now
+// materializable. The db.js data migration resets their applied_at; this endpoint
+// re-runs applyChangePacket on the affected parent CPs (idempotent — already-applied
+// items are skipped, only the newly-reset ones are processed).
+app.post('/api/v1/projects/:id/repair-stuck-cpis', (req, res) => {
+  const uid = userId(req);
+  const projectId = req.params.id;
+  const materializableTypes = Object.values(registry.byEntityType)
+    .filter(e => e.materializable)
+    .map(e => e.entity_type);
+  if (materializableTypes.length === 0) return res.json({ ok: true, reapplied: 0, cps: [] });
+
+  const placeholders = materializableTypes.map(() => '?').join(',');
+  const stuckCpIds = db.prepare(`
+    SELECT DISTINCT i.change_packet_id
+    FROM asdlc_change_packet_item i
+    JOIN asdlc_change_packet cp ON cp.change_packet_id = i.change_packet_id
+    WHERE cp.project_id = ?
+      AND i.applied_at IS NULL
+      AND i.entity_type IN (${placeholders})
+  `).all(projectId, ...materializableTypes).map(r => r.change_packet_id);
+
+  if (stuckCpIds.length === 0) return res.json({ ok: true, reapplied: 0, cps: [] });
+
+  const totals = { applied: 0, updated: 0, deleted: 0, errors: [] };
+  const processed = [];
+  for (const cpId of stuckCpIds) {
+    db.exec('BEGIN');
+    try {
+      const r = applyChangePacket(cpId, uid);
+      db.exec('COMMIT');
+      totals.applied  += r.applied;
+      totals.updated  += r.updated;
+      totals.deleted  += r.deleted;
+      totals.errors.push(...r.errors);
+      processed.push({ cpId, applied: r.applied, updated: r.updated, deleted: r.deleted, errors: r.errors });
+      console.log(`[repair-stuck-cpis] cp=${cpId} applied=${r.applied} updated=${r.updated}`);
+    } catch (err) {
+      db.exec('ROLLBACK');
+      console.error('[repair-stuck-cpis]', cpId, err);
+      totals.errors.push({ cpId, reason: err.message });
+      processed.push({ cpId, error: err.message });
+    }
+  }
+  res.json({ ok: true, ...totals, cps: processed });
 });
 
 // ──────────────────────────────────────────────

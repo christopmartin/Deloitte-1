@@ -31,6 +31,7 @@ const ROLE_ENV = {
   prompt_drafter:   'CLAUDE_PROMPT_DRAFTER_MODEL',
   build_review:     'CLAUDE_BUILD_REVIEW_MODEL',
   req_linker:       'CLAUDE_REQ_LINKER_MODEL',
+  rasic_deriver:    'CLAUDE_RASIC_DERIVER_MODEL',   // RASIC matrix inference; Sonnet default, Opus configurable
 };
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
@@ -43,6 +44,8 @@ const ROLE_DEFAULTS = {
   reconciler:         'claude-opus-4-8',
   reconcile_reviewer: 'claude-opus-4-8',
   req_linker:         'claude-haiku-4-5-20251001',   // lightweight inference; fast + cheap
+  // rasic_deriver intentionally omitted → falls through to DEFAULT_MODEL (Sonnet).
+  // Set rasic_deriver_model in Admin or CLAUDE_RASIC_DERIVER_MODEL env var for Opus.
 };
 const ROLE_THINKING_DEFAULT = { reverse_engineer: 'true', reconciler: 'true', reconcile_reviewer: 'true' };
 const ROLE_THINKING_BUDGET  = { reverse_engineer: '8000', reconciler: '8000', reconcile_reviewer: '8000' }; // ≥8000 → effort 'high'

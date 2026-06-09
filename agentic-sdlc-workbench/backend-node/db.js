@@ -209,6 +209,12 @@ const MIGRATIONS = [
   "ALTER TABLE asdlc_project ADD COLUMN materiality_min_confidence REAL",
   "ALTER TABLE asdlc_project ADD COLUMN materiality_disallow_types TEXT NOT NULL DEFAULT '[]'",
 
+  // ── DB audit fix: ingest_feedback source_agent column ────────────────────────
+  // reviewer_id was overloaded — real user UUIDs mixed with system-agent labels
+  // like 'sn-extract' and 'sn-sync-live'. New column holds the agent label so
+  // reviewer_id is a clean FK to asdlc_user. Backfill handled in DATA_MIGRATIONS.
+  "ALTER TABLE asdlc_ingest_feedback ADD COLUMN source_agent TEXT",
+
   // ── Faithful↔Suggestive ingest dial (WS1) ────────────────────────────────────
   // Per-ingest AI mode: faithful (transcribe only) | balanced (fill implied empty
   // fields) | suggestive (also propose best-practice / implied net-new elements,
@@ -327,6 +333,45 @@ for (const idx of SLUG_INDEXES) {
 // Run before any backfill so the 3-value enum is canonical.
 const DATA_MIGRATIONS = [
   "UPDATE asdlc_use_case SET supervision_model = 'Supervised HITL' WHERE supervision_model = 'Assisted'",
+
+  // ── DB audit fixes (2026-06-09) ──────────────────────────────────────────
+  // Fix 3a: move system-agent labels out of reviewer_id into source_agent
+  `UPDATE asdlc_ingest_feedback
+   SET source_agent = reviewer_id, reviewer_id = NULL
+   WHERE reviewer_id NOT IN (SELECT user_id FROM asdlc_user)
+     AND reviewer_id IS NOT NULL`,
+
+  // Fix 3b: null orphaned extraction_id values (extractions deleted by send-back flow)
+  `UPDATE asdlc_ingest_feedback
+   SET extraction_id = NULL
+   WHERE extraction_id IS NOT NULL
+     AND extraction_id NOT IN (SELECT extraction_id FROM asdlc_ingest_extraction)`,
+
+  // Fix 4: delete placeholder ai_usage rows from dev/test seeding
+  `DELETE FROM asdlc_ai_usage WHERE project_id IN ('proj-a','proj-b','proj-c')`,
+
+  // Fix 5b: normalize 'agent' → 'agent_spec' in test_case.scope and exception.related_entity_type
+  `UPDATE asdlc_test_case SET scope = 'agent_spec' WHERE scope = 'agent'`,
+  `UPDATE asdlc_exception SET related_entity_type = 'agent_spec' WHERE related_entity_type = 'agent'`,
+
+  // Fix 1a: reset stuck CPI applied_at — items marked 'supporting evidence' when their
+  // entity type was not yet materializable; registry has since made them materializable,
+  // so the items need to be re-processed. Call POST /repair-stuck-cpis after deploy.
+  `UPDATE asdlc_change_packet_item
+   SET applied_at = NULL,
+       rationale  = TRIM(REPLACE(COALESCE(rationale,''), '[captured as supporting evidence — no design table for this type]', ''))
+   WHERE applied_at IS NOT NULL
+     AND entity_type IN ('guardrail','data_source','business_logic','catalog_item','data_model','form_design')
+     AND rationale LIKE '%no design table for this type%'`,
+
+  // Fix 2b: mark acceptance criteria whose user_story parent never materialised as orphaned
+  `UPDATE asdlc_acceptance_criterion
+   SET lifecycle_status = 'orphaned'
+   WHERE parent_type = 'user_story'
+     AND parent_id NOT IN (SELECT user_story_id FROM asdlc_user_story)`,
+
+  // Fix 6: delete the retired duplicate 'Supplier Master Lookup' tool (T-004, created earlier)
+  `DELETE FROM asdlc_tool WHERE tool_id = '57934861-1e84-401c-a545-71deb9519965'`,
 ];
 for (const dm of DATA_MIGRATIONS) {
   try { db.exec(dm); } catch (err) { console.error('[db] data migration failed:', err.message); }
