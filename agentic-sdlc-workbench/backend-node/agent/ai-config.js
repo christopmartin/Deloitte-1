@@ -135,8 +135,9 @@ function logUsage(o) {
  */
 function getActiveBestPractices(entityScopes = []) {
   try {
+    // Only inject rules (practice_type='rule') into prompts — not standing questions
     const rows = db.prepare(
-      "SELECT title, rule_text, scope FROM asdlc_best_practice WHERE is_active = 1 ORDER BY sort_order, created_at"
+      "SELECT title, rule_text, scope FROM asdlc_best_practice WHERE is_active = 1 AND (practice_type IS NULL OR practice_type = 'rule') ORDER BY sort_order, created_at"
     ).all();
     return rows.filter(r => r.scope === 'global' || entityScopes.includes(r.scope));
   } catch {

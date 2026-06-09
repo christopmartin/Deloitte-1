@@ -835,13 +835,19 @@ function buildClarificationForm(doc, questions, round, pane) {
   questions.forEach((q, i) => {
     // Cross-check clarifications are namespaced in target_field: 'conflict:' = blocking
     // ripple/requirement conflict (blocks promote), 'fyi:' = non-blocking heads-up.
-    const isConflict = typeof q.target_field === 'string' && q.target_field.startsWith('conflict:');
-    const isFyi      = typeof q.target_field === 'string' && q.target_field.startsWith('fyi:');
+    // 'standing:' = cost-setup question auto-injected for every new application.
+    const isConflict  = typeof q.target_field === 'string' && q.target_field.startsWith('conflict:');
+    const isFyi       = typeof q.target_field === 'string' && q.target_field.startsWith('fyi:');
+    const isStanding  = typeof q.target_field === 'string' && q.target_field.startsWith('standing:');
 
     const qBlock = el('div', { style: {
       background: 'var(--color-bg)',
-      border: isConflict ? '1px solid var(--color-danger, #C62828)' : '1px solid var(--color-border)',
-      borderLeft: isConflict ? '3px solid var(--color-danger, #C62828)' : '1px solid var(--color-border)',
+      border: isConflict  ? '1px solid var(--color-danger, #C62828)'
+            : isStanding  ? '1px solid var(--color-warn, #E65100)'
+            :               '1px solid var(--color-border)',
+      borderLeft: isConflict  ? '3px solid var(--color-danger, #C62828)'
+               : isStanding  ? '3px solid var(--color-warn, #E65100)'
+               :               '1px solid var(--color-border)',
       borderRadius: 'var(--radius)',
       padding: '12px',
       marginBottom: '12px',
@@ -850,7 +856,7 @@ function buildClarificationForm(doc, questions, round, pane) {
     // Question header
     const qHdr = el('div', { style: { display: 'flex', alignItems: 'flex-start', gap: '10px', marginBottom: '8px' } });
     qHdr.appendChild(el('span', { style: {
-      background: isConflict ? 'var(--color-danger, #C62828)' : 'var(--color-accent)',
+      background: isConflict ? 'var(--color-danger, #C62828)' : isStanding ? 'var(--color-warn, #E65100)' : 'var(--color-accent)',
       color: '#fff',
       borderRadius: '50%',
       width: '20px', height: '20px', minWidth: '20px',
@@ -860,7 +866,8 @@ function buildClarificationForm(doc, questions, round, pane) {
     const qText = el('span', { style: { fontSize: '13px', fontWeight: '500', lineHeight: '1.5' } });
     if (isConflict) qText.appendChild(tag('⚠ Conflict', 'danger'));
     else if (isFyi) qText.appendChild(tag('ℹ FYI', 'muted'));
-    if (isConflict || isFyi) qText.appendChild(el('span', { style: { marginRight: '6px' } }, ' '));
+    else if (isStanding) qText.appendChild(tag('💰 Cost Setup', 'warn'));
+    if (isConflict || isFyi || isStanding) qText.appendChild(el('span', { style: { marginRight: '6px' } }, ' '));
     qText.appendChild(document.createTextNode(q.question_text));
     qHdr.appendChild(qText);
     qBlock.appendChild(qHdr);

@@ -1497,16 +1497,17 @@ app.get('/api/v1/best-practices', (_req, res) => {
 
 app.post('/api/v1/best-practices', (req, res) => {
   const uid = userId(req);
-  const { title, rule_text, scope, is_active, sort_order, source } = req.body || {};
+  const { title, rule_text, scope, is_active, sort_order, source, practice_type } = req.body || {};
   if (!title || !rule_text) return res.status(400).json({ error: 'title and rule_text are required' });
+  const ptype = (practice_type === 'question' || practice_type === 'rule') ? practice_type : 'rule';
   const id = generateId();
   db.prepare(`
     INSERT INTO asdlc_best_practice
-      (best_practice_id, scope, title, rule_text, is_active, sort_order, source, created_by, updated_by)
-    VALUES (?,?,?,?,?,?,?,?,?)
-  `).run(id, scope || 'global', title, rule_text,
+      (best_practice_id, scope, title, rule_text, practice_type, is_active, sort_order, source, created_by, updated_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?)
+  `).run(id, scope || 'global', title, rule_text, ptype,
          is_active === false ? 0 : 1, sort_order || 0, source || 'manual', uid, uid);
-  auditLog('asdlc_best_practice', id, 'INSERT', null, { title, scope: scope || 'global' }, uid);
+  auditLog('asdlc_best_practice', id, 'INSERT', null, { title, scope: scope || 'global', practice_type: ptype }, uid);
   res.status(201).json(db.prepare("SELECT * FROM asdlc_best_practice WHERE best_practice_id = ?").get(id));
 });
 
@@ -1514,17 +1515,19 @@ app.put('/api/v1/best-practices/:id', (req, res) => {
   const uid = userId(req);
   const existing = db.prepare("SELECT * FROM asdlc_best_practice WHERE best_practice_id = ?").get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Best practice not found' });
-  const { title, rule_text, scope, is_active, sort_order } = req.body || {};
+  const { title, rule_text, scope, is_active, sort_order, practice_type } = req.body || {};
+  const ptype = practice_type === 'question' ? 'question' : practice_type === 'rule' ? 'rule' : null;
   db.prepare(`
     UPDATE asdlc_best_practice
     SET title=COALESCE(?,title), rule_text=COALESCE(?,rule_text), scope=COALESCE(?,scope),
         is_active=COALESCE(?,is_active), sort_order=COALESCE(?,sort_order),
+        practice_type=COALESCE(?,practice_type),
         updated_by=?, updated_at=datetime('now')
     WHERE best_practice_id=?
   `).run(
     title ?? null, rule_text ?? null, scope ?? null,
     is_active === undefined ? null : (is_active ? 1 : 0),
-    sort_order ?? null, uid, req.params.id
+    sort_order ?? null, ptype, uid, req.params.id
   );
   res.json(db.prepare("SELECT * FROM asdlc_best_practice WHERE best_practice_id = ?").get(req.params.id));
 });
@@ -6421,6 +6424,61 @@ app.post('/api/v1/ingest-documents/:id/process', (req, res) => {
       const { processDocument } = require('./agent/processor');
       const result = await processDocument(id);
       console.log(`[process] Done — ingest ${id}: ${JSON.stringify(result && { staged: result.extractions_staged, status: result.new_status })}`);
+
+      // ── Auto-inject standing cost questions (once per project) ───────────────
+      // Standing questions (practice_type='question') are surfaced to the product
+      // owner during ingest review to collect cost-relevant data (run volumes,
+      // cost model) that BRDs rarely include. Idempotency: once an answer exists
+      // for any ingest in the project, no further injection for that question.
+      try {
+        const ingestDoc = db.prepare('SELECT project_id FROM asdlc_ingest_document WHERE ingest_id=?').get(id);
+        if (ingestDoc && ingestDoc.project_id) {
+          const pid = ingestDoc.project_id;
+          const standingQs = db.prepare(
+            "SELECT * FROM asdlc_best_practice WHERE practice_type='question' AND is_active=1 ORDER BY sort_order"
+          ).all();
+
+          // Determine current round for this ingest (use the max round just written)
+          const roundRow = db.prepare(
+            'SELECT MAX(round) AS r FROM asdlc_ingest_clarification WHERE ingest_id=?'
+          ).get(id);
+          const currentRound = roundRow?.r ?? 1;
+
+          for (const sq of standingQs) {
+            const field = `standing:${sq.best_practice_id}`;
+
+            // Skip if this project already has an answered standing question for this bp
+            const alreadyAnswered = db.prepare(`
+              SELECT 1 FROM asdlc_ingest_clarification c
+              JOIN asdlc_ingest_document d ON d.ingest_id = c.ingest_id
+              WHERE d.project_id = ? AND c.target_field = ? AND c.answer_text IS NOT NULL
+            `).get(pid, field);
+            if (alreadyAnswered) continue;
+
+            // Only inject if this extraction produced entities of the relevant type
+            const hasEntity = db.prepare(
+              "SELECT 1 FROM asdlc_ingest_extraction WHERE ingest_id=? AND entity_type=?"
+            ).get(id, sq.scope);
+            if (!hasEntity) continue;
+
+            // Avoid duplicates on re-runs of the same ingest
+            const alreadyInjected = db.prepare(
+              "SELECT 1 FROM asdlc_ingest_clarification WHERE ingest_id=? AND target_field=?"
+            ).get(id, field);
+            if (alreadyInjected) continue;
+
+            db.prepare(`
+              INSERT INTO asdlc_ingest_clarification
+                (clarification_id, ingest_id, round, question_text, context_snippet,
+                 target_entity_type, target_field, created_at)
+              VALUES (?,?,?,?,?,?,?,datetime('now'))
+            `).run(generateId(), id, currentRound, sq.rule_text, null, sq.scope, field);
+            console.log(`[process] Injected standing question "${sq.title}" for ingest ${id}`);
+          }
+        }
+      } catch (sqErr) {
+        console.error('[process] Standing question injection failed (non-fatal):', sqErr.message);
+      }
     } catch (err) {
       console.error('[process:async]', err.message);
       db.prepare("UPDATE asdlc_ingest_document SET ingest_status='failed', processing_notes=?, updated_at=datetime('now') WHERE ingest_id=?")
@@ -6475,6 +6533,47 @@ app.post('/api/v1/ingest-documents/:id/clarifications/answer', async (req, res) 
       `).run(String(answerText).trim(), uid, clarId, req.params.id);
     }
   }
+  // ── Auto-apply standing question answers ─────────────────────────────────────
+  // Standing questions (target_field = 'standing:<best_practice_id>') are answered
+  // by the product owner directly — no AI re-extraction needed. Parse the answer and
+  // write it immediately, deterministically, to the relevant design entities.
+  try {
+    const ingestDocForStanding = db.prepare('SELECT project_id FROM asdlc_ingest_document WHERE ingest_id=?').get(req.params.id);
+    if (ingestDocForStanding && ingestDocForStanding.project_id) {
+      const pid = ingestDocForStanding.project_id;
+      for (const [clarId] of Object.entries(answers)) {
+        const clarRow = db.prepare(
+          "SELECT c.answer_text, c.target_field, bp.scope FROM asdlc_ingest_clarification c " +
+          "LEFT JOIN asdlc_best_practice bp ON bp.best_practice_id = SUBSTR(c.target_field, 10) " +
+          "WHERE c.clarification_id=? AND c.target_field LIKE 'standing:%' AND c.answer_text IS NOT NULL"
+        ).get(clarId);
+        if (!clarRow) continue;
+
+        if (clarRow.scope === 'workflow') {
+          // Parse a number from the answer (e.g. "50 per month" → 50)
+          const numMatch = clarRow.answer_text.match(/\d+/);
+          if (numMatch) {
+            const vol = parseInt(numMatch[0], 10);
+            const updated = db.prepare(
+              "UPDATE asdlc_workflow SET runs_per_period=? WHERE project_id=? AND (runs_per_period IS NULL OR runs_per_period=0)"
+            ).run(vol, pid);
+            console.log(`[clarify] Auto-applied runs_per_period=${vol} to ${updated.changes} workflows in project ${pid}`);
+          }
+        } else if (clarRow.scope === 'agent_spec') {
+          // 'yes' → enable cost tracking; anything else → leave as-is (cost_model stays 'none')
+          if (/yes/i.test(clarRow.answer_text)) {
+            const updated = db.prepare(
+              "UPDATE asdlc_agent_spec SET cost_model='servicenow_now_assist' WHERE project_id=? AND (cost_model='none' OR cost_model IS NULL)"
+            ).run(pid);
+            console.log(`[clarify] Auto-applied cost_model=servicenow_now_assist to ${updated.changes} agents in project ${pid}`);
+          }
+        }
+      }
+    }
+  } catch (sqErr) {
+    console.error('[clarify] Standing question auto-apply failed (non-fatal):', sqErr.message);
+  }
+
   try {
     const { processDocument } = require('./agent/processor');
     const result = await processDocument(req.params.id);

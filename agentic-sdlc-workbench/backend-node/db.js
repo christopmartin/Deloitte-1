@@ -224,6 +224,11 @@ const MIGRATIONS = [
   "ALTER TABLE asdlc_agent_spec         ADD COLUMN system_generated INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE asdlc_functional_req     ADD COLUMN system_generated INTEGER NOT NULL DEFAULT 0",
 
+  // ── Standing cost questions: extend best_practice with practice_type ──────────
+  // 'rule' = existing extraction rule injected into AI prompts
+  // 'question' = standing question surfaced to product owners during ingest review
+  "ALTER TABLE asdlc_best_practice ADD COLUMN practice_type TEXT NOT NULL DEFAULT 'rule'",
+
   // ── Materialize core design elements from BRD ingest ─────────────────────────
   // Guardrails + data sources become first-class design rows; user stories get a
   // thin traceability home (narrative + requirement_refs slugs, no duplicated AC
@@ -598,6 +603,49 @@ try {
   }
 } catch (err) {
   console.error('[db] per-app cost params backfill failed:', err.message);
+}
+
+// ─── Standing Questions seed ─────────────────────────────────────────────────
+// Pre-seed two project-scoped cost clarification questions. Check by title so
+// this block is idempotent on every server start.
+try {
+  const existing1 = db.prepare("SELECT 1 FROM asdlc_best_practice WHERE title='Workflow run volume'").get();
+  if (!existing1) {
+    db.prepare(`
+      INSERT INTO asdlc_best_practice
+        (best_practice_id, scope, title, rule_text, practice_type, is_active, sort_order, source, created_at, updated_at)
+      VALUES (?,?,?,?,?,1,?,?,datetime('now'),datetime('now'))
+    `).run(
+      crypto.randomUUID(),
+      'workflow',
+      'Workflow run volume',
+      "Approximately how many times per planning period will workflows in this application run? (Required for AI cost projection — enter a number, e.g. '50')",
+      'question',
+      10,
+      'system'
+    );
+    console.log('[db] seeded standing question: Workflow run volume');
+  }
+
+  const existing2 = db.prepare("SELECT 1 FROM asdlc_best_practice WHERE title='Agent cost model'").get();
+  if (!existing2) {
+    db.prepare(`
+      INSERT INTO asdlc_best_practice
+        (best_practice_id, scope, title, rule_text, practice_type, is_active, sort_order, source, created_at, updated_at)
+      VALUES (?,?,?,?,?,1,?,?,datetime('now'),datetime('now'))
+    `).run(
+      crypto.randomUUID(),
+      'agent_spec',
+      'Agent cost model',
+      "Should the agents in this application use ServiceNow Now Assist for cost tracking? Answer 'yes' to enable cost projection on all agents, or 'no' if a different billing model applies.",
+      'question',
+      20,
+      'system'
+    );
+    console.log('[db] seeded standing question: Agent cost model');
+  }
+} catch (err) {
+  console.error('[db] standing questions seed failed:', err.message);
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

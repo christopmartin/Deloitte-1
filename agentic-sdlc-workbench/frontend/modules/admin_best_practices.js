@@ -58,36 +58,122 @@ export async function render(container) {
   listPanel.appendChild(listBody);
   container.appendChild(listPanel);
 
+  // ── Standing Questions ──────────────────────────────────────────────────────
+  // Questions (practice_type='question') are surfaced to the product owner during
+  // ingest review — they are NOT injected into the AI prompt. One question is asked
+  // once per project for each scope (workflow run volume, agent cost model).
+  const sqPanel = el('div', { className: 'panel', style: 'margin-top:18px' });
+  sqPanel.appendChild(el('div', { className: 'panel-header' }, el('h3', { className: 'panel-title' }, 'Standing Questions')));
+  const sqBody = el('div', { className: 'panel-body' });
+  sqPanel.appendChild(sqBody);
+  container.appendChild(sqPanel);
+
+  // Add question form
+  const sqAddWrap = el('div', { style: 'margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid var(--border)' });
+  const sqTitleInput = el('input', { type: 'text', className: 'form-input', placeholder: 'Short title (e.g. "Workflow run volume")' });
+  const sqTextInput  = el('textarea', { className: 'form-input', rows: '3', placeholder: 'The question shown to the product owner during ingest review.' });
+  const sqScopeSel   = el('select', { className: 'form-input', style: 'max-width:240px' });
+  ['workflow','agent_spec','use_case','global']
+    .forEach(t => sqScopeSel.appendChild(el('option', { value: t }, t)));
+  const sqAddBtn = el('button', { className: 'btn btn-primary', style: 'margin-top:8px' }, 'Add standing question');
+  sqAddBtn.addEventListener('click', async () => {
+    if (!sqTitleInput.value.trim() || !sqTextInput.value.trim()) { showToast('Title and question text are required', 'error'); return; }
+    sqAddBtn.disabled = true;
+    try {
+      await apiFetch('/best-practices', { method: 'POST', body: JSON.stringify({
+        title: sqTitleInput.value.trim(), rule_text: sqTextInput.value.trim(),
+        scope: sqScopeSel.value, source: 'manual', practice_type: 'question',
+      })});
+      showToast('Standing question added', 'success');
+      sqTitleInput.value = ''; sqTextInput.value = ''; sqScopeSel.value = 'workflow';
+      await loadList();
+    } catch (err) { showToast('Failed: ' + err.message, 'error'); }
+    finally { sqAddBtn.disabled = false; }
+  });
+  sqAddWrap.appendChild(el('div', { style: 'display:grid;gap:10px;max-width:680px' },
+    el('div', { className: 'form-group' }, el('label', { className: 'form-label' }, 'Title'), sqTitleInput),
+    el('div', { className: 'form-group' }, el('label', { className: 'form-label' }, 'Question text'), sqTextInput),
+    el('div', { className: 'form-group' }, el('label', { className: 'form-label' }, 'Scope'), sqScopeSel),
+    sqAddBtn
+  ));
+  sqBody.appendChild(sqAddWrap);
+  sqBody.appendChild(el('p', { style: 'font-size:12px;color:var(--text-muted);margin-bottom:12px' },
+    'Standing questions are asked once per project, the first time entities of the relevant scope are extracted. ' +
+    'Answers are applied directly to all matching design entities — no AI re-extraction needed for these fields.'));
+
+  const sqListBody = el('div');
+  sqBody.appendChild(sqListBody);
+
   async function loadList() {
     listBody.innerHTML = '';
-    let rules;
-    try { rules = await apiFetch('/best-practices'); }
-    catch (err) { listBody.appendChild(el('p', { style: 'color:var(--danger)' }, 'Failed to load: ' + err.message)); return; }
-    if (!rules.length) { listBody.appendChild(el('p', { className: 'dr-empty-note' }, 'No best practices yet. Add one above, or promote a correction below.')); return; }
+    sqListBody.innerHTML = '';
+    let allBPs;
+    try { allBPs = await apiFetch('/best-practices'); }
+    catch (err) {
+      listBody.appendChild(el('p', { style: 'color:var(--danger)' }, 'Failed to load: ' + err.message));
+      return;
+    }
 
-    rules.forEach(r => {
-      const row = el('div', { style: 'display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--border)' + (r.is_active ? '' : ';opacity:0.55') });
-      const main = el('div', { style: 'flex:1' },
-        el('div', { style: 'font-weight:600' }, r.title),
-        el('div', { style: 'font-size:13px;color:var(--text-secondary);margin-top:2px' }, r.rule_text),
-        el('div', { style: 'font-size:11px;color:var(--text-muted);margin-top:4px' },
-          `${r.scope}${r.source === 'from_correction' ? ' · from correction' : ''}`)
-      );
-      const toggle = el('button', { className: 'btn btn-sm' }, r.is_active ? 'Deactivate' : 'Activate');
-      toggle.addEventListener('click', async () => {
-        try { await apiFetch(`/best-practices/${r.best_practice_id}`, { method: 'PUT', body: JSON.stringify({ is_active: !r.is_active }) }); await loadList(); }
-        catch (err) { showToast('Failed: ' + err.message, 'error'); }
+    const rules = allBPs.filter(r => !r.practice_type || r.practice_type === 'rule');
+    const questions = allBPs.filter(r => r.practice_type === 'question');
+
+    // Render rules
+    if (!rules.length) {
+      listBody.appendChild(el('p', { className: 'dr-empty-note' }, 'No best practices yet. Add one above, or promote a correction below.'));
+    } else {
+      rules.forEach(r => {
+        const row = el('div', { style: 'display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--border)' + (r.is_active ? '' : ';opacity:0.55') });
+        const main = el('div', { style: 'flex:1' },
+          el('div', { style: 'font-weight:600' }, r.title),
+          el('div', { style: 'font-size:13px;color:var(--text-secondary);margin-top:2px' }, r.rule_text),
+          el('div', { style: 'font-size:11px;color:var(--text-muted);margin-top:4px' },
+            `${r.scope}${r.source === 'from_correction' ? ' · from correction' : ''}`)
+        );
+        const toggle = el('button', { className: 'btn btn-sm' }, r.is_active ? 'Deactivate' : 'Activate');
+        toggle.addEventListener('click', async () => {
+          try { await apiFetch(`/best-practices/${r.best_practice_id}`, { method: 'PUT', body: JSON.stringify({ is_active: !r.is_active }) }); await loadList(); }
+          catch (err) { showToast('Failed: ' + err.message, 'error'); }
+        });
+        const del = el('button', { className: 'btn btn-sm btn-danger' }, 'Delete');
+        del.addEventListener('click', async () => {
+          if (!confirm('Delete this best practice?')) return;
+          try { await apiFetch(`/best-practices/${r.best_practice_id}`, { method: 'DELETE' }); await loadList(); }
+          catch (err) { showToast('Failed: ' + err.message, 'error'); }
+        });
+        row.appendChild(main);
+        row.appendChild(el('div', { style: 'display:flex;gap:6px' }, toggle, del));
+        listBody.appendChild(row);
       });
-      const del = el('button', { className: 'btn btn-sm btn-danger' }, 'Delete');
-      del.addEventListener('click', async () => {
-        if (!confirm('Delete this best practice?')) return;
-        try { await apiFetch(`/best-practices/${r.best_practice_id}`, { method: 'DELETE' }); await loadList(); }
-        catch (err) { showToast('Failed: ' + err.message, 'error'); }
+    }
+
+    // Render standing questions
+    if (!questions.length) {
+      sqListBody.appendChild(el('p', { className: 'dr-empty-note' }, 'No standing questions yet. Add one above.'));
+    } else {
+      questions.forEach(q => {
+        const row = el('div', { style: 'display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--border)' + (q.is_active ? '' : ';opacity:0.55') });
+        const main = el('div', { style: 'flex:1' },
+          el('div', { style: 'font-weight:600' }, q.title),
+          el('div', { style: 'font-size:13px;color:var(--text-secondary);margin-top:2px' }, q.rule_text),
+          el('div', { style: 'font-size:11px;color:var(--text-muted);margin-top:4px' },
+            `scope: ${q.scope}${q.source === 'system' ? ' · pre-seeded' : ''}`)
+        );
+        const toggle = el('button', { className: 'btn btn-sm' }, q.is_active ? 'Deactivate' : 'Activate');
+        toggle.addEventListener('click', async () => {
+          try { await apiFetch(`/best-practices/${q.best_practice_id}`, { method: 'PUT', body: JSON.stringify({ is_active: !q.is_active }) }); await loadList(); }
+          catch (err) { showToast('Failed: ' + err.message, 'error'); }
+        });
+        const del = el('button', { className: 'btn btn-sm btn-danger' }, 'Delete');
+        del.addEventListener('click', async () => {
+          if (!confirm('Delete this standing question?')) return;
+          try { await apiFetch(`/best-practices/${q.best_practice_id}`, { method: 'DELETE' }); await loadList(); }
+          catch (err) { showToast('Failed: ' + err.message, 'error'); }
+        });
+        row.appendChild(main);
+        row.appendChild(el('div', { style: 'display:flex;gap:6px' }, toggle, del));
+        sqListBody.appendChild(row);
       });
-      row.appendChild(main);
-      row.appendChild(el('div', { style: 'display:flex;gap:6px' }, toggle, del));
-      listBody.appendChild(row);
-    });
+    }
   }
 
   // ── Learning / feedback ────────────────────────────────────────────────────
