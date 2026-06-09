@@ -37,8 +37,8 @@ function getClient() {
 // ── Schema loaded once at startup ─────────────────────────────────────────────
 const SCHEMA_SQL = fs.readFileSync(path.join(__dirname, '..', 'schema.sql'), 'utf8');
 
-// ── Safety cap on the tool-call agentic loop ──────────────────────────────────
-const MAX_API_LOOPS = 10;
+// ── Safety cap on the tool-call agentic loop (admin-configurable, default 20) ─
+// Read once per extraction run inside runExtractionLoop via aiConfig.getMaxExtractionLoops().
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TOOL DEFINITIONS — entity tools come from the registry; raise_clarification is
@@ -539,7 +539,8 @@ async function runExtractionLoop(systemPrompt, userMessage, usageCtx) {
   let messages = [{ role: 'user', content: userMessage }];
   let loops = 0;
 
-  const model      = aiConfig.resolveModel('extraction');
+  const MAX_API_LOOPS = aiConfig.getMaxExtractionLoops();
+  const model         = aiConfig.resolveModel('extraction');
   const thinkCfg   = aiConfig.getThinkingConfig('extraction');
   let   maxTokens  = aiConfig.getMaxTokens();
   // For Claude 3 budget_tokens thinking, ensure max_tokens > budget
