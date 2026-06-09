@@ -109,6 +109,16 @@ export async function render(container) {
   body.appendChild(el('div', { className: 'form-group' },
     el('label', { className: 'form-label' }, 'Max output tokens per call'), maxInput));
 
+  // Max extraction loops
+  const maxLoopsInput = el('input', { type: 'number', className: 'form-input', min: '5', max: '50', step: '5',
+    value: s.max_extraction_loops || 20, style: 'max-width:200px' });
+  inputs.max_extraction_loops = maxLoopsInput;
+  body.appendChild(el('div', { className: 'form-group' },
+    el('label', { className: 'form-label' }, 'Max extraction loops per ingest run'),
+    maxLoopsInput,
+    el('div', { style: 'font-size:11px;color:var(--text-muted);margin-top:2px' },
+      'Safety cap on the agentic loop during document ingestion. Raise this for large or complex documents. Default: 20.')));
+
   const saveBtn = el('button', { className: 'btn btn-primary' }, 'Save settings');
   saveBtn.addEventListener('click', async () => {
     saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
@@ -122,6 +132,7 @@ export async function render(container) {
         extraction_thinking_enabled: inputs.extraction_thinking_enabled.checked,
         extraction_thinking_budget:  parseInt(inputs.extraction_thinking_budget.value, 10) || 4000,
         max_tokens:                  parseInt(inputs.max_tokens.value, 10) || 8192,
+        max_extraction_loops:        parseInt(inputs.max_extraction_loops.value, 10) || 20,
       };
       await apiFetch('/settings/ai', { method: 'PUT', body: JSON.stringify(payload) });
       showToast('AI settings saved', 'success');

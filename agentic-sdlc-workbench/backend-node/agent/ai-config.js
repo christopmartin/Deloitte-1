@@ -61,6 +61,12 @@ function getMaxTokens() {
   return Number.isFinite(v) && v > 0 ? v : 8192;
 }
 
+/** Max agentic loops per extraction run (global setting, default 20). */
+function getMaxExtractionLoops() {
+  const v = parseInt(getSetting('max_extraction_loops', '20'), 10);
+  return Number.isFinite(v) && v >= 1 ? v : 20;
+}
+
 /**
  * Extended-thinking config for a role.
  * Returns null when disabled, otherwise an object shaped for the model generation:
@@ -153,6 +159,7 @@ module.exports = {
   MODEL_PRICING,
   resolveModel,
   getMaxTokens,
+  getMaxExtractionLoops,
   getThinkingConfig,
   estimateCost,
   logUsage,

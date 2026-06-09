@@ -1437,6 +1437,7 @@ const AI_SETTING_KEYS = [
   'extraction_model', 'quality_reviewer_model', 'prompt_drafter_model', 'build_review_model',
   'req_linker_model',
   'extraction_thinking_enabled', 'extraction_thinking_budget', 'max_tokens',
+  'max_extraction_loops',
 ];
 
 app.get('/api/v1/settings/ai', (_req, res) => {
@@ -1451,6 +1452,7 @@ app.get('/api/v1/settings/ai', (_req, res) => {
       extraction_thinking_enabled: String(getSetting('extraction_thinking_enabled', 'false')) === 'true',
       extraction_thinking_budget:  parseInt(getSetting('extraction_thinking_budget', '4000'), 10),
       max_tokens:                  aiConfig.getMaxTokens(),
+      max_extraction_loops:        aiConfig.getMaxExtractionLoops(),
     },
   });
 });
