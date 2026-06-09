@@ -205,6 +205,21 @@ function upsertExtraction(ingestId, entityType, entityData, confidence, status, 
     }
   }
 
+  // On clarification rounds (round > 1), if no name match was found, fall back to the
+  // single needs_clarification row of this entity_type. Clarification rounds only re-extract
+  // items that were previously uncertain, so a lone nc-row must be the same entity — Claude
+  // may have enriched the name slightly from the clarification answers, causing the exact-match
+  // to miss and producing a duplicate extraction (and therefore a duplicate WF-### slug).
+  if (!existingId && round > 1) {
+    const ncRows = db.prepare(
+      "SELECT extraction_id FROM asdlc_ingest_extraction WHERE ingest_id=? AND entity_type=? AND status='needs_clarification'"
+    ).all(ingestId, entityType);
+    if (ncRows.length === 1) {
+      existingId = ncRows[0].extraction_id;
+      console.log(`[claude-processor] upsertExtraction: name-match miss for ${entityType} on round ${round} — falling back to single needs_clarification row ${existingId}`);
+    }
+  }
+
   if (existingId) {
     db.prepare(
       "UPDATE asdlc_ingest_extraction SET entity_data=?, confidence=?, status=?, round=? WHERE extraction_id=?"
@@ -507,6 +522,9 @@ function buildUserMessage(doc, round, threshold) {
     summary || '  (none — re-analysing full document)',
     ``,
     `Please re-extract ONLY these items, using the clarification answers to improve accuracy.`,
+    `IMPORTANT: Use the EXACT same name/title as shown above for each entity. Only change a name if`,
+    `the clarification answer explicitly corrects it. Renaming an entity breaks the deduplication`,
+    `that prevents duplicate entries in the design.`,
     `Do not re-extract items that were already staged (above threshold).`,
     ``,
     `Original document for reference:\n---\n${doc.raw_text}`,
