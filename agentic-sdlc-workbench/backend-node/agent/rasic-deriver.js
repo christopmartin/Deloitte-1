@@ -250,7 +250,15 @@ async function inferRasicMatrix(workflowId, projectId, uid) {
     `).all(workflowId);
     if (!participants.length) return { workflowId, cellsCreated: 0, skipped: true, model: 'n/a' };
 
-    const systemPrompt = buildSystemPrompt(wf, steps, participants);
+    let systemPrompt = buildSystemPrompt(wf, steps, participants);
+    // Append platform-scoped AI Guidance (house rules) so RASIC honours the same rules
+    // the extractor does (e.g. ServiceNow accountability conventions).
+    const rasicGuidance = aiConfig.getActiveBestPractices(
+      ['workflow', 'workflow_step', 'agent_spec'], aiConfig.getProjectPlatform(projectId));
+    if (rasicGuidance.length) {
+      systemPrompt += '\n\n## House rules / platform guidance (FOLLOW THESE)\n' +
+        rasicGuidance.map(b => `  - ${b.title ? b.title + ': ' : ''}${b.rule_text}`).join('\n');
+    }
 
     // ── Stub path (no API key) ─────────────────────────────────────────────────
     if (!hasKey()) {

@@ -28,9 +28,17 @@ export async function render(container) {
   scopeSel.appendChild(el('option', { value: 'global' }, 'Global (all entities)'));
   ['use_case','workflow','workflow_step','hitl_gate','agent_spec','tool','guardrail','user_story','data_source','governance_control']
     .forEach(t => scopeSel.appendChild(el('option', { value: t }, t)));
+  const platformSel = el('select', { className: 'form-input', style: 'max-width:240px' });
+  [['any','Any platform'],['servicenow','ServiceNow only'],['generic','Generic only']]
+    .forEach(([v, label]) => platformSel.appendChild(el('option', { value: v }, label)));
   addBody.appendChild(el('div', { className: 'form-group' }, el('label', { className: 'form-label' }, 'Title'), titleInput));
   addBody.appendChild(el('div', { className: 'form-group' }, el('label', { className: 'form-label' }, 'Rule'), ruleInput));
   addBody.appendChild(el('div', { className: 'form-group' }, el('label', { className: 'form-label' }, 'Scope'), scopeSel));
+  addBody.appendChild(el('div', { className: 'form-group' },
+    el('label', { className: 'form-label' }, 'Platform'),
+    platformSel,
+    el('div', { style: 'font-size:11px;color:var(--text-muted);margin-top:4px' },
+      'Which target platform this rule applies to. "Any" applies to every document; "ServiceNow only" applies just to ServiceNow-tagged work.')));
   const addBtn = el('button', { className: 'btn btn-primary' }, 'Add best practice');
   let pendingSource = 'manual';
   addBtn.addEventListener('click', async () => {
@@ -39,10 +47,10 @@ export async function render(container) {
     try {
       await apiFetch('/best-practices', { method: 'POST', body: JSON.stringify({
         title: titleInput.value.trim(), rule_text: ruleInput.value.trim(),
-        scope: scopeSel.value, source: pendingSource,
+        scope: scopeSel.value, platform: platformSel.value, source: pendingSource,
       })});
       showToast('Best practice added', 'success');
-      titleInput.value = ''; ruleInput.value = ''; scopeSel.value = 'global'; pendingSource = 'manual';
+      titleInput.value = ''; ruleInput.value = ''; scopeSel.value = 'global'; platformSel.value = 'any'; pendingSource = 'manual';
       await loadList();
     } catch (err) { showToast('Failed: ' + err.message, 'error'); }
     finally { addBtn.disabled = false; }
@@ -127,7 +135,7 @@ export async function render(container) {
           el('div', { style: 'font-weight:600' }, r.title),
           el('div', { style: 'font-size:13px;color:var(--text-secondary);margin-top:2px' }, r.rule_text),
           el('div', { style: 'font-size:11px;color:var(--text-muted);margin-top:4px' },
-            `${r.scope}${r.source === 'from_correction' ? ' · from correction' : ''}`)
+            `${r.scope}${r.platform && r.platform !== 'any' ? ' · ' + r.platform : ''}${r.source === 'from_correction' ? ' · from correction' : ''}`)
         );
         const toggle = el('button', { className: 'btn btn-sm' }, r.is_active ? 'Deactivate' : 'Activate');
         toggle.addEventListener('click', async () => {

@@ -118,6 +118,11 @@ function buildClaudePrompt(ctx) {
     sections.push(`**Known design risks to address in the prompt:**`);
     for (const r of ctx.design_risks) sections.push(`- ${typeof r === 'string' ? r : JSON.stringify(r)}`);
   }
+  if (Array.isArray(ctx.bestPractices) && ctx.bestPractices.length) {
+    sections.push('');
+    sections.push(`**House rules / platform guidance to honour in this prompt:**`);
+    for (const b of ctx.bestPractices) sections.push(`- ${b.title ? b.title + ': ' : ''}${b.rule_text}`);
+  }
 
   sections.push('');
   sections.push(`# Writing instructions`);
@@ -137,9 +142,10 @@ function buildClaudePrompt(ctx) {
 async function claudeDraft(ctx) {
   const client = getClient();
   const userPrompt = buildClaudePrompt(ctx);
+  const model = aiConfig.resolveModel('prompt_drafter');
 
   const response = await client.messages.create({
-    model: aiConfig.resolveModel('prompt_drafter'),
+    model,
     max_tokens: MAX_TOKENS,
     messages: [{ role: 'user', content: userPrompt }],
   });
@@ -152,7 +158,7 @@ async function claudeDraft(ctx) {
     .trim();
 
   if (!text) throw new Error('Claude returned no text content for prompt draft.');
-  return text;
+  return { text, usage: response.usage, model };
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -169,8 +175,8 @@ async function draftAgentSystemPrompt(ctx) {
     return { draft: stubDraft(ctx), model: 'stub', source: 'stub' };
   }
   try {
-    const draft = await claudeDraft(ctx);
-    return { draft, model: aiConfig.resolveModel('prompt_drafter'), source: 'claude' };
+    const { text, usage, model } = await claudeDraft(ctx);
+    return { draft: text, model, source: 'claude', usage };
   } catch (err) {
     console.error('[prompt-drafter] Claude call failed, falling back to stub:', err.message);
     return { draft: stubDraft(ctx), model: 'stub', source: 'stub', error: err.message };

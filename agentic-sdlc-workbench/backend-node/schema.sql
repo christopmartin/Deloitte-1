@@ -62,6 +62,10 @@ CREATE TABLE IF NOT EXISTS asdlc_project (
     entitlement_enabled             INTEGER NOT NULL DEFAULT 0,
     annual_included_assists         REAL,
     visibility_scope                TEXT NOT NULL DEFAULT 'PROJECT',
+    -- Target delivery platform for this application. Scopes which AI Guidance
+    -- (asdlc_best_practice.platform) and platform-specific reasoning every AI
+    -- process applies. Per-document asdlc_ingest_document.platform can override.
+    target_platform                 TEXT NOT NULL DEFAULT 'servicenow',
     lifecycle_status                TEXT NOT NULL DEFAULT 'active',
     created_by                      TEXT,
     created_at                      TEXT NOT NULL DEFAULT (datetime('now')),
@@ -738,8 +742,11 @@ CREATE TABLE IF NOT EXISTS asdlc_ingest_document (
     -- AI extraction mode (Faithful↔Suggestive dial). faithful = transcribe only what's stated;
     -- balanced = also fill obviously-implied empty fields; suggestive = also propose best-practice /
     -- clearly-implied net-new elements, flagged system_generated for human review.
-    enrichment_level    TEXT NOT NULL DEFAULT 'faithful'
+    enrichment_level    TEXT NOT NULL DEFAULT 'balanced'
         CHECK (enrichment_level IN ('faithful','balanced','suggestive')),
+    -- Per-document platform override; NULL = inherit the project's target_platform.
+    -- Scopes which AI Guidance (asdlc_best_practice.platform) applies to this document.
+    platform            TEXT,
     uploaded_by         TEXT REFERENCES asdlc_user(user_id),
     uploaded_at         TEXT NOT NULL DEFAULT (datetime('now')),
     file_path           TEXT,
@@ -795,6 +802,7 @@ CREATE INDEX IF NOT EXISTS idx_ai_usage_source  ON asdlc_ai_usage(source);
 CREATE TABLE IF NOT EXISTS asdlc_best_practice (
     best_practice_id TEXT PRIMARY KEY,
     scope            TEXT NOT NULL DEFAULT 'global',   -- 'global' | <entity_type>
+    platform         TEXT NOT NULL DEFAULT 'any',      -- 'any' | 'servicenow' | 'generic' (which target platform this rule applies to)
     title            TEXT NOT NULL,
     rule_text        TEXT NOT NULL DEFAULT '',
     is_active        INTEGER NOT NULL DEFAULT 1,

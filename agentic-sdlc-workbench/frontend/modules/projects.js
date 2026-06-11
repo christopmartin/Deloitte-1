@@ -164,6 +164,8 @@ function renderDetail(p, pane) {
     { key: 'confidence_threshold', label: 'Agent Confidence Threshold (0–1)', type: 'number' },
     { key: 'ripple_scan_scope', label: 'Ingest Ripple-Scan Scope', type: 'select',
       options: [['project', 'Whole project (default)'], ['workflow', 'Workflow + linked use case']] },
+    { key: 'target_platform', label: 'Target Platform (which AI Guidance applies)', type: 'select',
+      options: [['servicenow', 'ServiceNow'], ['generic', 'Generic']] },
     { key: 'description', label: 'Description', wide: true },
   ];
 
@@ -492,6 +494,15 @@ async function openNewProject(pane) {
     form.appendChild(group);
   });
 
+  // Target platform — drives which AI Guidance (house rules) apply to this app's ingests.
+  const platGroup = el('div', { className: 'form-group' });
+  platGroup.appendChild(el('label', { className: 'form-label' }, 'Target Platform'));
+  const platformInput = el('select', { className: 'form-input' });
+  [['servicenow', 'ServiceNow'], ['generic', 'Generic']].forEach(([val, lbl]) =>
+    platformInput.appendChild(el('option', { value: val }, lbl)));
+  platGroup.appendChild(platformInput);
+  form.appendChild(platGroup);
+
   const saveBtn = el('button', { className: 'btn btn-primary' }, 'Create Application');
   saveBtn.addEventListener('click', async () => {
     const project_name = inputs.project_name.value.trim();
@@ -516,7 +527,7 @@ async function openNewProject(pane) {
 
       const created = await apiFetch('/projects', {
         method: 'POST',
-        body: JSON.stringify({ client_id, project_name, project_code, stage: inputs.stage.value.trim() || 'draft' }),
+        body: JSON.stringify({ client_id, project_name, project_code, stage: inputs.stage.value.trim() || 'draft', target_platform: platformInput.value }),
       });
       allProjects.push(created);
       showToast('Application created.', 'success');

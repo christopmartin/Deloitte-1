@@ -19,8 +19,8 @@ const AVAILABLE_MODELS = [
 // ── Approximate USD pricing per 1M tokens (informational cost estimate) ───────
 // input / output / cache-read. Unknown models → null cost (tokens still recorded).
 const MODEL_PRICING = {
-  'claude-opus-4-8':           { in: 15, out: 75, cacheRead: 1.5 },
-  'claude-opus-4-7':           { in: 15, out: 75, cacheRead: 1.5 },
+  'claude-opus-4-8':           { in: 5,  out: 25, cacheRead: 0.5 },
+  'claude-opus-4-7':           { in: 5,  out: 25, cacheRead: 0.5 },
   'claude-sonnet-4-6':         { in: 3,  out: 15, cacheRead: 0.3 },
   'claude-haiku-4-5-20251001': { in: 1,  out: 5,  cacheRead: 0.1 },
 };
@@ -32,6 +32,7 @@ const ROLE_ENV = {
   build_review:     'CLAUDE_BUILD_REVIEW_MODEL',
   req_linker:       'CLAUDE_REQ_LINKER_MODEL',
   rasic_deriver:    'CLAUDE_RASIC_DERIVER_MODEL',   // RASIC matrix inference; Sonnet default, Opus configurable
+  synthesis:        'CLAUDE_SYNTHESIS_MODEL',       // Opus design-synthesis/enrichment pass (Phase 1)
 };
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
@@ -44,11 +45,13 @@ const ROLE_DEFAULTS = {
   reconciler:         'claude-opus-4-8',
   reconcile_reviewer: 'claude-opus-4-8',
   req_linker:         'claude-haiku-4-5-20251001',   // lightweight inference; fast + cheap
+  synthesis:          'claude-opus-4-8',             // bold design-synthesis/enrichment pass (Phase 1) — most capable
+  cost_estimate:      'claude-opus-4-8',             // Now Assist cost estimation; reasoning-heavy → Opus default, admin-overridable
   // rasic_deriver intentionally omitted → falls through to DEFAULT_MODEL (Sonnet).
   // Set rasic_deriver_model in Admin or CLAUDE_RASIC_DERIVER_MODEL env var for Opus.
 };
-const ROLE_THINKING_DEFAULT = { reverse_engineer: 'true', reconciler: 'true', reconcile_reviewer: 'true' };
-const ROLE_THINKING_BUDGET  = { reverse_engineer: '8000', reconciler: '8000', reconcile_reviewer: '8000' }; // ≥8000 → effort 'high'
+const ROLE_THINKING_DEFAULT = { reverse_engineer: 'true', reconciler: 'true', reconcile_reviewer: 'true', synthesis: 'true' };
+const ROLE_THINKING_BUDGET  = { reverse_engineer: '8000', reconciler: '8000', reconcile_reviewer: '8000', synthesis: '8000' }; // ≥8000 → effort 'high'
 
 /** Resolve the model for a role: setting `<role>_model` → env var → per-role default → global default. */
 function resolveModel(role) {
@@ -138,19 +141,46 @@ function logUsage(o) {
 }
 
 /**
- * Active best-practice rules to inject into a prompt. Returns global rules plus
- * any whose scope matches one of the given entity types. Never throws.
+ * Active best-practice rules to inject into a prompt. Returns rules that pass BOTH
+ * gates: (1) scope — global, or scoped to one of the given entity types; and
+ * (2) platform — platform-agnostic ('any'/NULL), or matching the context platform.
+ * When no platform is given, only platform-agnostic rules apply (don't leak
+ * platform-specific rules into unrelated work). Never throws.
  * @param {string[]} [entityScopes]
+ * @param {string|null} [platform]  e.g. 'servicenow' | 'generic'
  */
-function getActiveBestPractices(entityScopes = []) {
+function getActiveBestPractices(entityScopes = [], platform = null) {
   try {
-    // Only inject rules (practice_type='rule') into prompts — not standing questions
+    // Only inject rules (practice_type='rule') into prompts — not standing questions.
     const rows = db.prepare(
-      "SELECT title, rule_text, scope FROM asdlc_best_practice WHERE is_active = 1 AND (practice_type IS NULL OR practice_type = 'rule') ORDER BY sort_order, created_at"
+      "SELECT title, rule_text, scope, platform FROM asdlc_best_practice WHERE is_active = 1 AND (practice_type IS NULL OR practice_type = 'rule') ORDER BY sort_order, created_at"
     ).all();
-    return rows.filter(r => r.scope === 'global' || entityScopes.includes(r.scope));
+    return rows.filter(r => {
+      const scopeOk = r.scope === 'global' || entityScopes.includes(r.scope);
+      if (!scopeOk) return false;
+      const rulePlat = r.platform || 'any';
+      if (rulePlat === 'any') return true;
+      return platform != null && rulePlat === platform;
+    });
   } catch {
     return [];
+  }
+}
+
+/**
+ * Resolve an application's target platform (e.g. 'servicenow' | 'generic').
+ * Falls back to 'servicenow' (the app's primary platform, matching the column
+ * default) when the project is unknown. Never throws.
+ * @param {string} projectId
+ * @returns {string}
+ */
+function getProjectPlatform(projectId) {
+  try {
+    if (!projectId) return 'servicenow';
+    const row = db.prepare('SELECT target_platform FROM asdlc_project WHERE project_id = ?').get(projectId);
+    return (row && row.target_platform) || 'servicenow';
+  } catch {
+    return 'servicenow';
   }
 }
 
@@ -164,4 +194,5 @@ module.exports = {
   estimateCost,
   logUsage,
   getActiveBestPractices,
+  getProjectPlatform,
 };

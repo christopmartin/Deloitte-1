@@ -68,6 +68,12 @@ const COMMON_TOOL_FIELDS = {
       'addition that is NOT explicitly stated in the document (suggestive mode), so a human can ' +
       'review / keep / delete it. Leave false or omit for anything the document actually states.',
   },
+  clarification_ref: {
+    type: 'string',
+    description: 'During a clarification round ONLY: echo back EXACTLY the ref token shown next to this ' +
+      'item in the "[ref: ...]" prefix, so the system updates the existing staged row instead of creating ' +
+      'a duplicate — even if you refine the name/title. Leave empty on the first round and for brand-new items.',
+  },
 };
 
 // Optional traceability field merged into the DERIVED-entity tools (workflow,

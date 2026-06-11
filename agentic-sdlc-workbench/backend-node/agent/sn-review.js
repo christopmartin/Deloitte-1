@@ -89,9 +89,19 @@ async function reviewChanged(item, ctx) {
     '',
     'Audit it adversarially and call emit_review.',
   ].join('\n');
+  // Platform-scoped AI Guidance as a SEPARATE uncached system block (keeps SYSTEM_PROMPT cacheable).
+  const guidance = aiConfig.getActiveBestPractices(
+    item.inferred && item.inferred.design_type ? [item.inferred.design_type] : [],
+    aiConfig.getProjectPlatform(ctx.projectId));
+  const systemBlocks = [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }];
+  if (guidance.length) {
+    systemBlocks.push({ type: 'text', text:
+      'House rules / platform guidance (apply when auditing):\n' +
+      guidance.map(b => `  - ${b.title ? b.title + ': ' : ''}${b.rule_text}`).join('\n') });
+  }
   const req = {
     model, max_tokens: maxTokens,
-    system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+    system: systemBlocks,
     tools: [EMIT_TOOL], tool_choice: { type: 'auto' },
     messages: [{ role: 'user', content: userMsg }],
   };

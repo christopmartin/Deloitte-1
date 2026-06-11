@@ -579,7 +579,7 @@ async function claudeReview(entityType, entity, neighbors, opts = {}) {
     // Derived elements: full validity review against design best practices.
     const scopes = [entityType];
     if (entityType === 'agent' || entityType === 'agent_spec') { scopes.push('agent', 'agent_spec'); }
-    const bestPractices = aiConfig.getActiveBestPractices(scopes);
+    const bestPractices = aiConfig.getActiveBestPractices(scopes, aiConfig.getProjectPlatform(opts.projectId));
     userPrompt = buildClaudeReviewPrompt(entityType, entity, neighbors, { ...opts, bestPractices });
   }
 

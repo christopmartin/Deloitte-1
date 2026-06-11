@@ -1074,9 +1074,16 @@ function buildAgentSection(agent) {
   }
 
   // ── prompt ────────────────────────────────────────────────────
-  if (agent.instructions) {
+  // Always render the Prompt section — even when empty — so the field never
+  // looks "missing". When blank, show an empty-state pointing at Draft Prompt / Edit.
+  {
     const s = subSection('Prompt');
-    s.appendChild(el('p', { className: 'dr-prose', style: 'white-space:pre-wrap' }, agent.instructions));
+    if (agent.instructions && String(agent.instructions).trim()) {
+      s.appendChild(el('p', { className: 'dr-prose', style: 'white-space:pre-wrap' }, agent.instructions));
+    } else {
+      s.appendChild(el('p', { className: 'dr-prose', style: 'font-style:italic;opacity:0.7' },
+        'No prompt yet. Use the ✨ Draft Prompt button above to generate one, or Edit to write it. New agents from ingest are drafted automatically.'));
+    }
     section.appendChild(s);
   }
 

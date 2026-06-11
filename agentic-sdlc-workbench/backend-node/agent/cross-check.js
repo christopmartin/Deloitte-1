@@ -37,6 +37,17 @@ const STOPWORDS = new Set(['the','a','an','for','and','or','of','to','via','only
 const CONFLICT_PREFIX = 'conflict:';   // blocking clarification marker
 const FYI_PREFIX       = 'fyi:';        // non-blocking note marker
 
+// Resolve platform-scoped AI Guidance (house rules) for this document and render it
+// as prompt lines. The conflict/ripple judges honour the same rules the extractor
+// does, so e.g. ServiceNow guidance shapes what counts as a contradiction. Best-effort.
+function guidanceBlock(doc, scopes = []) {
+  const platform = (doc && doc.platform) || aiConfig.getProjectPlatform(doc && doc.project_id);
+  const rules = aiConfig.getActiveBestPractices(scopes, platform);
+  if (!rules.length) return [];
+  return ['', '## House rules / platform guidance (apply these when judging)',
+    ...rules.map(b => `  - ${b.title ? b.title + ': ' : ''}${b.rule_text}`)];
+}
+
 // ── Anthropic client (lazy) + key presence ─────────────────────────────────────
 let _client;
 function hasKey() {
@@ -201,6 +212,7 @@ async function scanRequirementConflicts(doc, changes, reqs, round) {
     `You are a requirements-impact auditor for an agentic-design repository. New ingested content has`,
     `produced the changes below. Decide whether each EXISTING requirement is affected — not only direct`,
     `contradictions, but also requirements made STALE or partially wrong by the change.`,
+    ...guidanceBlock(doc, ['functional_req', 'nonfunctional_req', ...changes.map(c => c.entityType)]),
     ``,
     `## Changes from this ingest`,
     ...changes.map(c => `  - ${summariseChange(c)}`),
@@ -234,6 +246,59 @@ async function scanRequirementConflicts(doc, changes, reqs, round) {
   return { hits, awareness };
 }
 
+// ── Net-new requirement conflict scan (Tier 1, one LLM call) ────────────────────────
+// The conflict scan above only considers update/delete changes. A brand-NEW requirement
+// that contradicts (or duplicates / narrows / supersedes) an EXISTING one would otherwise
+// be staged silently as additive. This compares each net-new requirement proposed this
+// ingest against the existing requirements and returns genuine conflicts to surface.
+async function scanNetNewConflicts(doc, newReqs, existingReqs, round) {
+  const reqText = (d) => {
+    const t = d.title || d.name || '(untitled)';
+    const body = d.description || d.statement || d.measurable_target || '';
+    return `${t}${body ? ' — ' + String(body) : ''}`.slice(0, 300);
+  };
+  const model = aiConfig.resolveModel('quality_reviewer');
+  const prompt = [
+    `You are a requirements auditor. The list below proposes NEW requirements to ADD to an existing`,
+    `design. For each NEW requirement, decide whether it genuinely conflicts with an EXISTING one —`,
+    `they cannot both hold as written (contradicts), one restates the other (duplicates), one tightens`,
+    `it (narrows), or one replaces it (supersedes). Ignore merely related-but-compatible requirements.`,
+    ``,
+    `## New requirements (proposed this ingest)`,
+    ...newReqs.map((s, i) => `  [n${i}] ${s.entity_type === 'nonfunctional_req' ? 'NFR' : 'FR'}: ${reqText(s.data)}`),
+    ``,
+    `## Existing requirements`,
+    ...existingReqs.map(r => `  ${r.slug} | ${r.req_type} | "${r.title}"`),
+    ``,
+    `Output STRICT JSON only, no prose:`,
+    `{"hits":[{"new_ref":"n0","existing_slug":"FR-00X","relation":"contradicts|duplicates|narrows|supersedes","severity":"low|med|high","rationale":"one sentence"}]}`,
+    `- Only list genuine conflicts a human must resolve. Empty = {"hits":[]}.`,
+  ].join('\n');
+
+  const resp = await getClient().messages.create({ model, max_tokens: 1500, messages: [{ role: 'user', content: prompt }] });
+  aiConfig.logUsage({ projectId: doc.project_id, source: 'ingest_netnew_conflict_scan', refId: doc.ingest_id, model, round, usage: resp.usage });
+  const text = (resp.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
+  const parsed = extractJson(text) || {};
+  const validRel = new Set(['contradicts','duplicates','narrows','supersedes']);
+  const validSev = new Set(['low','med','high']);
+  const bySlug = new Map(existingReqs.map(r => [r.slug, r]));
+  return (Array.isArray(parsed.hits) ? parsed.hits : [])
+    .map(h => {
+      const m = /^n(\d+)$/.exec(String(h && h.new_ref || ''));
+      const nr = m ? newReqs[Number(m[1])] : null;
+      if (!nr || !bySlug.has(h.existing_slug)) return null;
+      return {
+        new_title:      nr.data.title || nr.data.name || 'new requirement',
+        existing_slug:  h.existing_slug,
+        existing_title: bySlug.get(h.existing_slug).title,
+        relation:       validRel.has(h.relation) ? h.relation : 'contradicts',
+        severity:       validSev.has(h.severity) ? h.severity : 'med',
+        rationale:      String(h.rationale || '').slice(0, 300),
+      };
+    })
+    .filter(Boolean);
+}
+
 // ── Tier 2 — deep design scan (LLM, conditional) ────────────────────────────────────
 async function deepDesignScan(doc, bundle, round) {
   const model = aiConfig.resolveModel('quality_reviewer');
@@ -241,6 +306,7 @@ async function deepDesignScan(doc, bundle, round) {
     `You are a conflict-reconciliation auditor. A change was ingested and may have ripple effects across`,
     `the existing design. Produce SPECIFIC, answerable follow-up questions a human must resolve BEFORE the`,
     `change is applied. Each question should name the concrete element and what is ambiguous.`,
+    ...guidanceBlock(doc, bundle.changes.map(c => c.entityType)),
     ``,
     `## The change(s)`,
     ...bundle.changes.map(c => `  - ${summariseChange(c)}`),
@@ -348,6 +414,31 @@ async function runCrossCheck({ doc, round }) {
       if (tokens.length === 0) continue;
       changes.push({ entityType: s.entity_type, slug, current, proposed: s.data, tokens });
     }
+
+    // ── Net-new requirement conflict scan (runs regardless of update/delete changes) ──
+    // A brand-new requirement that contradicts an existing one is the most common "conflicting
+    // requirement arrives" case; without this it would be staged silently as additive.
+    try {
+      const newReqs = staged.filter(s =>
+        (s.entity_type === 'functional_req' || s.entity_type === 'nonfunctional_req') &&
+        s.data.operation !== 'update' && s.data.operation !== 'delete');
+      if (newReqs.length && hasKey()) {
+        const existingReqs = loadRequirements(doc.project_id);
+        if (existingReqs.length) {
+          const nnHits = await scanNetNewConflicts(doc, newReqs, existingReqs, round);
+          summary.netnew_hits = nnHits.length;
+          for (const h of nnHits) {
+            if (h.severity !== 'med' && h.severity !== 'high') continue;   // only block on real conflicts
+            const raised = writeMarkedClarification(doc.ingest_id, round, CONFLICT_PREFIX, {
+              question: `New requirement "${h.new_title}" ${h.relation} existing ${h.existing_slug}` +
+                        (h.existing_title ? ` ("${h.existing_title}")` : '') + `: ${h.rationale} ` +
+                        `Resolve which should hold before promoting.`,
+              target_entity_type: 'requirement', target_field: `netnew:${h.existing_slug}`, context: h.rationale });
+            if (raised) summary.conflicts_raised++;
+          }
+        }
+      }
+    } catch (err) { console.warn('[cross-check] net-new conflict scan failed (non-fatal):', err.message); }
 
     if (changes.length === 0) { console.log('[cross-check] no material changes with salient tokens — skipping'); return summary; }
 

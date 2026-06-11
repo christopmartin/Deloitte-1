@@ -235,6 +235,15 @@ const MIGRATIONS = [
   // 'question' = standing question surfaced to product owners during ingest review
   "ALTER TABLE asdlc_best_practice ADD COLUMN practice_type TEXT NOT NULL DEFAULT 'rule'",
 
+  // ── Platform tagging: scope AI Guidance + ingest to a target platform ────────
+  // target_platform = the application's default platform; a per-document `platform`
+  // overrides it; best-practice `platform` ('any' = applies regardless) lets a rule
+  // apply only to matching work. 'any'/'servicenow' defaults keep all pre-existing
+  // rules and projects working without reconfiguration.
+  "ALTER TABLE asdlc_project          ADD COLUMN target_platform TEXT NOT NULL DEFAULT 'servicenow'",
+  "ALTER TABLE asdlc_ingest_document  ADD COLUMN platform TEXT",
+  "ALTER TABLE asdlc_best_practice    ADD COLUMN platform TEXT NOT NULL DEFAULT 'any'",
+
   // ── Materialize core design elements from BRD ingest ─────────────────────────
   // Guardrails + data sources become first-class design rows; user stories get a
   // thin traceability home (narrative + requirement_refs slugs, no duplicated AC
@@ -691,6 +700,44 @@ try {
   }
 } catch (err) {
   console.error('[db] standing questions seed failed:', err.message);
+}
+
+// ─── ServiceNow design-heuristic rules seed ──────────────────────────────────
+// Seed an EDITABLE starter set of platform='servicenow' house rules so ingest is
+// ServiceNow-aware out of the box (the AI Guidance tab consumes these on every
+// platform=servicenow ingest). Idempotent + curation-safe: only seeds when NO
+// system-authored ServiceNow rule exists yet, so user edits/deletions survive restart.
+try {
+  const snSeeded = db.prepare("SELECT 1 FROM asdlc_best_practice WHERE platform='servicenow' AND source='system' LIMIT 1").get();
+  if (!snSeeded) {
+    const SN_RULES = [
+      ['global', 'ServiceNow: intake → Catalog Item',
+       'On ServiceNow, model every user-facing request or intake as a Service Catalog Item or Record Producer with typed variables, and link it to the workflow that fulfils the request.'],
+      ['global', 'ServiceNow: data change → Business Rule',
+       'Represent server-side data mutations and side-effects-on-save as Business Rules (before/after/async) on the relevant table; record the table and the trigger condition.'],
+      ['global', 'ServiceNow: field behaviour → UI Policy',
+       'Represent dynamic field behaviour (show/hide, mandatory, read-only) as a UI Policy on the form — not as free-text process steps.'],
+      ['global', 'ServiceNow: access control → ACL',
+       'Represent record/field access restrictions as ACLs (table/field, operation, role or condition), captured as a guardrail or governance control rather than prose.'],
+      ['global', 'ServiceNow: integration → IntegrationHub / REST',
+       'Model each external integration as an IntegrationHub spoke or scripted REST step, captured as a tool with its inputs, outputs, and authentication / access requirements.'],
+      ['global', 'ServiceNow: work record → extend Task',
+       'When a record represents trackable / assignable work, model it as extending the Task table (sys_task) and inheriting its state model unless told otherwise.'],
+      ['global', 'ServiceNow: user alert → Notification record',
+       'Represent user notifications as Notification records triggered by a named event or condition — not as ad-hoc workflow steps.'],
+      ['global', 'ServiceNow: orchestration → Flow Designer',
+       'Model multi-step orchestration and approvals as Flow Designer flows / subflows with an explicit trigger, stages, and approval actions; surface approvals as HITL gates.'],
+    ];
+    const insSn = db.prepare(`
+      INSERT INTO asdlc_best_practice
+        (best_practice_id, scope, platform, title, rule_text, practice_type, is_active, sort_order, source, created_at, updated_at)
+      VALUES (?,?, 'servicenow', ?,?, 'rule', 1, ?, 'system', datetime('now'), datetime('now'))
+    `);
+    SN_RULES.forEach((r, i) => insSn.run(crypto.randomUUID(), r[0], r[1], r[2], 100 + i));
+    console.log(`[db] seeded ${SN_RULES.length} ServiceNow design-heuristic rules (platform=servicenow)`);
+  }
+} catch (err) {
+  console.error('[db] ServiceNow design rules seed failed:', err.message);
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

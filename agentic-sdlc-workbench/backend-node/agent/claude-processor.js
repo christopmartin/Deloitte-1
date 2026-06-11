@@ -177,17 +177,29 @@ function buildExistingDesignSummary(projectId) {
   return lines.join('\n');
 }
 
-/** Upsert an extraction row — match on entity_type + primary name field to avoid duplicates on re-runs. */
-function upsertExtraction(ingestId, entityType, entityData, confidence, status, round) {
+/** Upsert an extraction row. Matches an existing staged row by (1) the stable clarification_ref the
+ *  model echoes back during a clarification round, then (2) entity_type + primary name — so a refined
+ *  name can never produce a duplicate on re-runs. */
+function upsertExtraction(ingestId, entityType, entityData, confidence, status, round, clarificationRef) {
+  let existingId = null;
+
+  // (1) Stable ref carried across clarification rounds. clarificationRef is the staged row's own
+  //     extraction_id, shown to the model in the round-2+ user message ("[ref: ...]") and echoed
+  //     back verbatim. Matching it first means a slightly-enriched name can't spawn a duplicate slug.
+  if (clarificationRef) {
+    const refRow = db.prepare(
+      "SELECT extraction_id FROM asdlc_ingest_extraction WHERE ingest_id=? AND entity_type=? AND extraction_id=?"
+    ).get(ingestId, entityType, String(clarificationRef).trim());
+    if (refRow) existingId = refRow.extraction_id;
+  }
+
   const keyValue = registry.entityName(entityType, entityData) ||
     entityData.title || entityData.name || entityData.rule_name ||
     entityData.gate_name || entityData.segment_name || entityData.source_name ||
     entityData.control_name ||
     (entityData.role && entityData.want ? `${entityData.role}::${entityData.want}` : null);
 
-  let existingId = null;
-
-  if (keyValue) {
+  if (keyValue && !existingId) {
     const rows = db.prepare(
       "SELECT extraction_id, entity_data FROM asdlc_ingest_extraction WHERE ingest_id=? AND entity_type=?"
     ).all(ingestId, entityType);
@@ -205,20 +217,8 @@ function upsertExtraction(ingestId, entityType, entityData, confidence, status, 
     }
   }
 
-  // On clarification rounds (round > 1), if no name match was found, fall back to the
-  // single needs_clarification row of this entity_type. Clarification rounds only re-extract
-  // items that were previously uncertain, so a lone nc-row must be the same entity — Claude
-  // may have enriched the name slightly from the clarification answers, causing the exact-match
-  // to miss and producing a duplicate extraction (and therefore a duplicate WF-### slug).
-  if (!existingId && round > 1) {
-    const ncRows = db.prepare(
-      "SELECT extraction_id FROM asdlc_ingest_extraction WHERE ingest_id=? AND entity_type=? AND status='needs_clarification'"
-    ).all(ingestId, entityType);
-    if (ncRows.length === 1) {
-      existingId = ncRows[0].extraction_id;
-      console.log(`[claude-processor] upsertExtraction: name-match miss for ${entityType} on round ${round} — falling back to single needs_clarification row ${existingId}`);
-    }
-  }
+  // (Clarification-round dedup is now handled by clarification_ref in step (1) above — robust for
+  //  multiple uncertain entities of the same type, unlike the old single-needs_clarification fallback.)
 
   if (existingId) {
     db.prepare(
@@ -290,9 +290,12 @@ function buildSystemPrompt(doc, threshold, answeredClarifications, existingSumma
     `## Confidence rules`,
     `- confidence is on a 0–1 scale and is REQUIRED on every extraction tool call.`,
     `- If confidence >= ${threshold}: extract it. It will be staged for human review.`,
-    `- If confidence < ${threshold}: STILL extract it (with your best guess), AND call raise_clarification`,
-    `  with a specific answerable question targeting the uncertain field.`,
-    `- Be honest. Overconfidence creates bad data. It is better to ask than to guess wrong.`,
+    `- If confidence < ${threshold} but you have SOME basis: still extract your best inference, AND call`,
+    `  raise_clarification with a specific answerable question targeting the uncertain field.`,
+    `- Per FIELD: only fill a field when you have a basis. If you have NO basis for a field, LEAVE IT`,
+    `  BLANK (omit it) — never fabricate a value just to fill the slot. Raise a clarification for any`,
+    `  blank that is material to the design.`,
+    `- Be honest. Overconfidence creates bad data. It is better to ask (or leave blank) than to guess wrong.`,
     `- Confidence means: how certain are you the extracted FIELD VALUES are accurate — not just that the entity exists.`,
     ``,
     `## What to extract`,
@@ -382,7 +385,7 @@ function buildSystemPrompt(doc, threshold, answeredClarifications, existingSumma
   );
 
   // ── AI mode dial (Faithful ↔ Balanced ↔ Suggestive) ────────────────────────
-  const level = String(doc.enrichment_level || 'faithful').toLowerCase();
+  const level = String(doc.enrichment_level || 'balanced').toLowerCase();
   if (level === 'balanced' || level === 'suggestive') {
     lines.push(
       ``,
@@ -506,13 +509,13 @@ function buildUserMessage(doc, round, threshold) {
 
   // Subsequent rounds — only re-process items that need clarification
   const uncertain = db.prepare(
-    "SELECT entity_type, entity_data, confidence FROM asdlc_ingest_extraction WHERE ingest_id=? AND status='needs_clarification'"
+    "SELECT extraction_id, entity_type, entity_data, confidence FROM asdlc_ingest_extraction WHERE ingest_id=? AND status='needs_clarification'"
   ).all(doc.ingest_id);
 
   const summary = uncertain.map(u => {
     const d = JSON.parse(u.entity_data);
     const name = d.title || d.name || d.rule_name || d.gate_name || d.segment_name || u.entity_type;
-    return `  - ${u.entity_type}: "${name}" (previous confidence ${Math.round(u.confidence * 100)}%)`;
+    return `  - [ref: ${u.extraction_id}] ${u.entity_type}: "${name}" (previous confidence ${Math.round(u.confidence * 100)}%)`;
   }).join('\n');
 
   return [
@@ -522,9 +525,10 @@ function buildUserMessage(doc, round, threshold) {
     summary || '  (none — re-analysing full document)',
     ``,
     `Please re-extract ONLY these items, using the clarification answers to improve accuracy.`,
-    `IMPORTANT: Use the EXACT same name/title as shown above for each entity. Only change a name if`,
-    `the clarification answer explicitly corrects it. Renaming an entity breaks the deduplication`,
-    `that prevents duplicate entries in the design.`,
+    `IMPORTANT: For each item, copy the ref token shown in its "[ref: ...]" prefix into the`,
+    `"clarification_ref" field of your extraction tool call, so the system updates the existing`,
+    `staged row instead of creating a duplicate. You MAY refine the name/title if the answer`,
+    `corrects it — the ref keeps it de-duplicated either way.`,
     `Do not re-extract items that were already staged (above threshold).`,
     ``,
     `Original document for reference:\n---\n${doc.raw_text}`,
@@ -532,7 +536,7 @@ function buildUserMessage(doc, round, threshold) {
 }
 
 // ── Agentic extraction loop ───────────────────────────────────────────────────
-async function runExtractionLoop(systemPrompt, userMessage, usageCtx) {
+async function runExtractionLoop(systemPrompt, userMessage, usageCtx, role = 'extraction') {
   const client = getClient();
   const projectId = usageCtx && usageCtx.projectId;
   const allToolUses = [];
@@ -540,8 +544,8 @@ async function runExtractionLoop(systemPrompt, userMessage, usageCtx) {
   let loops = 0;
 
   const MAX_API_LOOPS = aiConfig.getMaxExtractionLoops();
-  const model         = aiConfig.resolveModel('extraction');
-  const thinkCfg   = aiConfig.getThinkingConfig('extraction');
+  const model         = aiConfig.resolveModel(role);
+  const thinkCfg   = aiConfig.getThinkingConfig(role);
   let   maxTokens  = aiConfig.getMaxTokens();
   // For Claude 3 budget_tokens thinking, ensure max_tokens > budget
   if (thinkCfg && thinkCfg.thinking && thinkCfg.thinking.budget_tokens) {
@@ -557,7 +561,10 @@ async function runExtractionLoop(systemPrompt, userMessage, usageCtx) {
     const req = {
       model,
       max_tokens: maxTokens,
-      system:     systemPrompt,
+      // Cache the (within-run-identical) system prompt as one ephemeral block, mirroring the
+      // SN modules (sn-reverse-engineer.js:227). The schema SQL + static guidance are the bulk of
+      // it; loops 2..N of this extraction run then read it from cache instead of re-billing it.
+      system:     [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
       tools:      EXTRACTION_TOOLS,
       tool_choice:{ type: 'auto' },
       messages,
@@ -767,6 +774,111 @@ async function reconcileUpdates(doc, threshold, round, pass1Items, bestPractices
   return { corrected, replacedKeys };
 }
 
+// ── Pass 3: Opus design-synthesis ──────────────────────────────────────────────
+// A senior-architect second pass. Reuses the extraction system prompt + tools but runs on the
+// 'synthesis' role (Opus by default) to (a) fill obviously-implied empty fields, (b) propose
+// clearly-implied NET-NEW entities (system_generated), and (c) raise material, document-grounded
+// clarifications — seeded by the org's standing questions. This is where "creation is the core job"
+// happens: the PO gives intent, Opus synthesizes the design. Skipped in faithful mode; never fatal.
+
+function buildSynthesisUserMessage(doc, pass1Items, standingQuestions) {
+  const level = String(doc.enrichment_level || 'balanced').toLowerCase();
+
+  const captured = (pass1Items && pass1Items.length)
+    ? pass1Items.map(it => {
+        const d = it.entityData || {};
+        const nm = registry.entityName(it.entityType, d) || d.title || d.name || d.rule_name || d.gate_name || it.entityType;
+        return `  - ${it.entityType}: "${nm}"`;
+      }).join('\n')
+    : '  (nothing captured in the first pass)';
+
+  const seeds = (standingQuestions && standingQuestions.length)
+    ? standingQuestions.map(q => `  - [${q.scope}] ${q.title}: ${q.rule_text}`).join('\n')
+    : '  (none configured)';
+
+  return [
+    `You are acting as a SENIOR AGENTIC-SDLC ARCHITECT performing a second-pass design review.`,
+    `A first pass already faithfully extracted what the document literally states (listed below).`,
+    `Your job now is to turn that into a COMPLETE, production-ready design — not to re-transcribe the document.`,
+    ``,
+    `## Already captured — do NOT re-emit these unless you are filling an empty field on one`,
+    `   (then re-emit with the SAME name so it UPDATES rather than duplicating):`,
+    captured,
+    ``,
+    `## Your tasks (AI mode: ${level.toUpperCase()})`,
+    `  1. FILL obviously-implied empty fields on the captured entities (re-emit with the same name; lower`,
+    `     your confidence for inferred values).`,
+    `  2. PROPOSE clearly-implied NET-NEW entities a senior architect would add to make THIS design work —`,
+    `     agents, workflow steps, HITL gates, tools, data models, forms, NFRs, acceptance criteria, test`,
+    `     cases, etc. Set system_generated=true and operation="create" on each so a human can review it.`,
+    level === 'suggestive'
+      ? `     Be bold — also add standard agentic best-practice elements even if only loosely implied.`
+      : `     Add only entities clearly warranted by the stated design (balanced mode — be selective).`,
+    `  3. Leave a field BLANK when you have no basis for it — never fabricate a value.`,
+    `  4. Raise a clarification (raise_clarification) for any GLARING gap a product owner must resolve,`,
+    `     phrased specifically against THIS document. Use these org "standing questions" as SEEDS — raise`,
+    `     the ones MATERIAL here, ignore the rest. Do NOT ask about workflow run-volumes or agent cost`,
+    `     models — those are collected separately.`,
+    seeds,
+    ``,
+    `## Source document`,
+    `---`,
+    doc.raw_text,
+    `---`,
+  ].join('\n');
+}
+
+/**
+ * Pass 3 — Opus design-synthesis. Reuses buildSystemPrompt + EXTRACTION_TOOLS but on the 'synthesis'
+ * role (Opus by default). Skipped in faithful mode. Caller wraps this in try/catch (never fatal).
+ * @returns {Promise<{created:number, clarified:number}>}
+ */
+async function synthesizeDesign(doc, threshold, round, pass1Items, existingSummary, bestPractices, answeredClarifications) {
+  const level = String(doc.enrichment_level || 'balanced').toLowerCase();
+  if (level === 'faithful') {
+    console.log('[claude-processor] Synthesis pass skipped — faithful mode');
+    return { created: 0, clarified: 0 };
+  }
+
+  let standingQuestions = [];
+  try {
+    standingQuestions = db.prepare(
+      "SELECT scope, title, rule_text FROM asdlc_best_practice WHERE practice_type='question' AND is_active=1 ORDER BY sort_order"
+    ).all();
+  } catch { /* older DBs may lack practice_type — synthesis still runs without seeds */ }
+
+  console.log(`[claude-processor] Synthesis pass (role=synthesis/${aiConfig.resolveModel('synthesis')}) — mode ${level}, ${pass1Items.length} captured`);
+
+  const toolUses = await runExtractionLoop(
+    buildSystemPrompt(doc, threshold, answeredClarifications, existingSummary, bestPractices),
+    buildSynthesisUserMessage(doc, pass1Items, standingQuestions),
+    { projectId: doc.project_id, ingestId: doc.ingest_id, round, source: 'ingest_synthesis' },
+    'synthesis'
+  );
+
+  let created = 0, clarified = 0;
+  for (const { name, input } of toolUses) {
+    try {
+      if (name === 'raise_clarification') {
+        if (writeClarification(doc.ingest_id, round, input)) clarified++;
+        continue;
+      }
+      const entityType = TOOL_TO_ENTITY[name];
+      if (!entityType) continue;
+      const { confidence = 0, confidence_notes, clarification_ref, ...entityData } = input;
+      // Synthesis output is for human keep/delete review — system_generated items always stage.
+      const status = (entityData.system_generated || confidence >= threshold) ? 'staged' : 'needs_clarification';
+      upsertExtraction(doc.ingest_id, entityType, entityData, confidence, status, round, clarification_ref);
+      created++;
+    } catch (err) {
+      console.error(`[claude-processor] synthesis tool "${name}" failed — skipping: ${err.message}`);
+    }
+  }
+
+  console.log(`[claude-processor] Synthesis pass complete — ${created} entities upserted, ${clarified} clarifications`);
+  return { created, clarified };
+}
+
 // ── Main entry point ──────────────────────────────────────────────────────────
 /**
  * Process an ingest document with the Claude extraction engine.
@@ -789,7 +901,9 @@ async function processDocument(ingestId) {
   const round                = getCurrentRound(ingestId);
   const answeredClarifications = round > 1 ? getAnsweredClarifications(ingestId) : [];
   const existingSummary      = buildExistingDesignSummary(doc.project_id);
-  const bestPractices        = aiConfig.getActiveBestPractices(Object.keys(registry.byEntityType));
+  // Platform-scoped AI Guidance: per-document override, else the application default.
+  const platform             = doc.platform || aiConfig.getProjectPlatform(doc.project_id);
+  const bestPractices        = aiConfig.getActiveBestPractices(Object.keys(registry.byEntityType), platform);
 
   console.log(
     `[claude-processor] Starting — ingest ${ingestId}, round ${round}, threshold ${threshold}, ` +
@@ -838,12 +952,12 @@ async function processDocument(ingestId) {
       }
 
       // Strip meta fields before storing entity_data
-      const { confidence = 0, confidence_notes, ...entityData } = input;
+      const { confidence = 0, confidence_notes, clarification_ref, ...entityData } = input;
       // Suggestive (system_generated) items are proposals for human keep/delete review — always stage
       // them and never auto-raise a clarification (confidence just informs the reviewer's decision).
       const status = (entityData.system_generated || confidence >= threshold) ? 'staged' : 'needs_clarification';
 
-      const exId = upsertExtraction(ingestId, entityType, entityData, confidence, status, round);
+      const exId = upsertExtraction(ingestId, entityType, entityData, confidence, status, round, clarification_ref);
       pass1Items.push({ exId, entityType, entityData, confidence });
       if (entityData.target_slug) itemKeyToExId.set(`${entityType}::${entityData.target_slug}`, exId);
 
@@ -877,6 +991,21 @@ async function processDocument(ingestId) {
     }
   } catch (err) {
     console.warn(`[claude-processor] Reconciliation pass failed — keeping pass-1 updates: ${err.message}`);
+  }
+
+  // ── Pass 3: Opus design-synthesis — fill blanks + propose net-new + raise material clarifications.
+  //    Skipped in faithful mode and on clarification-answer re-runs (round > 1): the synthesis already
+  //    ran on the first pass; re-running it every time the PO answers a question makes each round
+  //    take 5-6 min with no meaningful design gain. Never fatal — failure keeps the pass-1/2 design.
+  if (round === 1) {
+    try {
+      const synth = await synthesizeDesign(doc, threshold, round, pass1Items, existingSummary, bestPractices, answeredClarifications);
+      if (synth) clarified += synth.clarified;
+    } catch (err) {
+      console.warn(`[claude-processor] Synthesis pass failed — keeping prior design: ${err.message}`);
+    }
+  } else {
+    console.log(`[claude-processor] Synthesis pass skipped — clarification re-run (round ${round})`);
   }
 
   // Recompute the staged count from the DB so it reflects both passes

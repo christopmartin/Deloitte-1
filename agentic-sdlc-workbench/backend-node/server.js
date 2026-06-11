@@ -294,7 +294,7 @@ app.post('/api/v1/clients', (req, res) => {
 });
 
 app.post('/api/v1/projects', (req, res) => {
-  const { client_id, project_name, project_code, stage,
+  const { client_id, project_name, project_code, stage, target_platform,
           servicenow_scope, servicenow_sys_app_id, servicenow_instance } = req.body;
   if (!client_id || !project_name || !project_code) {
     return res.status(400).json({ error: 'client_id, project_name and project_code are required' });
@@ -307,12 +307,13 @@ app.post('/api/v1/projects', (req, res) => {
   }
   const id = generateId();
   const uid = userId(req);
+  const tplat = ['servicenow', 'generic'].includes(target_platform) ? target_platform : 'servicenow';
   db.prepare(`
     INSERT INTO asdlc_project
-      (project_id, client_id, project_name, project_code, stage,
+      (project_id, client_id, project_name, project_code, stage, target_platform,
        servicenow_scope, servicenow_sys_app_id, servicenow_instance, created_by, updated_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, client_id, project_name, project_code, stage || 'draft',
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, client_id, project_name, project_code, stage || 'draft', tplat,
          servicenow_scope || null, servicenow_sys_app_id || null, servicenow_instance || null, uid, uid);
   const created = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(id);
   auditLog('asdlc_project', id, 'INSERT', null, created, uid);
@@ -370,9 +371,10 @@ app.put('/api/v1/projects/:id', (req, res) => {
   const existing = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Project not found' });
   const uid = userId(req);
-  const { project_name, project_code, stage, lifecycle_status, confidence_threshold, ripple_scan_scope } = req.body;
+  const { project_name, project_code, stage, lifecycle_status, confidence_threshold, ripple_scan_scope, target_platform } = req.body;
   // Guard the scope enum so the cross-check only ever sees a known value.
   const scope = (ripple_scan_scope === 'project' || ripple_scan_scope === 'workflow') ? ripple_scan_scope : null;
+  const tplat = ['servicenow', 'generic'].includes(target_platform) ? target_platform : null;
   db.prepare(`
     UPDATE asdlc_project
     SET project_name         = COALESCE(?, project_name),
@@ -381,13 +383,14 @@ app.put('/api/v1/projects/:id', (req, res) => {
         lifecycle_status     = COALESCE(?, lifecycle_status),
         confidence_threshold = COALESCE(?, confidence_threshold),
         ripple_scan_scope    = COALESCE(?, ripple_scan_scope),
+        target_platform      = COALESCE(?, target_platform),
         updated_by           = ?,
         updated_at           = datetime('now'),
         version              = version + 1
     WHERE project_id = ?
   `).run(project_name ?? null, project_code ?? null, stage ?? null, lifecycle_status ?? null,
          confidence_threshold != null ? Number(confidence_threshold) : null,
-         scope,
+         scope, tplat,
          uid, req.params.id);
   const updated = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(req.params.id);
   auditLog('asdlc_project', req.params.id, 'UPDATE', existing, updated, uid);
@@ -623,6 +626,13 @@ app.post('/api/v1/change-packet-items/:itemId/approve', (req, res) => {
         toGenerate.map(e => generateAndInsertTests(cp.project_id, e.scope, e.entityId, uid))
       ).catch(e => console.error('[item-approve test-gen]', e.message));
     }
+    // Auto-draft a starting prompt for any newly-created agent that arrived without one.
+    const newAgents = toGenerate.filter(e => e.scope === 'agent_spec');
+    if (newAgents.length) {
+      Promise.allSettled(
+        newAgents.map(e => autoDraftAgentPromptIfEmpty(cp.project_id, e.entityId, uid))
+      ).catch(e => console.error('[item-approve prompt-draft]', e.message));
+    }
 
     const itemFinal = db.prepare('SELECT * FROM asdlc_change_packet_item WHERE change_packet_item_id = ?').get(item.change_packet_item_id);
     res.json({ item: itemFinal, apply_result: applyResult, cp_status: cpNewStatus });
@@ -753,6 +763,15 @@ function approveAndApplyCp(cpId, uid, opts = {}) {
       .then(rs => {
         const n = rs.reduce((a, r) => a + (r.status === 'fulfilled' ? (r.value.created || 0) : 0), 0);
         if (n) console.log(`[test-gen] materialize: generated ${n} test case(s) across ${toGenerate.length} entit(ies) for CP ${updated.packet_code}`);
+      });
+  }
+  // Auto-draft starting prompts for newly-materialized agents that arrived without one.
+  const newAgents = toGenerate.filter(e => e.scope === 'agent_spec');
+  if (newAgents.length) {
+    Promise.allSettled(newAgents.map(e => autoDraftAgentPromptIfEmpty(existing.project_id, e.entityId, uid)))
+      .then(rs => {
+        const n = rs.reduce((a, r) => a + (r.status === 'fulfilled' && r.value.drafted ? 1 : 0), 0);
+        if (n) console.log(`[prompt-draft] materialize: drafted ${n} agent prompt(s) for CP ${updated.packet_code}`);
       });
   }
 
@@ -1146,6 +1165,76 @@ async function generateAndInsertTests(projectId, scope, entityId, uid) {
   } catch (err) {
     console.error('[generateAndInsertTests]', err.message);
     return { created: 0, error: err.message };
+  }
+}
+
+// Gather the full context the prompt-drafter needs for one agent row (workflow,
+// use case, tools, design fields). Shared by the on-demand Draft Prompt endpoint
+// and the auto-draft-on-ingest path so the two stay in lockstep.
+function buildAgentPromptCtx(agent) {
+  const workflow = agent.workflow_id
+    ? db.prepare('SELECT workflow_id, name, slug FROM asdlc_workflow WHERE workflow_id = ?').get(agent.workflow_id)
+    : null;
+  const useCaseRow = db.prepare(`
+    SELECT uc.use_case_id, uc.title, uc.summary, uc.business_objective
+    FROM asdlc_agent_use_case auc
+    JOIN asdlc_use_case uc ON uc.use_case_id = auc.use_case_id
+    WHERE auc.agent_spec_id = ?
+    ORDER BY auc.created_at
+    LIMIT 1
+  `).get(agent.agent_spec_id)
+    || (agent.use_case_id ? db.prepare(
+        'SELECT use_case_id, title, summary, business_objective FROM asdlc_use_case WHERE use_case_id = ?'
+      ).get(agent.use_case_id) : null);
+  const tools = db.prepare(`
+    SELECT t.name, at.purpose, at.tool_execution_mode
+    FROM asdlc_agent_tool at
+    JOIN asdlc_tool t ON t.tool_id = at.tool_id
+    WHERE at.agent_spec_id = ?
+    ORDER BY t.name
+  `).all(agent.agent_spec_id);
+  // Platform-scoped AI Guidance so the drafted agent prompt honours the same house rules.
+  const bestPractices = aiConfig.getActiveBestPractices(
+    ['agent', 'agent_spec'], aiConfig.getProjectPlatform(agent.project_id));
+  return {
+    name:                   agent.name,
+    scope:                  agent.scope,
+    goals:                  parseJson(agent.goals)         || [],
+    done_criteria:          parseJson(agent.done_criteria) || [],
+    design_risks:           parseJson(agent.design_risks)  || [],
+    supervision_model:      agent.supervision_model,
+    orchestration_strategy: agent.orchestration_strategy,
+    latency_target:         agent.latency_target,
+    use_case_title:         useCaseRow?.title,
+    workflow_name:          workflow?.name,
+    tools,
+    bestPractices,
+  };
+}
+
+// Auto-draft a starting system prompt for a newly-created agent that has none, so
+// agents arrive from ingest already carrying an editable prompt. Fire-and-forget
+// AFTER commit (the Claude call must not run inside a DB transaction). Never throws.
+// Only fills an EMPTY prompt — never overwrites one a user or the extractor already wrote.
+async function autoDraftAgentPromptIfEmpty(projectId, agentId, uid) {
+  try {
+    const agent = db.prepare('SELECT * FROM asdlc_agent_spec WHERE agent_spec_id = ? AND project_id = ?').get(agentId, projectId);
+    if (!agent) return { skipped: 'not found' };
+    if (agent.instructions && agent.instructions.trim()) return { skipped: 'already has prompt' };
+
+    const { draftAgentSystemPrompt } = require('./agent/prompt-drafter');
+    const result = await draftAgentSystemPrompt(buildAgentPromptCtx(agent));
+    if (!result || !result.draft || !result.draft.trim()) return { skipped: 'empty draft' };
+
+    db.prepare("UPDATE asdlc_agent_spec SET instructions=?, updated_by=?, updated_at=datetime('now') WHERE agent_spec_id=?")
+      .run(result.draft, uid || null, agentId);
+    auditLog('asdlc_agent_spec', agentId, 'auto_draft_prompt', null,
+      { source: result.source, model: result.model, chars: result.draft.length }, uid);
+    if (result.usage) aiConfig.logUsage({ projectId, source: 'prompt_drafter', refId: agentId, model: result.model, usage: result.usage });
+    return { drafted: true, source: result.source };
+  } catch (err) {
+    console.error('[autoDraftAgentPrompt]', err.message);
+    return { drafted: false, error: err.message };
   }
 }
 
@@ -1544,17 +1633,18 @@ app.get('/api/v1/best-practices', (_req, res) => {
 
 app.post('/api/v1/best-practices', (req, res) => {
   const uid = userId(req);
-  const { title, rule_text, scope, is_active, sort_order, source, practice_type } = req.body || {};
+  const { title, rule_text, scope, is_active, sort_order, source, practice_type, platform } = req.body || {};
   if (!title || !rule_text) return res.status(400).json({ error: 'title and rule_text are required' });
   const ptype = (practice_type === 'question' || practice_type === 'rule') ? practice_type : 'rule';
+  const plat = ['any', 'servicenow', 'generic'].includes(platform) ? platform : 'any';
   const id = generateId();
   db.prepare(`
     INSERT INTO asdlc_best_practice
-      (best_practice_id, scope, title, rule_text, practice_type, is_active, sort_order, source, created_by, updated_by)
-    VALUES (?,?,?,?,?,?,?,?,?,?)
-  `).run(id, scope || 'global', title, rule_text, ptype,
+      (best_practice_id, scope, platform, title, rule_text, practice_type, is_active, sort_order, source, created_by, updated_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+  `).run(id, scope || 'global', plat, title, rule_text, ptype,
          is_active === false ? 0 : 1, sort_order || 0, source || 'manual', uid, uid);
-  auditLog('asdlc_best_practice', id, 'INSERT', null, { title, scope: scope || 'global', practice_type: ptype }, uid);
+  auditLog('asdlc_best_practice', id, 'INSERT', null, { title, scope: scope || 'global', platform: plat, practice_type: ptype }, uid);
   res.status(201).json(db.prepare("SELECT * FROM asdlc_best_practice WHERE best_practice_id = ?").get(id));
 });
 
@@ -1562,17 +1652,19 @@ app.put('/api/v1/best-practices/:id', (req, res) => {
   const uid = userId(req);
   const existing = db.prepare("SELECT * FROM asdlc_best_practice WHERE best_practice_id = ?").get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Best practice not found' });
-  const { title, rule_text, scope, is_active, sort_order, practice_type } = req.body || {};
+  const { title, rule_text, scope, is_active, sort_order, practice_type, platform } = req.body || {};
   const ptype = practice_type === 'question' ? 'question' : practice_type === 'rule' ? 'rule' : null;
+  const plat = ['any', 'servicenow', 'generic'].includes(platform) ? platform : null;
   db.prepare(`
     UPDATE asdlc_best_practice
     SET title=COALESCE(?,title), rule_text=COALESCE(?,rule_text), scope=COALESCE(?,scope),
+        platform=COALESCE(?,platform),
         is_active=COALESCE(?,is_active), sort_order=COALESCE(?,sort_order),
         practice_type=COALESCE(?,practice_type),
         updated_by=?, updated_at=datetime('now')
     WHERE best_practice_id=?
   `).run(
-    title ?? null, rule_text ?? null, scope ?? null,
+    title ?? null, rule_text ?? null, scope ?? null, plat,
     is_active === undefined ? null : (is_active ? 1 : 0),
     sort_order ?? null, ptype, uid, req.params.id
   );
@@ -1705,6 +1797,14 @@ app.post('/api/v1/projects/:id/mass-approve', (req, res) => {
       } catch (e2) { console.warn('[mass-approve] Could not create baseline:', e2.message); }
     }
     baseline = db.prepare('SELECT * FROM asdlc_baseline WHERE baseline_id = ?').get(baselineId) || null;
+    // Snapshot the released design into the baseline so it is a real, comparable version.
+    if (baseline) {
+      try {
+        const snap = snapshotDesignIntoBaseline(req.params.id, baselineId);
+        db.prepare("UPDATE asdlc_baseline SET record_count=?, field_count=? WHERE baseline_id=?")
+          .run(snap.recordCount, snap.fieldCount, baselineId);
+      } catch (e) { console.warn('[mass-approve] baseline snapshot failed (non-fatal):', e.message); }
+    }
 
     db.exec('COMMIT');
   } catch (err) {
@@ -1724,6 +1824,14 @@ app.post('/api/v1/projects/:id/mass-approve', (req, res) => {
         const n = rs.reduce((a, r) => a + (r.status === 'fulfilled' ? (r.value.created || 0) : 0), 0);
         if (n) console.log(`[mass-approve] generated ${n} test case(s) across ${createdTestable.length} entit(ies)`);
       });
+    const newAgents = createdTestable.filter(e => e.scope === 'agent_spec');
+    if (newAgents.length) {
+      Promise.allSettled(newAgents.map(e => autoDraftAgentPromptIfEmpty(req.params.id, e.entityId, uid)))
+        .then(rs => {
+          const n = rs.reduce((a, r) => a + (r.status === 'fulfilled' && r.value.drafted ? 1 : 0), 0);
+          if (n) console.log(`[mass-approve] drafted ${n} agent prompt(s)`);
+        });
+    }
   }
 
   res.json({
@@ -1873,6 +1981,40 @@ app.get('/api/v1/audit-log', (req, res) => {
 // ──────────────────────────────────────────────
 // BASELINES
 // ──────────────────────────────────────────────
+// Snapshot the current materialized design into asdlc_baseline_item so a baseline is a
+// real, comparable point-in-time version (not just an empty shell). One item per entity
+// (field_path=null), snapshot_value = JSON of the entity's business columns (volatile/
+// provenance columns stripped so diffs are meaningful). Returns magnitude counts.
+// Caller controls the transaction; per-row failures are skipped, never thrown.
+function snapshotDesignIntoBaseline(projectId, baselineId) {
+  const SKIP = new Set(['created_at','updated_at','updated_by','created_by','version',
+    'source_hash','source_fluent','lifecycle_status','visibility_scope']);
+  let recordCount = 0, fieldCount = 0;
+  const insItem = db.prepare(`INSERT INTO asdlc_baseline_item
+    (baseline_item_id, baseline_id, entity_type, entity_id, field_path, snapshot_value) VALUES (?,?,?,?,?,?)`);
+  for (const [etype, ent] of Object.entries(registry.byEntityType)) {
+    if (!ent || !ent.materializable || !ent.table || !ent.pk) continue;
+    let rows;
+    try {
+      rows = db.prepare(`SELECT * FROM ${ent.table} WHERE project_id = ? AND (lifecycle_status IS NULL OR lifecycle_status NOT IN ('retired','deleted'))`).all(projectId);
+    } catch {
+      try { rows = db.prepare(`SELECT * FROM ${ent.table} WHERE project_id = ?`).all(projectId); } catch { continue; }
+    }
+    for (const row of rows) {
+      const snap = {};
+      for (const [k, v] of Object.entries(row)) {
+        if (SKIP.has(k) || v === null || v === undefined || v === '') continue;
+        snap[k] = v;
+      }
+      try {
+        insItem.run(generateId(), baselineId, etype, String(row[ent.pk]), null, JSON.stringify(snap));
+        recordCount++; fieldCount += Object.keys(snap).length;
+      } catch { /* skip a bad row, keep going */ }
+    }
+  }
+  return { recordCount, fieldCount };
+}
+
 app.get('/api/v1/baselines', (req, res) => {
   const { project_id } = req.query;
   let sql = "SELECT * FROM asdlc_baseline WHERE lifecycle_status = 'active'";
@@ -1911,16 +2053,27 @@ app.post('/api/v1/baselines/:id/lock', (req, res) => {
   if (existing.locked_at) return res.status(409).json({ error: 'Baseline already locked' });
   const uid = userId(req);
   const { locked_by_member_id } = req.body || {};
-  db.prepare(`
-    UPDATE asdlc_baseline
-    SET baseline_status     = 'approved',
-        locked_at           = datetime('now'),
-        locked_by_member_id = COALESCE(?, locked_by_member_id),
-        updated_by          = ?,
-        updated_at          = datetime('now'),
-        version             = version + 1
-    WHERE baseline_id = ?
-  `).run(locked_by_member_id || null, uid, req.params.id);
+  db.exec('BEGIN');
+  try {
+    db.prepare(`
+      UPDATE asdlc_baseline
+      SET baseline_status     = 'approved',
+          locked_at           = datetime('now'),
+          locked_by_member_id = COALESCE(?, locked_by_member_id),
+          updated_by          = ?,
+          updated_at          = datetime('now'),
+          version             = version + 1
+      WHERE baseline_id = ?
+    `).run(locked_by_member_id || null, uid, req.params.id);
+    // Capture a real design snapshot at lock time so the baseline is a comparable version.
+    const snap = snapshotDesignIntoBaseline(existing.project_id, req.params.id);
+    db.prepare("UPDATE asdlc_baseline SET record_count=?, field_count=? WHERE baseline_id=?")
+      .run(snap.recordCount, snap.fieldCount, req.params.id);
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    return res.status(500).json({ error: 'Failed to lock baseline: ' + err.message });
+  }
   const updated = db.prepare('SELECT * FROM asdlc_baseline WHERE baseline_id = ?').get(req.params.id);
   auditLog('asdlc_baseline', req.params.id, 'UPDATE', existing, updated, uid);
   res.json(updated);
@@ -1932,15 +2085,49 @@ app.get('/api/v1/baselines/:id/compare/:otherId', (req, res) => {
   if (!a) return res.status(404).json({ error: 'Baseline not found' });
   if (!b) return res.status(404).json({ error: 'Other baseline not found' });
 
-  // Simple record-level diff using record_count and field_count heuristics
-  const recordDelta  = (b.record_count || 0) - (a.record_count || 0);
-  const fieldDelta   = (b.field_count  || 0) - (a.field_count  || 0);
-  res.json({
+  const meta = {
     baseline_a: { id: a.baseline_id, name: a.baseline_name, record_count: a.record_count, field_count: a.field_count },
     baseline_b: { id: b.baseline_id, name: b.baseline_name, record_count: b.record_count, field_count: b.field_count },
-    added_records:    Math.max(0, recordDelta),
-    removed_records:  Math.max(0, -recordDelta),
-    modified_fields:  Math.abs(fieldDelta),
+  };
+
+  // Real diff over the captured snapshots (asdlc_baseline_item), keyed by entity_type::entity_id.
+  const loadItems = (bid) => {
+    const m = new Map();
+    for (const it of db.prepare('SELECT entity_type, entity_id, snapshot_value FROM asdlc_baseline_item WHERE baseline_id=?').all(bid))
+      m.set(`${it.entity_type}::${it.entity_id}`, it.snapshot_value);
+    return m;
+  };
+  const aItems = loadItems(a.baseline_id);
+  const bItems = loadItems(b.baseline_id);
+
+  // Fallback for baselines locked before snapshots were captured: use the header counts.
+  if (aItems.size === 0 && bItems.size === 0) {
+    const recordDelta = (b.record_count || 0) - (a.record_count || 0);
+    const fieldDelta  = (b.field_count  || 0) - (a.field_count  || 0);
+    return res.json({ ...meta,
+      added_records: Math.max(0, recordDelta), removed_records: Math.max(0, -recordDelta),
+      modified_records: 0, modified_fields: Math.abs(fieldDelta), snapshot_based: false,
+      note: 'One or both baselines were locked before design snapshots existed — showing a count-based estimate only.' });
+  }
+
+  const parse = (s) => { try { return JSON.parse(s) || {}; } catch { return {}; } };
+  const added = [], removed = [], modified = [];
+  let modifiedFields = 0;
+  for (const k of bItems.keys()) if (!aItems.has(k)) added.push(k);
+  for (const k of aItems.keys()) if (!bItems.has(k)) removed.push(k);
+  for (const [k, bRaw] of bItems) {
+    if (!aItems.has(k)) continue;
+    const av = parse(aItems.get(k)), bv = parse(bRaw);
+    const changed = [];
+    for (const f of new Set([...Object.keys(av), ...Object.keys(bv)]))
+      if (JSON.stringify(av[f]) !== JSON.stringify(bv[f])) changed.push(f);
+    if (changed.length) { modified.push({ entity: k, changed_fields: changed }); modifiedFields += changed.length; }
+  }
+  res.json({ ...meta,
+    added_records: added.length, removed_records: removed.length,
+    modified_records: modified.length, modified_fields: modifiedFields,
+    snapshot_based: true,
+    added: added.slice(0, 100), removed: removed.slice(0, 100), modified: modified.slice(0, 100),
   });
 });
 
@@ -2764,52 +2951,16 @@ app.post('/api/v1/projects/:id/agent-specs/:agentId/draft-prompt', async (req, r
   ).get(req.params.agentId, req.params.id);
   if (!agent) return res.status(404).json({ error: 'Agent spec not found' });
 
-  // Pull linked workflow (direct FK)
-  const workflow = agent.workflow_id
-    ? db.prepare('SELECT workflow_id, name, slug FROM asdlc_workflow WHERE workflow_id = ?')
-        .get(agent.workflow_id)
-    : null;
-
-  // Pull linked use case via the Phase 3 M:N join (fall back to direct FK)
-  const useCaseRow = db.prepare(`
-    SELECT uc.use_case_id, uc.title, uc.summary, uc.business_objective
-    FROM asdlc_agent_use_case auc
-    JOIN asdlc_use_case uc ON uc.use_case_id = auc.use_case_id
-    WHERE auc.agent_spec_id = ?
-    ORDER BY auc.created_at
-    LIMIT 1
-  `).get(req.params.agentId)
-    || (agent.use_case_id ? db.prepare(
-        'SELECT use_case_id, title, summary, business_objective FROM asdlc_use_case WHERE use_case_id = ?'
-      ).get(agent.use_case_id) : null);
-
-  // Pull tools bound to this agent
-  const tools = db.prepare(`
-    SELECT t.name, at.purpose, at.tool_execution_mode
-    FROM asdlc_agent_tool at
-    JOIN asdlc_tool t ON t.tool_id = at.tool_id
-    WHERE at.agent_spec_id = ?
-    ORDER BY t.name
-  `).all(req.params.agentId);
-
-  const ctx = {
-    name:                   agent.name,
-    scope:                  agent.scope,
-    goals:                  parseJson(agent.goals)         || [],
-    done_criteria:          parseJson(agent.done_criteria) || [],
-    design_risks:           parseJson(agent.design_risks)  || [],
-    supervision_model:      agent.supervision_model,
-    orchestration_strategy: agent.orchestration_strategy,
-    latency_target:         agent.latency_target,
-    use_case_title:         useCaseRow?.title,
-    workflow_name:          workflow?.name,
-    tools,
-  };
+  const ctx = buildAgentPromptCtx(agent);
 
   try {
     const { draftAgentSystemPrompt } = require('./agent/prompt-drafter');
     const result = await draftAgentSystemPrompt(ctx);
-    res.json(result); // { draft, model, source, [error] }
+    // Cost visibility: record the draft call's token usage like every other AI path.
+    if (result.usage) {
+      aiConfig.logUsage({ projectId: req.params.id, source: 'prompt_drafter', refId: req.params.agentId, model: result.model, usage: result.usage });
+    }
+    res.json(result); // { draft, model, source, usage, [error] }
   } catch (err) {
     console.error('[draft-prompt] failed:', err);
     res.status(500).json({ error: err.message });
@@ -3267,11 +3418,15 @@ OUTPUT FORMAT:
   try {
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey });
+    const model = aiConfig.resolveModel('cost_estimate');
     const message = await client.messages.create({
-      model: 'claude-opus-4-5',
-      max_tokens: 4096,
+      model,
+      max_tokens: aiConfig.getMaxTokens(),
       messages: [{ role: 'user', content: prompt }]
     });
+    // Record token usage so this Opus call shows up in the /usage cost dashboards
+    // and is attributable to the project (was previously invisible). Never throws.
+    aiConfig.logUsage({ projectId, source: 'cost_estimate', refId: projectId, model, usage: message.usage });
 
     const rawText = message.content[0]?.text || '[]';
     // Strip markdown code fences if present
@@ -5434,6 +5589,69 @@ app.get('/api/v1/projects/:id/servicenow/delta-export', (req, res) => {
   res.send(md);
 });
 
+/**
+ * POST /api/v1/projects/:id/servicenow/register-sysid
+ * Closes the round-trip loop. After a Workbench-authored entity is CREATED in ServiceNow
+ * (via the delta export + SDK deploy), record the returned `sys_id` (and optionally the SN
+ * table/scope) onto the Workbench row. The next delta export then sees a `source_sys_id` and
+ * classifies the entity as a PATCH (update) instead of a POST — preventing duplicate records
+ * on the second pass, which is the core data-sync hazard of the round-trip.
+ *
+ * Body: { registrations: [{ entity_type, entity_id, sys_id, source_table?, source_scope? }] }
+ *       (a single { entity_type, entity_id, sys_id } object is also accepted).
+ */
+app.post('/api/v1/projects/:id/servicenow/register-sysid', (req, res) => {
+  const uid = userId(req);
+  const project = db.prepare('SELECT project_id, servicenow_scope FROM asdlc_project WHERE project_id = ?').get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  const body = req.body || {};
+  const regs = Array.isArray(body.registrations) ? body.registrations
+             : (body.entity_type && body.entity_id) ? [body] : null;
+  if (!regs || !regs.length) {
+    return res.status(400).json({ error: 'Provide registrations:[{entity_type, entity_id, sys_id}] (or a single {entity_type, entity_id, sys_id}).' });
+  }
+
+  const registered = [], skipped = [];
+  for (const r of regs) {
+    const entity_type = r && r.entity_type, entity_id = r && r.entity_id, sys_id = r && r.sys_id;
+    if (!entity_type || !entity_id || !sys_id) {
+      skipped.push({ entity_id: entity_id || null, reason: 'missing entity_type, entity_id, or sys_id' }); continue;
+    }
+    const ent = registry.byEntityType[entity_type];
+    if (!ent || !ent.materializable || !ent.table || !ent.pk) {
+      skipped.push({ entity_id, reason: `unknown or non-materializable entity_type "${entity_type}"` }); continue;
+    }
+    let row;
+    try {
+      row = db.prepare(`SELECT ${ent.pk} AS pk, source_sys_id FROM ${ent.table} WHERE ${ent.pk} = ? AND project_id = ?`).get(entity_id, req.params.id);
+    } catch (e) {
+      skipped.push({ entity_id, reason: `table ${ent.table} does not support ServiceNow links` }); continue;
+    }
+    if (!row) { skipped.push({ entity_id, reason: 'not found in this project' }); continue; }
+    if (row.source_sys_id && row.source_sys_id !== sys_id) {
+      skipped.push({ entity_id, reason: `already linked to a different sys_id (${row.source_sys_id})` }); continue;
+    }
+    if (row.source_sys_id === sys_id) { registered.push({ entity_id, sys_id, already_linked: true }); continue; }
+    try {
+      db.prepare(`
+        UPDATE ${ent.table}
+           SET source_sys_id = ?,
+               source_table  = COALESCE(?, source_table),
+               source_scope  = COALESCE(?, source_scope),
+               updated_by    = ?, updated_at = datetime('now')
+         WHERE ${ent.pk} = ? AND project_id = ?
+      `).run(sys_id, r.source_table || null, r.source_scope || project.servicenow_scope || null, uid, entity_id, req.params.id);
+      auditLog(ent.table, entity_id, 'sn_register_sysid', { source_sys_id: null }, { source_sys_id: sys_id }, uid);
+      registered.push({ entity_id, sys_id });
+    } catch (e) {
+      skipped.push({ entity_id, reason: e.message });
+    }
+  }
+
+  res.json({ registered_count: registered.length, skipped_count: skipped.length, registered, skipped });
+});
+
 // ─── SN Delta markdown assembler ─────────────────────────────────────────────
 
 function buildSNDeltaMarkdown(project, deltaCps, updates, creates, sinceTs) {
@@ -5596,8 +5814,14 @@ function buildSNDeltaMarkdown(project, deltaCps, updates, creates, sinceTs) {
   lines.push('   ```bash');
   lines.push('   snc app validate --target DEV');
   lines.push('   ```');
-  lines.push('6. **Register new sys_ids** back to the Workbench — update each newly created entity\'s');
-  lines.push('   `source_sys_id` so future deltas PATCH rather than re-creating.');
+  lines.push('6. **Register new sys_ids** back to the Workbench so future deltas PATCH rather than re-create.');
+  lines.push('   For each ✨ POST record, call the Workbench API with its Workbench ID, entity type, and the');
+  lines.push('   new ServiceNow `sys_id` (this flips it to a PATCH next time — no duplicate):');
+  lines.push('   ```bash');
+  lines.push(`   curl -X POST "<workbench-url>/api/v1/projects/${project.project_id}/servicenow/register-sysid" \\`);
+  lines.push('     -H "Content-Type: application/json" \\');
+  lines.push('     -d \'{"registrations":[{"entity_type":"<type>","entity_id":"<workbench-id>","sys_id":"<new-sys_id>"}]}\'');
+  lines.push('   ```');
   lines.push('7. **Advance the sync baseline** — run the Workbench SN ingest sync for this project');
   lines.push('   so `sn_last_synced_at` advances and the CPs above are excluded from the next delta.');
   lines.push('');
@@ -6671,6 +6895,7 @@ app.post('/api/v1/ingest-documents/:id/clarifications/answer', async (req, res) 
   // Standing questions (target_field = 'standing:<best_practice_id>') are answered
   // by the product owner directly — no AI re-extraction needed. Parse the answer and
   // write it immediately, deterministically, to the relevant design entities.
+  const standingApplied = [];
   try {
     const ingestDocForStanding = db.prepare('SELECT project_id FROM asdlc_ingest_document WHERE ingest_id=?').get(req.params.id);
     if (ingestDocForStanding && ingestDocForStanding.project_id) {
@@ -6683,23 +6908,42 @@ app.post('/api/v1/ingest-documents/:id/clarifications/answer', async (req, res) 
         ).get(clarId);
         if (!clarRow) continue;
 
+        // Standing questions are project-level planning assumptions, so these writes
+        // are intentionally project-wide — but they (a) only FILL values that are still
+        // unset (never clobber a value the user set explicitly), (b) validate the parsed
+        // input before writing, and (c) are audited + reported back so the bulk change is
+        // visible rather than silent. See BACKLOG #40.
         if (clarRow.scope === 'workflow') {
           // Parse a number from the answer (e.g. "50 per month" → 50)
           const numMatch = clarRow.answer_text.match(/\d+/);
-          if (numMatch) {
-            const vol = parseInt(numMatch[0], 10);
+          const vol = numMatch ? parseInt(numMatch[0], 10) : NaN;
+          if (Number.isFinite(vol) && vol > 0) {
+            // IS NULL only — an explicit 0 (a workflow that intentionally doesn't run on
+            // a schedule) is a real value and must not be overwritten by a project default.
             const updated = db.prepare(
-              "UPDATE asdlc_workflow SET runs_per_period=? WHERE project_id=? AND (runs_per_period IS NULL OR runs_per_period=0)"
-            ).run(vol, pid);
-            console.log(`[clarify] Auto-applied runs_per_period=${vol} to ${updated.changes} workflows in project ${pid}`);
+              "UPDATE asdlc_workflow SET runs_per_period=?, updated_by=?, updated_at=datetime('now') WHERE project_id=? AND runs_per_period IS NULL"
+            ).run(vol, uid, pid);
+            if (updated.changes > 0) {
+              auditLog('asdlc_workflow', pid, 'standing_bulk_fill',
+                null, { field: 'runs_per_period', value: vol, rows: updated.changes, clarification_id: clarId }, uid);
+              standingApplied.push({ scope: 'workflow', field: 'runs_per_period', value: vol, rows_filled: updated.changes });
+            }
+            console.log(`[clarify] Auto-filled runs_per_period=${vol} on ${updated.changes} unset workflow(s) in project ${pid}`);
+          } else {
+            console.log(`[clarify] Standing workflow-volume answer had no usable positive number; skipped (answer: ${JSON.stringify(clarRow.answer_text).slice(0, 80)})`);
           }
         } else if (clarRow.scope === 'agent_spec') {
           // 'yes' → enable cost tracking; anything else → leave as-is (cost_model stays 'none')
           if (/yes/i.test(clarRow.answer_text)) {
             const updated = db.prepare(
-              "UPDATE asdlc_agent_spec SET cost_model='servicenow_now_assist' WHERE project_id=? AND (cost_model='none' OR cost_model IS NULL)"
-            ).run(pid);
-            console.log(`[clarify] Auto-applied cost_model=servicenow_now_assist to ${updated.changes} agents in project ${pid}`);
+              "UPDATE asdlc_agent_spec SET cost_model='servicenow_now_assist', updated_by=?, updated_at=datetime('now') WHERE project_id=? AND (cost_model='none' OR cost_model IS NULL)"
+            ).run(uid, pid);
+            if (updated.changes > 0) {
+              auditLog('asdlc_agent_spec', pid, 'standing_bulk_fill',
+                null, { field: 'cost_model', value: 'servicenow_now_assist', rows: updated.changes, clarification_id: clarId }, uid);
+              standingApplied.push({ scope: 'agent_spec', field: 'cost_model', value: 'servicenow_now_assist', rows_filled: updated.changes });
+            }
+            console.log(`[clarify] Auto-set cost_model=servicenow_now_assist on ${updated.changes} agent(s) in project ${pid}`);
           }
         }
       }
@@ -6711,7 +6955,11 @@ app.post('/api/v1/ingest-documents/:id/clarifications/answer', async (req, res) 
   try {
     const { processDocument } = require('./agent/processor');
     const result = await processDocument(req.params.id);
-    res.json(result);
+    // Surface any project-wide standing-question fills so the caller/UI can show what changed.
+    const payload = (result && typeof result === 'object' && standingApplied.length)
+      ? { ...result, standing_applied: standingApplied }
+      : result;
+    res.json(payload);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -7380,9 +7628,9 @@ app.post('/api/v1/ingest-documents', upload.single('file'), (req, res) => {
   const file_path      = req.file ? req.file.path : null;
   // raw_text may be supplied directly (requirements update panel — no file attachment)
   const raw_text       = req.body.raw_text || null;
-  // AI mode dial: faithful (default) | balanced | suggestive. Anything else → faithful.
+  // AI mode dial: faithful | balanced (default) | suggestive. Anything else → balanced.
   const enrichment_level = ['faithful','balanced','suggestive'].includes(req.body.enrichment_level)
-    ? req.body.enrichment_level : 'faithful';
+    ? req.body.enrichment_level : 'balanced';
 
   if (!project_id || !document_title) {
     if (req.file) require('fs').unlinkSync(req.file.path);   // clean up orphan
@@ -7403,15 +7651,17 @@ app.post('/api/v1/ingest-documents', upload.single('file'), (req, res) => {
     console.warn(`[ingest-documents] uploaded_by "${uid}" is not a known user — storing NULL. The current profile may be stale; re-pick a user.`);
   }
 
+  // Per-document platform tag; null = inherit the project's target_platform.
+  const platform = ['servicenow', 'generic'].includes(req.body.platform) ? req.body.platform : null;
   const id = generateId();
   db.prepare(`
     INSERT INTO asdlc_ingest_document
       (ingest_id, project_id, document_title, file_name, file_type, document_type,
-       description, ingest_status, enrichment_level, uploaded_by, file_path, raw_text,
+       description, ingest_status, enrichment_level, platform, uploaded_by, file_path, raw_text,
        uploaded_at, created_at, updated_at)
-    VALUES (?,?,?,?,?,?,?,'pending',?,?,?,?,datetime('now'),datetime('now'),datetime('now'))
+    VALUES (?,?,?,?,?,?,?,'pending',?,?,?,?,?,datetime('now'),datetime('now'),datetime('now'))
   `).run(id, project_id, document_title, file_name, file_type,
-         document_type, description, enrichment_level, uploadedBy, file_path, raw_text);
+         document_type, description, enrichment_level, platform, uploadedBy, file_path, raw_text);
 
   auditLog('asdlc_ingest_document', id, 'INSERT', null,
     { project_id, document_title, file_name, document_type }, uploadedBy);

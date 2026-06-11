@@ -221,10 +221,20 @@ async function reverseEngineerOne(artifact, ctx = {}) {
   const thinkCfg = aiConfig.getThinkingConfig('reverse_engineer');
   const maxTokens = Math.max(aiConfig.getMaxTokens(), 12000); // headroom for adaptive thinking; < 16k so no streaming needed
 
+  // Platform-scoped AI Guidance, injected as a SEPARATE uncached system block so the
+  // byte-identical REVERSE_SYSTEM_PROMPT above stays prompt-cacheable across calls.
+  const guidance = aiConfig.getActiveBestPractices([designType], aiConfig.getProjectPlatform(ctx.projectId));
+  const systemBlocks = [{ type: 'text', text: REVERSE_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }];
+  if (guidance.length) {
+    systemBlocks.push({ type: 'text', text:
+      'House rules / platform guidance (FOLLOW THESE):\n' +
+      guidance.map(b => `  - ${b.title ? b.title + ': ' : ''}${b.rule_text}`).join('\n') });
+  }
+
   const req = {
     model,
     max_tokens: maxTokens,
-    system: [{ type: 'text', text: REVERSE_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+    system: systemBlocks,
     tools: [tool],
     tool_choice: { type: 'tool', name: tool.name },
     messages: [{ role: 'user', content: userMessageFor(artifact) }],

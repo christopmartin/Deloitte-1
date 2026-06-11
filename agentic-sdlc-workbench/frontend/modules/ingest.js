@@ -223,8 +223,8 @@ function buildSubmitPanel() {
   row1.appendChild(titleGroup);
   body.appendChild(row1);
 
-  // Row 2: description + scope (two halves)
-  const row2 = el('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '16px' } });
+  // Row 2: description + scope + platform
+  const row2 = el('div', { style: { display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: '12px', marginBottom: '16px' } });
 
   const descGroup = el('div', { className: 'form-group', style: { margin: 0 } });
   descGroup.appendChild(el('label', { className: 'form-label' }, 'Description / Notes'));
@@ -254,8 +254,19 @@ function buildSubmitPanel() {
   `;
   scopeGroup.appendChild(scopeSelect);
 
+  const platformGroup = el('div', { className: 'form-group', style: { margin: 0 } });
+  platformGroup.appendChild(el('label', { className: 'form-label' }, 'Target Platform'));
+  const platformSelect = el('select', { className: 'form-select' });
+  platformSelect.innerHTML = `
+    <option value="">Use application default</option>
+    <option value="servicenow">ServiceNow</option>
+    <option value="generic">Generic</option>
+  `;
+  platformGroup.appendChild(platformSelect);
+
   row2.appendChild(descGroup);
   row2.appendChild(scopeGroup);
+  row2.appendChild(platformGroup);
   body.appendChild(row2);
   // NOTE: the AI-mode dial lives on the doc's "Start Extraction" panel (buildTriggerSection),
   // NOT here — "Submit for Analysis" only queues the document; no AI runs at this step.
@@ -390,7 +401,7 @@ function buildSubmitPanel() {
   const btnRow = el('div', { style: { display: 'flex', alignItems: 'center', gap: '12px' } });
   const submitBtn = el('button', { className: 'btn btn-primary' }, '↑ Submit for Analysis');
   submitBtn.addEventListener('click', () =>
-    doSubmit(appSelect, typeSelect, titleInput, descInput, scopeSelect,
+    doSubmit(appSelect, typeSelect, titleInput, descInput, scopeSelect, platformSelect,
              () => droppedFile, reqTextarea, resetFile, submitBtn));
   btnRow.appendChild(submitBtn);
   btnRow.appendChild(el('span', { className: 'text-muted text-sm' },
@@ -403,7 +414,7 @@ function buildSubmitPanel() {
 }
 
 
-async function doSubmit(appSelect, typeSelect, titleInput, descInput, scopeSelect, getFile, reqTextarea, resetFile, btn) {
+async function doSubmit(appSelect, typeSelect, titleInput, descInput, scopeSelect, platformSelect, getFile, reqTextarea, resetFile, btn) {
   if (!appSelect.value)         { showToast('Select an application first.', 'error'); return; }
   if (!titleInput.value.trim()) { showToast('Enter a title.', 'error'); return; }
 
@@ -430,6 +441,7 @@ async function doSubmit(appSelect, typeSelect, titleInput, descInput, scopeSelec
       fd.append('file_name',      droppedFile.name);
       fd.append('file_type',      droppedFile.name.split('.').pop().toLowerCase());
       if (descInput.value.trim()) fd.append('description', descInput.value.trim());
+      if (platformSelect && platformSelect.value) fd.append('platform', platformSelect.value);
       fetchOpts = { method: 'POST', body: fd };
     } else {
       // ── JSON — typed/pasted text, prepend scope hint if set ───────────────
@@ -445,6 +457,7 @@ async function doSubmit(appSelect, typeSelect, titleInput, descInput, scopeSelec
           document_type:  typeSelect.value,
           description:    descInput.value.trim() || null,
           raw_text:       fullText,
+          platform:       platformSelect?.value || null,
         }),
       };
     }
@@ -760,7 +773,7 @@ function buildTriggerSection(doc, pane) {
     ['balanced',   'Balanced — also fill obviously-implied empty fields'],
     ['suggestive', 'Suggestive — also propose best-practice additions (✨ flagged for review)'],
   ].forEach(([v, label]) => modeSel.appendChild(el('option', { value: v }, label)));
-  modeSel.value = ['faithful', 'balanced', 'suggestive'].includes(doc.enrichment_level) ? doc.enrichment_level : 'faithful';
+  modeSel.value = ['faithful', 'balanced', 'suggestive'].includes(doc.enrichment_level) ? doc.enrichment_level : 'balanced';
   modeGroup.appendChild(modeSel);
   modeGroup.appendChild(el('p', { style: { fontSize: '11px', color: 'var(--color-text-muted)', marginTop: '4px' } },
     'Suggestive lets the AI Agent act as a design consultant — adding standard agentic NFRs, implied data ' +
@@ -929,6 +942,48 @@ function buildClarificationForm(doc, questions, round, pane) {
     }
   });
   sec.appendChild(submitBtn);
+
+  // ── "Promote now" escape hatch ─────────────────────────────────────────────
+  // Clarifying questions can otherwise loop indefinitely — the Submit Answers path
+  // re-runs extraction, which may surface a fresh round of questions, so the status
+  // never reaches 'staged' and the normal Promote button (only shown in the staged
+  // state) never appears. The PO may judge the staged design good enough already and
+  // want to proceed, treating the remaining questions as optional suggestions.
+  //
+  // The backend /promote only hard-blocks on unresolved 'conflict:' questions (ripple/
+  // requirement conflicts that must be reconciled). Everything else is advisory, so we
+  // offer promotion here and only gate it on open conflicts.
+  const hasOpenConflict = questions.some(
+    q => typeof q.target_field === 'string' && q.target_field.startsWith('conflict:')
+  );
+
+  const promoteRow = el('div', { style: { marginTop: '16px', paddingTop: '16px', borderTop: '1px solid var(--color-border)' } });
+  promoteRow.appendChild(el('p', { style: { fontSize: '12px', color: 'var(--color-text-muted)', marginBottom: '8px', lineHeight: '1.5' } },
+    hasOpenConflict
+      ? 'The questions above include an unresolved conflict (⚠). Resolve it before promoting — conflicts must be reconciled first.'
+      : 'Happy with the staged design as-is? You can promote now and keep the remaining questions as open suggestions — they won\'t block the Change Packets.'
+  ));
+
+  const promoteNowBtn = el('button',
+    { className: 'btn btn-secondary', disabled: hasOpenConflict },
+    '✓ Promote now — keep questions open');
+  if (hasOpenConflict) promoteNowBtn.style.opacity = '0.5';
+  promoteNowBtn.addEventListener('click', async () => {
+    if (!confirm('Promote the staged extractions to Change Packets now?\n\nThe open clarifying questions stay on the document as suggestions — they will not be applied automatically. You can still answer them later before approval.')) return;
+    promoteNowBtn.disabled = true; promoteNowBtn.textContent = 'Creating…';
+    try {
+      const result = await apiFetch(`/ingest-documents/${doc.ingest_id}/promote`, { method: 'POST' });
+      const cpList = result.change_packets || [];
+      showToast(`${cpList.length} Change Packet${cpList.length !== 1 ? 's' : ''} created — ready for approval.`, 'success');
+      await renderDetail(doc, pane);
+    } catch (err) {
+      showToast(`Error: ${err.message}`, 'error');
+      promoteNowBtn.disabled = false; promoteNowBtn.textContent = '✓ Promote now — keep questions open';
+    }
+  });
+  promoteRow.appendChild(promoteNowBtn);
+  sec.appendChild(promoteRow);
+
   return sec;
 }
 
