@@ -407,6 +407,34 @@ function renderDetail(p, pane) {
   }
   body.appendChild(agentSection);
 
+  // Design Maintenance
+  const maintSection = el('div', { className: 'detail-section' });
+  maintSection.appendChild(el('h4', {}, 'Design Maintenance'));
+  maintSection.appendChild(el('p', { className: 'text-muted text-sm', style: 'margin-bottom:10px' },
+    'Repair swimlane structure (participants, step owners, paths) and re-derive the RASIC matrix for all workflows. ' +
+    'Safe to run multiple times — skips workflows that already have RASIC data.'));
+  const repairBtn = el('button', { className: 'btn btn-secondary btn-sm' }, 'Repair Design + RASIC');
+  const repairStatus = el('span', { style: 'margin-left:12px;font-size:12px;color:var(--text-muted)' }, '');
+  repairBtn.addEventListener('click', async () => {
+    repairBtn.disabled = true;
+    repairBtn.textContent = 'Repairing…';
+    repairStatus.textContent = '';
+    try {
+      const r = await apiFetch(`/projects/${p.project_id}/repair-design`, { method: 'POST' });
+      repairStatus.textContent = `Done — ${r.rasicCells || 0} RASIC cell(s) inferred, ` +
+        `${r.participantsCreated || 0} lane(s) created, ${r.ownersSet || 0} owner(s) set.`;
+      repairStatus.style.color = 'var(--color-ok, #16a34a)';
+    } catch (err) {
+      repairStatus.textContent = 'Failed: ' + err.message;
+      repairStatus.style.color = 'var(--color-danger, #cf222e)';
+    } finally {
+      repairBtn.disabled = false;
+      repairBtn.textContent = 'Repair Design + RASIC';
+    }
+  });
+  maintSection.appendChild(el('div', {}, repairBtn, repairStatus));
+  body.appendChild(maintSection);
+
   // Save button
   const footer = el('div', { className: 'detail-section', style: { display: 'flex', justifyContent: 'flex-end', gap: '8px' } });
   const saveBtn = el('button', { className: 'btn btn-primary' }, 'Save Changes');
