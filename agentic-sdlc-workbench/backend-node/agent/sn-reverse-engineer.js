@@ -21,6 +21,7 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const aiConfig = require('./ai-config');
 const registry = require('./entity-registry');
+const { withWiki } = require('./wiki-context');
 
 let _client;
 function getClient() {
@@ -234,7 +235,7 @@ async function reverseEngineerOne(artifact, ctx = {}) {
   const req = {
     model,
     max_tokens: maxTokens,
-    system: systemBlocks,
+    system: withWiki(systemBlocks),
     tools: [tool],
     tool_choice: { type: 'tool', name: tool.name },
     messages: [{ role: 'user', content: userMessageFor(artifact) }],

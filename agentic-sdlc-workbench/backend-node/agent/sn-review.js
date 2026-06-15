@@ -16,6 +16,7 @@
 'use strict';
 const Anthropic = require('@anthropic-ai/sdk');
 const aiConfig = require('./ai-config');
+const { withWiki } = require('./wiki-context');
 const { loadCanonical, canonicalForPrompt } = require('./sn-reconcile');
 
 let _client;
@@ -101,7 +102,7 @@ async function reviewChanged(item, ctx) {
   }
   const req = {
     model, max_tokens: maxTokens,
-    system: systemBlocks,
+    system: withWiki(systemBlocks),
     tools: [EMIT_TOOL], tool_choice: { type: 'auto' },
     messages: [{ role: 'user', content: userMsg }],
   };

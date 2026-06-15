@@ -13,6 +13,7 @@
 'use strict';
 
 const Anthropic = require('@anthropic-ai/sdk');
+const { withWiki } = require('./wiki-context');
 
 // ── Anthropic client (lazy) ───────────────────────────────────────────────────
 let _client;
@@ -147,6 +148,7 @@ async function claudeDraft(ctx) {
   const response = await client.messages.create({
     model,
     max_tokens: MAX_TOKENS,
+    system: withWiki(),
     messages: [{ role: 'user', content: userPrompt }],
   });
 

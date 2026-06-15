@@ -23,6 +23,7 @@ const path      = require('path');
 const { db, generateId } = require('../db');
 const registry  = require('./entity-registry');
 const aiConfig  = require('./ai-config');
+const { withWiki } = require('./wiki-context');
 
 // ── Anthropic client (lazy) ───────────────────────────────────────────────────
 let _client;
@@ -564,7 +565,7 @@ async function runExtractionLoop(systemPrompt, userMessage, usageCtx, role = 'ex
       // Cache the (within-run-identical) system prompt as one ephemeral block, mirroring the
       // SN modules (sn-reverse-engineer.js:227). The schema SQL + static guidance are the bulk of
       // it; loops 2..N of this extraction run then read it from cache instead of re-billing it.
-      system:     [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+      system:     withWiki([{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }]),
       tools:      EXTRACTION_TOOLS,
       tool_choice:{ type: 'auto' },
       messages,

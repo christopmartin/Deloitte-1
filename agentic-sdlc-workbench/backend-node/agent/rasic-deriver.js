@@ -36,6 +36,7 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const { db, generateId } = require('../db');
 const aiConfig = require('./ai-config');
+const { withWiki } = require('./wiki-context');
 
 let _client;
 function getClient() {
@@ -292,7 +293,7 @@ async function inferRasicMatrix(workflowId, projectId, uid) {
     const req = {
       model,
       max_tokens: maxTokens,
-      system: systemPrompt,
+      system: withWiki(systemPrompt),
       tools: [RASIC_TOOL],
       tool_choice: { type: 'auto' },
       messages: [{ role: 'user', content: `Assign RASIC codes for all ${steps.length} steps of the "${wf.name}" workflow.` }],
