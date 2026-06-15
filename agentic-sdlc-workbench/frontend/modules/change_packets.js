@@ -647,7 +647,8 @@ const SN_FIELD_LABELS = {
   contract: 'Contract / Purpose', role: 'Role', type: 'Type',
 };
 
-function renderSNSyncDiff(parsed, oldData, newData) {
+function renderSNSyncDiff(parsed, oldData, newData, opts = {}) {
+  const { editable = false, overrideInputs = null } = opts;
   const isConflict = parsed.type === 'conflict';
   const borderColor = isConflict ? 'var(--color-warn, #f59e0b)' : 'var(--color-accent)';
   const bgColor     = isConflict ? 'var(--color-warn-bg, #fffbeb)' : 'var(--color-accent-light, #eef6ff)';
@@ -706,14 +707,28 @@ function renderSNSyncDiff(parsed, oldData, newData) {
       }
       cols.appendChild(leftCol);
 
-      // Right: Proposed ServiceNow value
+      // Right: Proposed ServiceNow value — editable during ratification so the reviewer can
+      // accept it as-is OR type their own resolution. Whatever is here becomes the applied value.
       const rightCol = el('div', { style: 'padding:8px 10px;background:var(--color-accent-light,#eef6ff)' });
-      rightCol.appendChild(el('div', { style: 'font-size:10px;font-weight:700;color:var(--color-accent);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px' }, '🔄 Proposed (ServiceNow)'));
-      if (proposedVal !== undefined && proposedVal !== null && proposedVal !== '') {
-        const valStr = Array.isArray(proposedVal) ? proposedVal.join('; ') : String(proposedVal);
-        rightCol.appendChild(el('div', { style: 'font-size:12px;color:var(--color-text);line-height:1.55;word-break:break-word;max-height:140px;overflow:auto' }, valStr.slice(0, 600)));
+      const isArrayField = Array.isArray(proposedVal) || Array.isArray(currentVal);
+      if (editable) {
+        rightCol.appendChild(el('div', { style: 'font-size:10px;font-weight:700;color:var(--color-accent);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px' },
+          isArrayField ? '🔄 Your resolution (one per line)' : '🔄 Your resolution (edit to customize)'));
+        const seed = (proposedVal !== undefined && proposedVal !== null && proposedVal !== '') ? proposedVal
+                   : (currentVal !== undefined && currentVal !== null ? currentVal : '');
+        const ta = el('textarea', { className: 'form-input', rows: '3',
+          style: 'width:100%;font-size:12px;line-height:1.5;resize:vertical;min-height:48px' });
+        ta.value = Array.isArray(seed) ? seed.join('\n') : String(seed);
+        rightCol.appendChild(ta);
+        if (overrideInputs) overrideInputs[fieldKey] = { el: ta, isArray: isArrayField };
       } else {
-        rightCol.appendChild(el('div', { style: 'font-size:11px;color:var(--color-text-muted);font-style:italic' }, '(not stored — approve to see ServiceNow value)'));
+        rightCol.appendChild(el('div', { style: 'font-size:10px;font-weight:700;color:var(--color-accent);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px' }, '🔄 Proposed (ServiceNow)'));
+        if (proposedVal !== undefined && proposedVal !== null && proposedVal !== '') {
+          const valStr = Array.isArray(proposedVal) ? proposedVal.join('; ') : String(proposedVal);
+          rightCol.appendChild(el('div', { style: 'font-size:12px;color:var(--color-text);line-height:1.55;word-break:break-word;max-height:140px;overflow:auto' }, valStr.slice(0, 600)));
+        } else {
+          rightCol.appendChild(el('div', { style: 'font-size:11px;color:var(--color-text-muted);font-style:italic' }, '(not stored — approve to see ServiceNow value)'));
+        }
       }
       cols.appendChild(rightCol);
 
@@ -755,6 +770,10 @@ function renderChangeItem(item, cpStatus, cpId, onDecision) {
   const oldData = parseItemJson(item.old_value);
   const keyFields = ITEM_KEY_FIELDS[item.entity_type] || ['title', 'name'];
   const itemDecision = item.item_status && item.item_status !== 'pending' ? item.item_status : null;
+  const canDecide = ['pending_review', 'in_review'].includes(cpStatus) && !item.applied_at;
+  // Populated for an editable ServiceNow conflict: { dataKey: { el, isArray } } collected from the
+  // resolution inputs, so the footer can apply the reviewer's chosen values as field_overrides.
+  let snConflictInputs = null;
 
   // Card border colour reflects decision state
   const cardBorder = itemDecision === 'approved'
@@ -823,7 +842,11 @@ function renderChangeItem(item, cpStatus, cpId, onDecision) {
   if (item.rationale && item.rationale.startsWith('[SN sync')) {
     const parsed = parseSNSyncRationale(item.rationale);
     if (parsed) {
-      bdy.appendChild(renderSNSyncDiff(parsed, oldData, newData));
+      // A conflict on an open CP is editable: the reviewer resolves each field inline.
+      const editable = canDecide && !!onDecision && parsed.type === 'conflict' && parsed.conflictingFields.length;
+      const overrideInputs = {};
+      bdy.appendChild(renderSNSyncDiff(parsed, oldData, newData, { editable, overrideInputs }));
+      if (editable && Object.keys(overrideInputs).length) snConflictInputs = overrideInputs;
     } else {
       // Fallback: show full rationale text
       bdy.appendChild(el('div', { style: 'margin-top:6px;font-size:11px;color:var(--color-text-muted);font-style:italic' }, item.rationale));
@@ -878,8 +901,6 @@ function renderChangeItem(item, cpStatus, cpId, onDecision) {
   }
 
   // ── Per-item decision footer ─────────────────────────────────────────────────
-  const canDecide = ['pending_review', 'in_review'].includes(cpStatus) && !item.applied_at;
-
   if (itemDecision) {
     // Already decided: show who/when/notes
     const decRow = el('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;padding:8px 10px;border-top:1px solid var(--color-border);background:var(--color-bg)' });
@@ -894,10 +915,30 @@ function renderChangeItem(item, cpStatus, cpId, onDecision) {
     // Pending + CP is still open: show Approve / Reject buttons
     const confirmArea = el('div');
     const footer = el('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;padding:8px 10px;border-top:1px solid var(--color-border);background:var(--color-bg)' });
-    footer.appendChild(el('span', { style: 'font-size:11px;color:var(--color-text-muted);flex:1' }, 'Decision:'));
+    footer.appendChild(el('span', { style: 'font-size:11px;color:var(--color-text-muted);flex:1' },
+      snConflictInputs ? 'Resolve the conflict above (accept or edit each value), then:' : 'Decision:'));
 
     // Keep on List label (implicit default)
-    footer.appendChild(el('span', { className: 'tag tag-muted', style: 'font-size:10px' }, 'Keep on List'));
+    if (!snConflictInputs) footer.appendChild(el('span', { className: 'tag tag-muted', style: 'font-size:10px' }, 'Keep on List'));
+
+    // ServiceNow conflict: apply the reviewer's resolved values (accepted or edited) to the design.
+    const applyResBtn = el('button', { className: 'btn btn-sm btn-success' }, '✓ Apply resolution');
+    applyResBtn.addEventListener('click', async () => {
+      const field_overrides = {};
+      for (const [k, cfg] of Object.entries(snConflictInputs)) {
+        const raw = cfg.el.value;
+        field_overrides[k] = cfg.isArray ? raw.split('\n').map(s => s.trim()).filter(Boolean) : raw;
+      }
+      applyResBtn.disabled = true;
+      try {
+        const result = await apiFetch(`/change-packet-items/${item.change_packet_item_id}/approve`, {
+          method: 'POST', body: JSON.stringify({ field_overrides }),
+        });
+        showToast('✓ Resolution applied to the design.', 'success');
+        onDecision(result);
+      } catch (err) { showToast(`Error: ${err.message}`, 'error'); }
+      finally { applyResBtn.disabled = false; }
+    });
 
     // Approve button
     const approveBtn = el('button', { className: 'btn btn-sm btn-success' }, '✓ Approve');
@@ -954,7 +995,9 @@ function renderChangeItem(item, cpStatus, cpId, onDecision) {
       confirmArea.appendChild(conf);
     });
 
-    footer.appendChild(approveBtn);
+    // Conflicts use the inline resolution (accept-or-edit) button; everything else keeps the
+    // plain accept-as-is Approve. Reject is always available.
+    footer.appendChild(snConflictInputs ? applyResBtn : approveBtn);
     footer.appendChild(rejectBtn);
     bdy.appendChild(footer);
     bdy.appendChild(confirmArea);

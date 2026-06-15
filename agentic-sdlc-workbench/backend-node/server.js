@@ -678,13 +678,42 @@ app.post('/api/v1/change-packet-items/:itemId/approve', (req, res) => {
     return res.status(409).json({ error: 'Item is rejected — restore it before approving' });
   }
 
+  // Optional custom resolution: a reviewer-supplied { dataKey: value } map that overrides the
+  // AI's proposed values before applying. This is how a human "enters a way to handle it" — the
+  // chosen values are merged into the item, written to the design, and persisted so future Build
+  // Spec exports reflect the human decision. Unknown keys (not on the entity) are ignored.
+  const overrides = (req.body && req.body.field_overrides && typeof req.body.field_overrides === 'object' && !Array.isArray(req.body.field_overrides))
+    ? req.body.field_overrides : null;
+
   let applyResult;
   const itemBefore = { ...item };
 
   db.exec('BEGIN');
   try {
+    let forceKeys = null;
+    if (overrides) {
+      const entity = registry.byEntityType[item.entity_type];
+      const validKeys = entity && entity.fieldMap ? new Set(Object.keys(entity.fieldMap)) : null;
+      let data; try { data = JSON.parse(item.new_value); } catch { data = {}; }
+      const appliedKeys = [];
+      for (const [k, v] of Object.entries(overrides)) {
+        if (validKeys && !validKeys.has(k)) continue;           // ignore fields not on this entity
+        data[k] = v;
+        if (data._sn_proposed) delete data._sn_proposed[k];      // this conflict field is now resolved
+        appliedKeys.push(k);
+      }
+      if (data._sn_proposed && !Object.keys(data._sn_proposed).length) delete data._sn_proposed;
+      if (appliedKeys.length) {
+        const mergedJson = JSON.stringify(data);
+        db.prepare("UPDATE asdlc_change_packet_item SET new_value=?, item_decision_notes=? WHERE change_packet_item_id=?")
+          .run(mergedJson, `Custom resolution — reviewer set: ${appliedKeys.join(', ')}`, item.change_packet_item_id);
+        item.new_value = mergedJson;                             // applyOneItem reads from this object
+        forceKeys = new Set(appliedKeys);
+      }
+    }
+
     // Apply this single item to the design tables
-    applyResult = applyOneItem(item, cp, uid);
+    applyResult = applyOneItem(item, cp, uid, forceKeys);
 
     // Mark item as individually approved
     db.prepare(`
@@ -1122,7 +1151,7 @@ function mtCreate(entity, data, projectId, uid, idMap, item) {
   return id;
 }
 
-function mtUpdate(entity, data, item, uid) {
+function mtUpdate(entity, data, item, uid, forceCols) {
   const id = item.entity_id;
   const before = mtRow(entity.table, entity.pk, id);
   if (!before) throw new SoftSkip(`${entity.entity_type}: update target ${id} no longer exists`);
@@ -1130,10 +1159,13 @@ function mtUpdate(entity, data, item, uid) {
   // Non-destructive guard (ServiceNow-sourced syncs only): never overwrite a populated
   // Workbench field with an empty or strictly-smaller value. Protected fields are kept
   // and reported. Provenance columns always update. Hard floor under ALL apply-modes.
+  // EXCEPTION: columns in `forceCols` are explicit human resolutions (a reviewer typed the
+  // value during ratification) and always apply, even if shorter than the current value.
   const protectedCols = [];
   if (data && data.source_sys_id) {
     for (const col of Object.keys(mapped)) {
       if (SN_PROVENANCE_COLS.has(col)) continue;
+      if (forceCols && forceCols.has(col)) continue;
       if (snWouldShrink(before[col], mapped[col])) { delete mapped[col]; protectedCols.push(col); }
     }
   }
@@ -1180,7 +1212,7 @@ const TESTABLE_SCOPE_OF = { use_case: 'use_case', workflow: 'workflow', agent_sp
  * for ONE item only. Callers must wrap in a transaction. Returns the same result
  * shape as applyChangePacket so callers can treat it uniformly.
  */
-function applyOneItem(item, cp, uid) {
+function applyOneItem(item, cp, uid, forceKeys) {
   const result = { applied: 0, updated: 0, deleted: 0, skipped: 0, evidence: 0, errors: [], createdTestable: [] };
 
   const fp = item.field_path || '';
@@ -1209,7 +1241,11 @@ function applyOneItem(item, cp, uid) {
       }
       result.deleted++;
     } else if (op === 'update') {
-      const r = mtUpdate(entity, data, item, uid);
+      // Translate human-resolved data-keys → columns so mtUpdate applies them verbatim.
+      const forceCols = (forceKeys && forceKeys.size)
+        ? new Set([...forceKeys].map(k => (entity.fieldMap && entity.fieldMap[k] && entity.fieldMap[k].col) || k))
+        : null;
+      const r = mtUpdate(entity, data, item, uid, forceCols);
       result.updated++;
       if (r && r.protected && r.protected.length) {
         markItemApplied(item.change_packet_item_id, `[non-destructive: kept richer Workbench values for ${r.protected.join(', ')}]`);
@@ -5526,6 +5562,23 @@ app.get('/api/v1/projects/:id/build-export', async (req, res) => {
     data.cost_summary = { assumption, use_cases: ucCosts };
   }
 
+  // Best-effort: resolve the configured runAsUser account's sys_id live, so the
+  // Build Spec can pre-fill it instead of emitting a REPLACE_WITH_… placeholder.
+  // Read-only single GET; any failure (no creds, unreachable, not found) just
+  // leaves the placeholder in place — the export never blocks on this.
+  {
+    const inst = project.servicenow_instance || process.env.SN_INSTANCE;
+    const usr  = project.sn_user || process.env.SN_USER;
+    const pw   = decryptField(project.sn_password_enc) || process.env.SN_PASSWORD;
+    if (inst && usr && pw) {
+      try {
+        data.sn_runas = await snAssess.resolveUserSysId({ instance: inst, user: usr, pw });
+      } catch (err) {
+        console.error('[build-export] runAsUser sys_id resolve failed:', err.message);
+      }
+    }
+  }
+
   // Build the deterministic markdown (a faithful DB dump — never altered by AI)
   let md = buildExportMarkdown(project, baseline, sections, data);
 
@@ -5706,8 +5759,10 @@ app.get('/api/v1/projects/:id/servicenow/delta-export', (req, res) => {
  * classifies the entity as a PATCH (update) instead of a POST — preventing duplicate records
  * on the second pass, which is the core data-sync hazard of the round-trip.
  *
- * Body: { registrations: [{ entity_type, entity_id, sys_id, source_table?, source_scope? }] }
- *       (a single { entity_type, entity_id, sys_id } object is also accepted).
+ * Body: { registrations: [{ entity_type, sys_id, entity_id?, slug?, source_table?, source_scope? }] }
+ *       (a single such object is also accepted). Identify the Workbench row by EITHER its
+ *       primary key (entity_id) OR its per-project slug (e.g. "AG-001") — slug lets a deploy
+ *       manifest register without knowing internal IDs.
  */
 app.post('/api/v1/projects/:id/servicenow/register-sysid', (req, res) => {
   const uid = userId(req);
@@ -5716,32 +5771,39 @@ app.post('/api/v1/projects/:id/servicenow/register-sysid', (req, res) => {
 
   const body = req.body || {};
   const regs = Array.isArray(body.registrations) ? body.registrations
-             : (body.entity_type && body.entity_id) ? [body] : null;
+             : (body.entity_type && (body.entity_id || body.slug)) ? [body] : null;
   if (!regs || !regs.length) {
-    return res.status(400).json({ error: 'Provide registrations:[{entity_type, entity_id, sys_id}] (or a single {entity_type, entity_id, sys_id}).' });
+    return res.status(400).json({ error: 'Provide registrations:[{entity_type, sys_id, entity_id|slug}] (or a single such object).' });
   }
 
   const registered = [], skipped = [];
   for (const r of regs) {
-    const entity_type = r && r.entity_type, entity_id = r && r.entity_id, sys_id = r && r.sys_id;
-    if (!entity_type || !entity_id || !sys_id) {
-      skipped.push({ entity_id: entity_id || null, reason: 'missing entity_type, entity_id, or sys_id' }); continue;
+    const entity_type = r && r.entity_type, sys_id = r && r.sys_id, slug = r && r.slug;
+    let entity_id = r && r.entity_id;
+    const ref = entity_id || slug || null;   // for reporting
+    if (!entity_type || !sys_id || (!entity_id && !slug)) {
+      skipped.push({ entity_id: ref, slug: slug || null, reason: 'missing entity_type, sys_id, or one of entity_id/slug' }); continue;
     }
     const ent = registry.byEntityType[entity_type];
     if (!ent || !ent.materializable || !ent.table || !ent.pk) {
-      skipped.push({ entity_id, reason: `unknown or non-materializable entity_type "${entity_type}"` }); continue;
+      skipped.push({ entity_id: ref, slug: slug || null, reason: `unknown or non-materializable entity_type "${entity_type}"` }); continue;
     }
     let row;
     try {
-      row = db.prepare(`SELECT ${ent.pk} AS pk, source_sys_id FROM ${ent.table} WHERE ${ent.pk} = ? AND project_id = ?`).get(entity_id, req.params.id);
+      if (!entity_id && slug) {
+        row = db.prepare(`SELECT ${ent.pk} AS pk, source_sys_id FROM ${ent.table} WHERE slug = ? AND project_id = ?`).get(slug, req.params.id);
+        if (row) entity_id = row.pk;
+      } else {
+        row = db.prepare(`SELECT ${ent.pk} AS pk, source_sys_id FROM ${ent.table} WHERE ${ent.pk} = ? AND project_id = ?`).get(entity_id, req.params.id);
+      }
     } catch (e) {
-      skipped.push({ entity_id, reason: `table ${ent.table} does not support ServiceNow links` }); continue;
+      skipped.push({ entity_id: ref, slug: slug || null, reason: `table ${ent.table} does not support ServiceNow links` }); continue;
     }
-    if (!row) { skipped.push({ entity_id, reason: 'not found in this project' }); continue; }
+    if (!row) { skipped.push({ entity_id: ref, slug: slug || null, reason: slug ? `slug "${slug}" not found in this project` : 'not found in this project' }); continue; }
     if (row.source_sys_id && row.source_sys_id !== sys_id) {
-      skipped.push({ entity_id, reason: `already linked to a different sys_id (${row.source_sys_id})` }); continue;
+      skipped.push({ entity_id, slug: slug || null, reason: `already linked to a different sys_id (${row.source_sys_id})` }); continue;
     }
-    if (row.source_sys_id === sys_id) { registered.push({ entity_id, sys_id, already_linked: true }); continue; }
+    if (row.source_sys_id === sys_id) { registered.push({ entity_id, slug: slug || null, sys_id, already_linked: true }); continue; }
     try {
       db.prepare(`
         UPDATE ${ent.table}
@@ -5752,9 +5814,9 @@ app.post('/api/v1/projects/:id/servicenow/register-sysid', (req, res) => {
          WHERE ${ent.pk} = ? AND project_id = ?
       `).run(sys_id, r.source_table || null, r.source_scope || project.servicenow_scope || null, uid, entity_id, req.params.id);
       auditLog(ent.table, entity_id, 'sn_register_sysid', { source_sys_id: null }, { source_sys_id: sys_id }, uid);
-      registered.push({ entity_id, sys_id });
+      registered.push({ entity_id, slug: slug || null, sys_id });
     } catch (e) {
-      skipped.push({ entity_id, reason: e.message });
+      skipped.push({ entity_id, slug: slug || null, reason: e.message });
     }
   }
 
@@ -6061,14 +6123,46 @@ function buildExportMarkdown(project, baseline, sections, data) {
 
   lines.push('### Deployment Sequence');
   lines.push('');
+  lines.push('0. **Initialize the project before installing.** A fresh project folder needs `npx now-sdk init --auth` to create the `sys_scope` record on the instance and write `scopeId` back into `now.config.json`. `now-sdk install` will **not** create the scope — it fails if `scopeId` is absent.');
   lines.push('1. Define `securityAcl` first (with `$id` and `type`)');
   lines.push('2. Configure tools — priority order: OOB → reference-based → CRUD → script (last resort)');
   lines.push('3. Author `instructions` referencing tool names explicitly; include failure contingencies');
   lines.push('4. Define `versionDetails`/`versions` (1+ required, `state: "published"`)');
-  lines.push('5. For workflows: deploy agents first, then reference their `sys_id`s in `team.members`');
+  lines.push('5. **Workflows reference agents by real `sys_id` — plan for a two-pass install.** On the first install, `team.members` referenced via the `Record()`/`Now.ID` coalesce create empty **stub** agent records rather than resolving to the real agents. Install once to obtain the real agent `sys_id`s, hardcode those strings into `team.members`, then rebuild and reinstall.');
   lines.push('6. Configure `triggerConfig` — agents use `"nap"` or `"nap_and_va"`; workflows use `"Now Assist Panel"`');
   lines.push('7. Validate: query `sn_aia_agent` (agents) or `sn_aia_usecase` (workflows) to verify deployment');
   lines.push('');
+
+  lines.push('### ⚠ Round-Trip Identity Rules (read before deploying)');
+  lines.push('');
+  lines.push('This design round-trips: artifacts you create here will later be re-captured and reconciled back into the Workbench. To prevent **duplicate** design records, preserve a stable identity link.');
+  lines.push('');
+  lines.push('**DO:**');
+  lines.push('- Embed the Workbench **identity tag** verbatim on its own trailing line of each artifact\'s `description` field. The tag format is `[[wb:<PROJECT_ID>/<SLUG>]]` — qualifying with the Project ID keeps it **globally unique across every instance and scope** (a bare slug like `AG-001` is only unique within one project).');
+  lines.push(`  - **This application\'s Project ID:** \`${project.project_id}\``);
+  lines.push('  - **`<SLUG>`** is the value printed in each artifact\'s section heading (e.g. `AG-001`, `T-003`, `WF-001`). Use the exact tags listed in the table below.');
+  lines.push('- Keep it **1:1** — one tag per ServiceNow record, matching exactly one source design record.');
+  lines.push('- After `now-sdk install`, fill in the **Post-Deploy: Register sys_ids** manifest at the bottom of this document and POST it (this records each returned `sys_id` onto its Workbench row).');
+  lines.push('');
+  lines.push('**DON\'T:**');
+  lines.push('- Don\'t remove or edit the `[[wb:...]]` tag once deployed — it is the durable identity key that lets a re-sync match even before sys_ids are registered.');
+  lines.push('- Don\'t split one Workbench artifact into multiple ServiceNow records without tagging **each** — an untagged extra record is classified NEW on the next sync (a duplicate candidate).');
+  lines.push('- Don\'t invent slugs or alter the Project ID. If a needed artifact has no slug here, leave it untagged and flag the design owner.');
+  lines.push('');
+  // Concrete, copy-paste-exact identity tags for every in-scope artifact (built from the same data
+  // the sections below render). Globally unique because each is qualified with the Project ID.
+  const tagRows = [];
+  for (const a of (data.agents || []))    if (a.slug) tagRows.push([`Agent: ${a.name}`,    a.slug]);
+  for (const w of (data.workflows || [])) if (w.slug) tagRows.push([`Workflow: ${w.name}`, w.slug]);
+  for (const t of (data.tools || []))     if (t.slug) tagRows.push([`Tool: ${t.name}`,     t.slug]);
+  if (tagRows.length) {
+    lines.push('**Identity tags for this application** (copy the exact tag into each record\'s `description`):');
+    lines.push('');
+    lines.push('| Artifact | Identity tag to embed |');
+    lines.push('|---|---|');
+    for (const [label, slug] of tagRows) lines.push(`| ${mdCell(label)} | \`[[wb:${project.project_id}/${slug}]]\` |`);
+    lines.push('');
+  }
 
   lines.push('### Tool Selection Priority (highest → lowest)');
   lines.push('');
@@ -6106,6 +6200,7 @@ function buildExportMarkdown(project, baseline, sections, data) {
   lines.push('- [ ] Using `runAs` on agents (use `runAsUser`)');
   lines.push('- [ ] Omitting `securityAcl` or `dataAccess` when `runAsUser`/`runAs` absent');
   lines.push('- [ ] Missing `$id` on `team` object in workflows');
+  lines.push('- [ ] Assuming `Record()`/`Now.ID` agent refs in `team.members` resolve on first install — they create empty stubs; do the two-pass install with real `sys_id`s (Deployment Sequence step 5)');
   lines.push('- [ ] Setting `team.description` manually (auto-populated — do not set)');
   lines.push('- [ ] Referencing "triggering record" in instructions — use "from the task" or "from the context"');
   lines.push('- [ ] Using `GlideRecord` in script tools — always use `GlideRecordSecure`');
@@ -6119,22 +6214,46 @@ function buildExportMarkdown(project, baseline, sections, data) {
   lines.push('Complete **all** items below before running `npx now-sdk install`.');
   lines.push('');
 
+  // Authentication & project initialization — done before anything else.
+  lines.push('### 0. Authentication & Project Initialization');
+  lines.push('');
+  lines.push('- [ ] Run `npx now-sdk auth --list` and confirm the credential alias for the target instance is set as **default** (starred). Authenticating mid-build is the single biggest time sink — resolve it first.');
+  lines.push('- [ ] For a fresh project folder, run `npx now-sdk init --auth` to create the `sys_scope` record on the instance and write `scopeId` into `now.config.json`. `now-sdk install` will not create the scope.');
+  lines.push('- [ ] Pin the build to this one project folder. Reading or writing other scoped-app folders mid-session risks cross-contamination.');
+  lines.push('');
+
   // Service accounts
   lines.push('### 1. Service Accounts');
   lines.push('');
-  lines.push('Create a dedicated service account on the target instance and record its `sys_id`.');
+  lines.push('Create (or identify) the `runAsUser` service account on the target instance and record its `sys_id`. If the account already exists, resolve its `sys_id` **now** and substitute it for the placeholder before install — this avoids a mid-build REST round-trip to look it up.');
   lines.push('');
-  lines.push('| Placeholder in SDK files | Purpose | Minimum Roles Required |');
+  // data.sn_runas is populated at export time by a live, read-only sys_user lookup
+  // of the project's configured account (null if not configured / unreachable).
+  const snRunAs = data.sn_runas || null;
+  if (snRunAs && snRunAs.sys_id) {
+    const who = [snRunAs.user_name, snRunAs.name].filter(Boolean).join(' — ');
+    lines.push(`> ✅ **\`runAsUser\` resolved live from the instance:** ${who ? `**${who}** → ` : ''}sys_id \`${snRunAs.sys_id}\`. Use this value directly — no manual lookup needed. (If your agents should run as a *different* dedicated service account, override it with that account's \`sys_id\`.)`);
+    lines.push('');
+  } else if (project.sn_user || project.servicenow_instance) {
+    const acct = project.sn_user || '(not set)';
+    const inst = project.servicenow_instance || '(not set)';
+    lines.push(`> **Configured for this project:** account **\`${acct}\`** on **\`${inst}\`**. Look this user up in \`sys_user\` and record its \`sys_id\` for the placeholder below.`);
+    lines.push('');
+  }
+  const runAsVal = (snRunAs && snRunAs.sys_id) ? `\`${snRunAs.sys_id}\`` : '`REPLACE_WITH_AGENT_SERVICE_ACCOUNT_SYS_ID`';
+  lines.push('| `runAsUser` value to use | Purpose | Minimum Roles Required |');
   lines.push('|---|---|---|');
   const agentsForPreflight = (data.agents || []);
   if (agentsForPreflight.length) {
     for (const a of agentsForPreflight) {
       const roles = a.access_requirements || 'See agent specification';
-      lines.push(`| \`REPLACE_WITH_AGENT_SERVICE_ACCOUNT_SYS_ID\` | Runtime identity for **${a.name}** | ${mdCell(roles)} |`);
+      lines.push(`| ${runAsVal} | Runtime identity for **${a.name}** | ${mdCell(roles)} |`);
     }
   } else {
-    lines.push('| `REPLACE_WITH_AGENT_SERVICE_ACCOUNT_SYS_ID` | Agent runtime service account | Verify with architect |');
+    lines.push(`| ${runAsVal} | Agent runtime service account | Verify with architect |`);
   }
+  lines.push('');
+  lines.push('> ⚠ **Now Assist Panel role:** any agent or workflow using the `nap` / `nap_and_va` channel will not appear in — or fire from — the Now Assist Panel unless the `runAsUser` account holds the **`now_assist_panel_user`** role. Verify this role is assigned before any end-to-end test.');
   lines.push('');
 
   // REST Message records
@@ -6218,8 +6337,15 @@ function buildExportMarkdown(project, baseline, sections, data) {
   lines.push('');
   lines.push('| Placeholder | What to substitute |');
   lines.push('|---|---|');
-  lines.push('| `REPLACE_WITH_AGENT_SERVICE_ACCOUNT_SYS_ID` | `sys_id` of the service account created in step 1 |');
-  lines.push('| `REPLACE_WITH_INSTANCE_URL` | Your ServiceNow instance URL (e.g. `https://myinstance.service-now.com`) |');
+  if (snRunAs && snRunAs.sys_id) {
+    lines.push(`| \`REPLACE_WITH_AGENT_SERVICE_ACCOUNT_SYS_ID\` | \`${snRunAs.sys_id}\` — resolved live from \`${snRunAs.user_name || project.sn_user}\` (override if using a different dedicated service account) |`);
+  } else {
+    lines.push('| `REPLACE_WITH_AGENT_SERVICE_ACCOUNT_SYS_ID` | `sys_id` of the service account from step 1 |');
+  }
+  const instSub = project.servicenow_instance
+    ? `\`${project.servicenow_instance}\` (configured for this project)`
+    : 'Your ServiceNow instance URL (e.g. `https://myinstance.service-now.com`)';
+  lines.push(`| \`REPLACE_WITH_INSTANCE_URL\` | ${instSub} |`);
   lines.push('');
 
   // Cost model verification (only if any agent uses SN Now Assist)
@@ -6840,6 +6966,29 @@ function buildExportMarkdown(project, baseline, sections, data) {
       lines.push('*Cost estimates are derived from AI-generated step skill bindings. Verify against actual usage post-deployment.*');
       lines.push('');
     }
+  }
+
+  // ── Post-Deploy: Register sys_ids ───────────────────────────────────────────
+  // Slug-keyed manifest the deployer fills with returned sys_ids and POSTs back, closing
+  // the round-trip identity loop so the next reverse-sync reconciles instead of duplicating.
+  const regRows = [];
+  for (const a of (data.agents || []))    if (a.slug) regRows.push({ entity_type: 'agent_spec', slug: a.slug, sys_id: '', source_table: 'sn_aia_agent' });
+  for (const w of (data.workflows || [])) if (w.slug) regRows.push({ entity_type: 'workflow',   slug: w.slug, sys_id: '', source_table: 'sn_aia_usecase' });
+  for (const t of (data.tools || []))     if (t.slug) regRows.push({ entity_type: 'tool',       slug: t.slug, sys_id: '', source_table: 'sn_aia_tool' });
+  if (regRows.length) {
+    lines.push('---'); lines.push('');
+    lines.push('## Post-Deploy: Register sys_ids');
+    lines.push('');
+    lines.push('After `now-sdk install`, look up each artifact\'s `sys_id` on the instance (query `sn_aia_agent` / `sn_aia_tool` / `sn_aia_usecase` by name), paste it into the matching row below, then POST the whole body to:');
+    lines.push('');
+    lines.push(`\`POST /api/v1/projects/${project.project_id}/servicenow/register-sysid\``);
+    lines.push('');
+    lines.push('This records each `sys_id` onto its Workbench row so the next ServiceNow → Workbench sync reconciles these records in place instead of creating duplicates. Rows are keyed by **slug** — no internal IDs needed.');
+    lines.push('');
+    lines.push('```json');
+    lines.push(JSON.stringify({ registrations: regRows }, null, 2));
+    lines.push('```');
+    lines.push('');
   }
 
   // ── Footer ─────────────────────────────────────────────────────────────────

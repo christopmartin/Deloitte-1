@@ -82,6 +82,46 @@ function findWbBySysId(projectId, sysId) {
 }
 
 /**
+ * Parse a Workbench identity tag embedded in a captured artifact's description. This is the durable
+ * round-trip key written into ServiceNow at deploy time — it survives renames (the CMTest- prefix /
+ * snake_case touch `name`, not the tagged description).
+ *
+ * Two forms are accepted:
+ *   - Qualified (globally unique across instances/scopes): "[[wb:<project_id>/AG-001]]"
+ *   - Bare (project-local, legacy): "[[wb:AG-001]]"
+ * Slugs are only unique PER PROJECT, so the qualified form is required to be unambiguous when one
+ * ServiceNow instance hosts apps from more than one Workbench project. Returns
+ * { projectId|null, slug } or null.
+ */
+function parseWbTag(salient) {
+  const text = (salient && salient.description) || '';
+  // Qualified first: project id (anything up to the '/') then the slug.
+  let m = /\[\[wb:([^/\]]+)\/([A-Z]+-\d+)\]\]/.exec(text);
+  if (m) return { projectId: m[1], slug: m[2] };
+  // Bare fallback: slug only.
+  m = /\[\[wb:([A-Z]+-\d+)\]\]/.exec(text);
+  if (m) return { projectId: null, slug: m[1] };
+  return null;
+}
+
+/** Find the Workbench record for a per-project slug (round-trip self-heal fallback). */
+function findWbBySlug(projectId, slug) {
+  if (!slug) return null;
+  for (const t of WB_PROVENANCE_TABLES) {
+    let row;
+    try {
+      row = db.prepare(
+        `SELECT ${t.pk} AS id, ${t.nameCol} AS name, source_hash, source_sys_id, slug
+         FROM ${t.table} WHERE slug = ? AND project_id = ?
+           AND (lifecycle_status IS NULL OR lifecycle_status != 'retired') LIMIT 1`
+      ).get(slug, projectId);
+    } catch { continue; }   // table without slug/provenance columns — skip
+    if (row) return { ...row, table: t.table, type: t.type };
+  }
+  return null;
+}
+
+/**
  * Deterministic pre-diff (no LLM). Classify captured SN artifacts against the linked
  * Workbench project. Only `changed` + `new` (+ later `ambiguous`) need Opus; `unchanged`
  * skip the LLM; `drift` (in Workbench, absent from SN) is flagged and NEVER deleted.
@@ -92,7 +132,16 @@ function classifyArtifacts(artifacts, projectId) {
   for (const a of artifacts) {
     if (a.__error) { res.errors.push(a.__error); continue; }
     seen.add(a.source_sys_id);
-    const wb = findWbBySysId(projectId, a.source_sys_id);
+    // Match by sys_id first; if the row was deployed-from-Workbench but never had its sys_id
+    // registered, fall back to the embedded identity tag so it reconciles instead of duplicating.
+    let wb = findWbBySysId(projectId, a.source_sys_id);
+    if (!wb) {
+      const tag = parseWbTag(a.salient);
+      // A qualified tag must name THIS project; a tag for another project belongs to a different
+      // design and must NOT be folded in here. Slugs are only unique per project. A bare (legacy)
+      // tag is matched within the syncing project on a best-effort basis.
+      if (tag && (!tag.projectId || tag.projectId === projectId)) wb = findWbBySlug(projectId, tag.slug);
+    }
     if (!wb) { res.new.push(a); continue; }
     if (wb.source_hash && wb.source_hash === a.hash) {
       res.unchanged.push({ ...a, wb_id: wb.id, wb_table: wb.table });
@@ -122,4 +171,4 @@ function classifyArtifacts(artifacts, projectId) {
   return res;
 }
 
-module.exports = { SN_SURFACES, WB_PROVENANCE_TABLES, hashArtifact, captureScope, findWbBySysId, classifyArtifacts };
+module.exports = { SN_SURFACES, WB_PROVENANCE_TABLES, hashArtifact, captureScope, findWbBySysId, findWbBySlug, parseWbTag, classifyArtifacts };

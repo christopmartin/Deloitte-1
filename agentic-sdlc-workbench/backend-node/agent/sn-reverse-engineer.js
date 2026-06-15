@@ -237,7 +237,12 @@ async function reverseEngineerOne(artifact, ctx = {}) {
     max_tokens: maxTokens,
     system: withWiki(systemBlocks),
     tools: [tool],
-    tool_choice: { type: 'tool', name: tool.name },
+    // The API rejects a forced tool_choice while extended thinking is enabled
+    // ("Thinking may not be enabled when tool_choice forces tool use"). When thinking
+    // is on we use 'auto' (the single tool + prompt still reliably elicits the call,
+    // same as the reconcile/review stages); when off we force the tool for a
+    // guaranteed structured emit.
+    tool_choice: thinkCfg ? { type: 'auto' } : { type: 'tool', name: tool.name },
     messages: [{ role: 'user', content: userMessageFor(artifact) }],
   };
   if (thinkCfg) { req.thinking = thinkCfg.thinking; if (thinkCfg.outputConfig) req.output_config = thinkCfg.outputConfig; }

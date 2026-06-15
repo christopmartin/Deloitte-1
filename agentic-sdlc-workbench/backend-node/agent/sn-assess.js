@@ -37,10 +37,10 @@ function makeClient({ instance, user, pw, fetchImpl }) {
   const headers = { Authorization: auth, Accept: 'application/json' };
   return {
     base,
-    async get(pathAndQuery) {
+    async get(pathAndQuery, init) {
       const url = `${base}${pathAndQuery}`;
       try {
-        const r = await f(url, { headers });
+        const r = await f(url, { headers, ...(init || {}) });
         let json = null;
         try { json = await r.json(); } catch { /* non-JSON / empty */ }
         return { ok: r.ok, status: r.status, json, totalCount: r.headers && r.headers.get ? r.headers.get('x-total-count') : null };
@@ -250,4 +250,33 @@ function catalogMeta(c) {
   return { table: c.table, captureType: c.captureType, wbDesignType: c.wbDesignType, mappingStatus: c.mappingStatus, complexityWeight: c.complexityWeight };
 }
 
-module.exports = { assessInstance, capacityVerdict };
+/**
+ * Resolve a ServiceNow user's sys_id from their login (user_name). Read-only —
+ * a single Table API GET against sys_user. Used to fill the runAsUser sys_id into
+ * the Build Spec so the placeholder doesn't have to be looked up by hand.
+ * Returns { sys_id, user_name, name } on success, or null if not found / on any error.
+ * Never throws — callers treat null as "leave the placeholder in place".
+ * @param {{instance,user,pw,lookupUser?,timeoutMs?,fetchImpl?}} opts
+ *   lookupUser defaults to the connecting `user` (the common single-account case).
+ */
+async function resolveUserSysId({ instance, user, pw, lookupUser, timeoutMs, fetchImpl } = {}) {
+  const login = lookupUser || user;
+  if (!instance || !user || !pw || !login) return null;
+  try {
+    const client = makeClient({ instance, user, pw, fetchImpl });
+    const init = (typeof AbortSignal !== 'undefined' && AbortSignal.timeout)
+      ? { signal: AbortSignal.timeout(timeoutMs || 8000) }
+      : undefined;
+    const r = await client.get(
+      `/api/now/table/sys_user?sysparm_query=${q(`user_name=${login}`)}&sysparm_fields=sys_id,user_name,name&sysparm_limit=1`,
+      init
+    );
+    const row = r.ok && r.json && Array.isArray(r.json.result) ? r.json.result[0] : null;
+    if (row && row.sys_id) return { sys_id: row.sys_id, user_name: row.user_name, name: row.name };
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+module.exports = { assessInstance, capacityVerdict, resolveUserSysId };
