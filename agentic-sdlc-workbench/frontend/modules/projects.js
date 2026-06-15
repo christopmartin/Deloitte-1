@@ -209,6 +209,98 @@ function renderDetail(p, pane) {
   idSection.appendChild(grid);
   body.appendChild(idSection);
 
+  // ── ServiceNow Connection ────────────────────────────────────────────────────
+  const snSection = el('div', { className: 'detail-section' });
+  snSection.appendChild(el('h4', {}, 'ServiceNow Connection'));
+  snSection.appendChild(el('p', { className: 'text-muted text-sm', style: 'margin-bottom:12px' },
+    'Connect this application to a live ServiceNow instance. Once configured, use Administration → ServiceNow Sync to reverse-engineer the design from the running app.'));
+
+  const snGrid = el('div', { className: 'meta-grid' });
+
+  const snInstanceWrap = el('div', { className: 'meta-item', style: 'grid-column:span 2' });
+  snInstanceWrap.appendChild(el('div', { className: 'meta-key' }, 'Instance URL'));
+  const snInstanceInput = el('input', { type: 'text', className: 'form-input', placeholder: 'https://example.service-now.com' });
+  snInstanceInput.value = p.servicenow_instance || '';
+  snInstanceWrap.appendChild(snInstanceInput);
+  snGrid.appendChild(snInstanceWrap);
+
+  const snScopeWrap = el('div', { className: 'meta-item' });
+  snScopeWrap.appendChild(el('div', { className: 'meta-key' }, 'Application Scope'));
+  const snScopeInput = el('input', { type: 'text', className: 'form-input', placeholder: 'x_acme_myapp' });
+  snScopeInput.value = p.servicenow_scope || '';
+  snScopeWrap.appendChild(snScopeInput);
+  snGrid.appendChild(snScopeWrap);
+
+  const snSysAppWrap = el('div', { className: 'meta-item' });
+  snSysAppWrap.appendChild(el('div', { className: 'meta-key' }, 'Sys App ID (optional)'));
+  const snSysAppInput = el('input', { type: 'text', className: 'form-input', placeholder: 'b9c3fc870aa5…' });
+  snSysAppInput.value = p.servicenow_sys_app_id || '';
+  snSysAppWrap.appendChild(snSysAppInput);
+  snGrid.appendChild(snSysAppWrap);
+
+  const snUserWrap = el('div', { className: 'meta-item' });
+  snUserWrap.appendChild(el('div', { className: 'meta-key' }, 'Username'));
+  const snUserInput = el('input', { type: 'text', className: 'form-input', placeholder: 'svc_account' });
+  snUserInput.value = p.sn_user || '';
+  snUserWrap.appendChild(snUserInput);
+  snGrid.appendChild(snUserWrap);
+
+  const snPwWrap = el('div', { className: 'meta-item' });
+  snPwWrap.appendChild(el('div', { className: 'meta-key' }, 'Password'));
+  const snPwInput = el('input', { type: 'password', className: 'form-input',
+    placeholder: p.has_sn_password ? '(stored — enter to update)' : 'Enter password' });
+  snPwWrap.appendChild(snPwInput);
+  snGrid.appendChild(snPwWrap);
+
+  snSection.appendChild(snGrid);
+
+  const snCredStatus = el('div', { style: 'font-size:12px;color:var(--text-muted);margin-top:8px;margin-bottom:10px' },
+    p.has_sn_password
+      ? `Credentials stored for "${p.sn_user || '(user not set)'}". Leave password blank to keep existing.`
+      : 'No stored credentials — global SN_USER / SN_PASSWORD env vars will be used as fallback.');
+  snSection.appendChild(snCredStatus);
+
+  const saveSnBtn = el('button', { className: 'btn btn-secondary btn-sm' }, 'Save connection');
+  const clearSnBtn = el('button', { className: 'btn btn-ghost btn-sm', style: 'margin-left:8px' }, 'Clear credentials');
+
+  saveSnBtn.addEventListener('click', async () => {
+    saveSnBtn.disabled = true;
+    try {
+      const payload = {
+        servicenow_instance: snInstanceInput.value.trim() || null,
+        servicenow_scope: snScopeInput.value.trim() || null,
+        servicenow_sys_app_id: snSysAppInput.value.trim() || null,
+        sn_user: snUserInput.value.trim() || null,
+      };
+      if (snPwInput.value) payload.sn_password = snPwInput.value;
+      const updated = await apiFetch(`/projects/${p.project_id}/servicenow-link`, {
+        method: 'POST', body: JSON.stringify(payload),
+      });
+      snPwInput.value = '';
+      snCredStatus.textContent = updated.has_sn_password
+        ? `Credentials stored for "${updated.sn_user || '(user not set)'}". Leave password blank to keep existing.`
+        : 'No stored credentials — global SN_USER / SN_PASSWORD env vars will be used as fallback.';
+      showToast('ServiceNow connection saved.', 'success');
+    } catch (err) { showToast('Save failed: ' + err.message, 'error'); }
+    finally { saveSnBtn.disabled = false; }
+  });
+
+  clearSnBtn.addEventListener('click', async () => {
+    if (!confirm('Clear stored ServiceNow credentials? The server env vars will be used as fallback.')) return;
+    clearSnBtn.disabled = true;
+    try {
+      await apiFetch(`/projects/${p.project_id}/servicenow-credentials`, { method: 'DELETE' });
+      snUserInput.value = '';
+      snPwInput.value = '';
+      snCredStatus.textContent = 'No stored credentials — global SN_USER / SN_PASSWORD env vars will be used as fallback.';
+      showToast('Credentials cleared.', 'success');
+    } catch (err) { showToast('Clear failed: ' + err.message, 'error'); }
+    finally { clearSnBtn.disabled = false; }
+  });
+
+  snSection.appendChild(el('div', {}, saveSnBtn, clearSnBtn));
+  body.appendChild(snSection);
+
   // Reuse scope
   const reuseSection = el('div', { className: 'detail-section' });
   reuseSection.appendChild(el('h4', {}, 'Reuse Scope'));

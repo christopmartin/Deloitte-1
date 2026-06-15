@@ -101,6 +101,12 @@ export async function render(container) {
     el('div', {}, el('strong', {}, 'Instance: '), project.servicenow_instance || '(from server SN_INSTANCE env)'),
     project.sn_last_synced_at ? el('div', {}, el('strong', {}, 'Last synced: '), project.sn_last_synced_at) : null));
 
+  // ── Credential status (read-only — edit in Applications Admin) ─────────────
+  linkBody.appendChild(el('div', { style: 'font-size:12px;color:var(--text-muted);margin-bottom:14px' },
+    project.has_sn_password
+      ? `Credentials: ${project.sn_user || '(user not set)'} / •••••••• — edit in Applications Admin.`
+      : 'No stored credentials — using server SN_USER / SN_PASSWORD env vars. Configure per-project credentials in Applications Admin.'));
+
   const previewBtn = el('button', { className: 'btn btn-secondary' }, 'Preview sync (dry run)');
   const runBtn = el('button', { className: 'btn btn-primary', style: 'margin-left:10px' }, 'Run sync');
   const out = el('div', { style: 'margin-top:16px' });

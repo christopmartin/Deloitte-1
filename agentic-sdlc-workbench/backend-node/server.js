@@ -7,11 +7,22 @@ const path = require('path');
 const fs = require('fs');
 const express = require('express');
 const { db, generateId, auditLog, nextSlug, getSetting, setSetting } = require('./db');
+const { encrypt: encryptField, decrypt: decryptField } = require('./crypto-util');
 const registry = require('./agent/entity-registry');
 const { deriveSwimlane } = require('./agent/swimlane-deriver');
 const { relinkOrphanRequirements, repairProjectDesign } = require('./agent/design-repair');
 const aiConfig = require('./agent/ai-config');
 const reviewQueue = require('./agent/review-queue');
+const { withWiki } = require('./agent/wiki-context');
+
+// Strip the encrypted password from a project row before sending to the client.
+// Returns sn_user (plaintext) and has_sn_password (boolean) instead.
+function scrubProject(project) {
+  if (!project) return project;
+  const { sn_password_enc, ...rest } = project;
+  rest.has_sn_password = !!(sn_password_enc);
+  return rest;
+}
 
 // Phase 1 enum constants (Decisions #2, #16, #17, #18) — used for validation
 // in PUT endpoints. SQLite CHECK constraints back-stop these, but validating
@@ -242,7 +253,7 @@ app.get('/api/v1/projects', (req, res) => {
   const params = [];
   if (client_id) { sql += ' AND p.client_id = ?'; params.push(client_id); }
   sql += ' ORDER BY p.updated_at DESC';
-  res.json(db.prepare(sql).all(...params));
+  res.json(db.prepare(sql).all(...params).map(scrubProject));
 });
 
 app.get('/api/v1/projects/:id', (req, res) => {
@@ -261,7 +272,7 @@ app.get('/api/v1/projects/:id', (req, res) => {
     WHERE pm.project_id = ? AND pm.active = 1
   `).all(req.params.id);
 
-  res.json({ ...project, members });
+  res.json({ ...scrubProject(project), members });
 });
 
 // ── Clients ──────────────────────────────────────────────────────────────────
@@ -317,25 +328,57 @@ app.post('/api/v1/projects', (req, res) => {
          servicenow_scope || null, servicenow_sys_app_id || null, servicenow_instance || null, uid, uid);
   const created = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(id);
   auditLog('asdlc_project', id, 'INSERT', null, created, uid);
-  res.status(201).json(created);
+  res.status(201).json(scrubProject(created));
 });
 
 // ── ServiceNow round-trip: link a Workbench Application to a ServiceNow app ──
-// Set/clear the link (scope + sys_app id + instance) on a project.
+// Set/clear the link (scope + sys_app id + instance + optional per-project credentials).
+// sn_password = "" clears stored credentials; omitted = leave existing creds unchanged.
 app.post('/api/v1/projects/:id/servicenow-link', (req, res) => {
   const uid = userId(req);
   const existing = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Project not found' });
-  const { servicenow_scope, servicenow_sys_app_id, servicenow_instance } = req.body || {};
+  const { servicenow_scope, servicenow_sys_app_id, servicenow_instance, sn_user, sn_password } = req.body || {};
+
+  // Credential handling: explicit empty string → clear; absent → keep existing; value → encrypt+store.
+  let newSnUser = existing.sn_user;
+  let newSnPasswordEnc = existing.sn_password_enc;
+  if (sn_password === '') {
+    newSnUser = null;
+    newSnPasswordEnc = null;
+  } else if (typeof sn_password === 'string' && sn_password.length > 0) {
+    newSnUser = typeof sn_user === 'string' ? sn_user : (existing.sn_user || null);
+    newSnPasswordEnc = encryptField(sn_password);
+  } else if (typeof sn_user === 'string') {
+    newSnUser = sn_user || null;
+  }
+
   db.prepare(`
     UPDATE asdlc_project
        SET servicenow_scope = ?, servicenow_sys_app_id = ?, servicenow_instance = ?,
+           sn_user = ?, sn_password_enc = ?,
            updated_by = ?, updated_at = datetime('now')
      WHERE project_id = ?
-  `).run(servicenow_scope || null, servicenow_sys_app_id || null, servicenow_instance || null, uid, req.params.id);
+  `).run(servicenow_scope || null, servicenow_sys_app_id || null, servicenow_instance || null,
+         newSnUser, newSnPasswordEnc, uid, req.params.id);
   const after = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(req.params.id);
   auditLog('asdlc_project', req.params.id, 'UPDATE', existing, after, uid);
-  res.json(after);
+  res.json(scrubProject(after));
+});
+
+// ── Clear per-project ServiceNow credentials (revert to env-var fallback) ──────
+app.delete('/api/v1/projects/:id/servicenow-credentials', (req, res) => {
+  const uid = userId(req);
+  const existing = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Project not found' });
+  db.prepare(`
+    UPDATE asdlc_project SET sn_user = NULL, sn_password_enc = NULL,
+           updated_by = ?, updated_at = datetime('now')
+     WHERE project_id = ?
+  `).run(uid, req.params.id);
+  const after = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(req.params.id);
+  auditLog('asdlc_project', req.params.id, 'UPDATE', existing, after, uid);
+  res.json(scrubProject(after));
 });
 
 // Resolve the Workbench project linked to a ServiceNow sys_app id (or scope) —
@@ -348,6 +391,71 @@ app.get('/api/v1/servicenow/resolve-project', (req, res) => {
     ? db.prepare("SELECT project_id, project_name, servicenow_scope, servicenow_sys_app_id, sn_last_synced_at FROM asdlc_project WHERE servicenow_sys_app_id = ? AND (lifecycle_status IS NULL OR lifecycle_status != 'retired') LIMIT 1").get(sysApp)
     : db.prepare("SELECT project_id, project_name, servicenow_scope, servicenow_sys_app_id, sn_last_synced_at FROM asdlc_project WHERE servicenow_scope = ? AND (lifecycle_status IS NULL OR lifecycle_status != 'retired') LIMIT 1").get(scope);
   res.json({ project: row || null });
+});
+
+// ── ServiceNow instance assessment / fit analysis (Phase 0, read-only) ────────
+// Resolve credentials (body → project link → env), insert a `running` row, then run
+// the read-only discovery off the request path (202 + poll), mirroring ingest/process.
+const snAssess = require('./agent/sn-assess');
+
+app.post('/api/v1/projects/:id/servicenow/assess', (req, res) => {
+  const uid = userId(req);
+  const project = db.prepare("SELECT * FROM asdlc_project WHERE project_id=?").get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const body = req.body || {};
+  const instance = body.instance || project.servicenow_instance || process.env.SN_INSTANCE;
+  const user = body.user || project.sn_user || process.env.SN_USER;
+  const pw   = body.pw   || decryptField(project.sn_password_enc) || process.env.SN_PASSWORD;
+  if (!instance || !user || !pw) {
+    return res.status(400).json({ error: 'ServiceNow credentials required (set them on the Application, or SN_INSTANCE/SN_USER/SN_PASSWORD env).' });
+  }
+  // scopes: explicit list in body, else the project's linked scope, else whole-instance discovery.
+  const scopes = Array.isArray(body.scopes) && body.scopes.length
+    ? body.scopes
+    : (project.servicenow_scope ? [project.servicenow_scope] : undefined);
+
+  const aid = generateId();
+  db.prepare(`
+    INSERT INTO asdlc_sn_assessment (assessment_id, project_id, instance_url, scopes_json, status, created_by, created_at, updated_at)
+    VALUES (?,?,?,?,'running',?,datetime('now'),datetime('now'))
+  `).run(aid, project.project_id, instance.replace(/\/$/, ''), JSON.stringify(scopes || []), uid);
+  res.status(202).json({ assessment_id: aid, status: 'running' });
+
+  // Fire-and-forget; persist result (or error) back onto the row.
+  (async () => {
+    try {
+      const report = await snAssess.assessInstance({ instance, user, pw, scopes });
+      report.assessed_at = new Date().toISOString();
+      const v = report.capacity_verdict || {};
+      const cov = report.coverage_summary || {};
+      const summary = `${report.version && report.version.family ? report.version.family : 'unknown'} · ${report.volume.total_artifacts} artifacts · capacity ${v.level || '?'} · coverage ${cov.mapped || 0} mapped/${cov.partial || 0} partial/${cov.unmapped || 0} unmapped`;
+      db.prepare("UPDATE asdlc_sn_assessment SET status='complete', report_json=?, summary=?, updated_at=datetime('now') WHERE assessment_id=?")
+        .run(JSON.stringify(report), summary, aid);
+    } catch (err) {
+      console.error('[sn-assess] failed:', err.message);
+      db.prepare("UPDATE asdlc_sn_assessment SET status='failed', error=?, updated_at=datetime('now') WHERE assessment_id=?")
+        .run(String(err.message).slice(0, 1000), aid);
+    }
+  })();
+});
+
+// List assessments for a project (newest first; no heavy report_json).
+app.get('/api/v1/projects/:id/servicenow/assessments', (req, res) => {
+  const rows = db.prepare(`
+    SELECT assessment_id, project_id, instance_url, scopes_json, status, summary, error, created_by, created_at, updated_at
+    FROM asdlc_sn_assessment WHERE project_id=? ORDER BY created_at DESC LIMIT 50
+  `).all(req.params.id);
+  res.json(rows);
+});
+
+// Fetch one assessment with its full report.
+app.get('/api/v1/projects/:id/servicenow/assessments/:aid', (req, res) => {
+  const row = db.prepare("SELECT * FROM asdlc_sn_assessment WHERE assessment_id=? AND project_id=?")
+    .get(req.params.aid, req.params.id);
+  if (!row) return res.status(404).json({ error: 'Assessment not found' });
+  let report = null;
+  try { report = row.report_json ? JSON.parse(row.report_json) : null; } catch { /* leave null */ }
+  res.json({ ...row, report });
 });
 
 // ── ServiceNow round-trip: sync apply-mode (system setting) ──────────────────
@@ -394,7 +502,7 @@ app.put('/api/v1/projects/:id', (req, res) => {
          uid, req.params.id);
   const updated = db.prepare('SELECT * FROM asdlc_project WHERE project_id = ?').get(req.params.id);
   auditLog('asdlc_project', req.params.id, 'UPDATE', existing, updated, uid);
-  res.json(updated);
+  res.json(scrubProject(updated));
 });
 
 // ──────────────────────────────────────────────
@@ -3422,6 +3530,7 @@ OUTPUT FORMAT:
     const message = await client.messages.create({
       model,
       max_tokens: aiConfig.getMaxTokens(),
+      system: withWiki(),
       messages: [{ role: 'user', content: prompt }]
     });
     // Record token usage so this Opus call shows up in the /usage cost dashboards
@@ -5868,7 +5977,7 @@ async function generateBuildReview(project, md) {
   const resp = await client.messages.create({
     model,
     max_tokens: 2048,
-    system,
+    system: withWiki(system),
     messages: [{ role: 'user', content: `Here is the build specification to review:\n\n${md}` }],
   });
   aiConfig.logUsage({ projectId: project.project_id, source: 'build_review', refId: project.project_id, model, usage: resp.usage });
@@ -7398,8 +7507,8 @@ app.post('/api/v1/projects/:id/servicenow/sync', async (req, res) => {
   const scope = body.scope || project.servicenow_scope;
   if (!scope) return res.status(400).json({ error: 'Project is not linked to a ServiceNow scope (set servicenow_scope first).' });
   const instance = body.instance || project.servicenow_instance || process.env.SN_INSTANCE;
-  const user = body.user || process.env.SN_USER;
-  const pw   = body.pw   || process.env.SN_PASSWORD;
+  const user = body.user || project.sn_user              || process.env.SN_USER;
+  const pw   = body.pw   || decryptField(project.sn_password_enc) || process.env.SN_PASSWORD;
   const artifacts = body.artifacts;   // test / pre-capture hook: skip the live REST pull
   if (!artifacts && (!instance || !user || !pw)) {
     return res.status(400).json({ error: 'ServiceNow credentials required (instance/user/pw in body, or SN_INSTANCE/SN_USER/SN_PASSWORD env).' });

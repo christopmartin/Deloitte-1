@@ -12,23 +12,10 @@
 'use strict';
 const crypto = require('crypto');
 const { db } = require('../db');
-
-// SN metadata tables we capture, with the salient fields used for hashing/identity.
-// (Covers AI-agent apps + data-centric apps; missing tables on an instance are skipped.)
-const SN_SURFACES = [
-  { table: 'sn_aia_agent',       type: 'agent',          fields: ['name', 'role', 'description', 'instructions'] },
-  { table: 'sn_aia_usecase',     type: 'use_case',       fields: ['name', 'description'] },
-  { table: 'sn_aia_tool',        type: 'tool',           fields: ['name', 'type', 'description'] },
-  { table: 'sys_db_object',      type: 'data_model',     fields: ['name', 'label', 'super_class'] },
-  { table: 'sys_script',         type: 'business_rule',  fields: ['name', 'collection', 'when', 'condition', 'script'] },
-  { table: 'sys_script_client',  type: 'client_script',  fields: ['name', 'table', 'type', 'script'] },
-  { table: 'sys_script_include', type: 'script_include', fields: ['name', 'script'] },
-  { table: 'sys_ui_action',      type: 'ui_action',      fields: ['name', 'table', 'script'] },
-  { table: 'sys_ui_policy',      type: 'ui_policy',      fields: ['short_description', 'table'] },
-  { table: 'sys_ui_form',        type: 'form',           fields: ['name', 'view'] },
-  { table: 'sc_cat_item',        type: 'catalog_item',   fields: ['name', 'short_description'] },
-  { table: 'sys_hub_flow',       type: 'flow',           fields: ['name'] },
-];
+// SN metadata surfaces we capture, sourced from the shared target-table catalog
+// (sn-catalog.js) so capture and assessment stay in lockstep. Missing tables on an
+// instance are skipped. Covers AI-agent apps + data-centric apps.
+const { SN_SURFACES } = require('./sn-catalog');
 
 // Workbench tables that carry Level-2 provenance (where SN-sourced records live).
 const WB_PROVENANCE_TABLES = [

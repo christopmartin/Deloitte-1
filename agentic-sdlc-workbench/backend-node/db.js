@@ -244,6 +244,33 @@ const MIGRATIONS = [
   "ALTER TABLE asdlc_ingest_document  ADD COLUMN platform TEXT",
   "ALTER TABLE asdlc_best_practice    ADD COLUMN platform TEXT NOT NULL DEFAULT 'any'",
 
+  // ── Per-project ServiceNow credentials ───────────────────────────────────────
+  // Credentials are per-project so each Application can target a different SN
+  // instance with its own login. sn_password_enc is AES-256-GCM encrypted by
+  // crypto-util.js using ASDLC_ENCRYPT_KEY; sn_user is stored in plaintext.
+  // Absent = fall back to SN_USER / SN_PASSWORD environment variables.
+  "ALTER TABLE asdlc_project ADD COLUMN sn_user TEXT",
+  "ALTER TABLE asdlc_project ADD COLUMN sn_password_enc TEXT",
+
+  // ── ServiceNow instance assessment / fit analysis (Phase 0, read-only) ────────
+  // One row per assessment run. report_json holds the full fit analysis (version,
+  // capability matrix, scope census, coverage map, volume/cost, capacity verdict,
+  // recommended import profile). status: running|complete|failed. History kept.
+  `CREATE TABLE IF NOT EXISTS asdlc_sn_assessment (
+     assessment_id TEXT PRIMARY KEY,
+     project_id    TEXT REFERENCES asdlc_project(project_id),
+     instance_url  TEXT,
+     scopes_json   TEXT NOT NULL DEFAULT '[]',
+     status        TEXT NOT NULL DEFAULT 'running',
+     report_json   TEXT,
+     summary       TEXT,
+     error         TEXT,
+     created_by    TEXT,
+     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+   )`,
+  "CREATE INDEX IF NOT EXISTS idx_sn_assessment_project ON asdlc_sn_assessment(project_id, created_at)",
+
   // ── Materialize core design elements from BRD ingest ─────────────────────────
   // Guardrails + data sources become first-class design rows; user stories get a
   // thin traceability home (narrative + requirement_refs slugs, no duplicated AC
