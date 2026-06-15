@@ -1,6 +1,6 @@
 // build_export.js — Build Export module for Agentic SDLC Workbench
 // Exports a complete application design as a Markdown build spec for Claude Code / ServiceNow.
-import { apiFetch, getCurrentProjectId, el, showToast } from '../app.js';
+import { apiFetch, getCurrentProjectId, el, showToast, navigate } from '../app.js';
 
 // ─── Section groups ───────────────────────────────────────────────────────────
 const SECTION_GROUPS = [
@@ -47,6 +47,7 @@ let _baselineSelect  = null;
 let _downloadBtn     = null;
 let _snDeltaBtn      = null;
 let _snDeltaNote     = null;
+let _snDeltaCpList   = null;
 let _previewEl       = null;
 let _allCheckboxes   = [];
 let _aiReviewChk     = null;
@@ -273,6 +274,62 @@ function injectStyles() {
       line-height: 1.4;
       text-align: center;
     }
+
+    /* Deploy to SN direction header */
+    .be-sn-deploy-header {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin-top: 4px;
+      margin-bottom: 2px;
+    }
+    .be-sn-deploy-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--color-text);
+    }
+    .be-sn-deploy-direction {
+      font-size: 11px;
+      color: var(--color-text-muted);
+    }
+
+    /* CP breakdown list */
+    .be-sn-cp-list {
+      margin-top: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .be-sn-cp-item {
+      font-size: 11px;
+      color: var(--color-text-muted);
+      background: var(--color-bg);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius);
+      padding: 5px 9px;
+      line-height: 1.4;
+    }
+    .be-sn-cp-code {
+      font-weight: 600;
+      color: var(--color-text);
+    }
+    .be-sn-cp-date {
+      float: right;
+      font-size: 10px;
+      color: var(--color-text-muted);
+    }
+
+    /* Cross-reference link to Sync module */
+    .be-sn-cross-link {
+      display: block;
+      margin-top: 10px;
+      font-size: 11px;
+      color: var(--color-accent);
+      text-align: center;
+      cursor: pointer;
+      text-decoration: none;
+    }
+    .be-sn-cross-link:hover { text-decoration: underline; }
   `;
   document.head.appendChild(style);
 }
@@ -395,7 +452,13 @@ function buildControls(card, projects) {
   _downloadBtn.addEventListener('click', handleDownload);
   card.appendChild(_downloadBtn);
 
-  // ── SN Delta export button ────────────────────────────────────────────────
+  // ── Deploy to ServiceNow section ──────────────────────────────────────────
+  const snDeployHdr = el('div', { className: 'be-sn-deploy-header', style: 'display:none' },
+    el('span', { className: 'be-sn-deploy-title' }, 'Deploy to ServiceNow'),
+    el('span', { className: 'be-sn-deploy-direction' }, 'Outbound: Workbench → ServiceNow')
+  );
+  card.appendChild(snDeployHdr);
+
   _snDeltaBtn = el('button', { className: 'be-sn-delta-btn', style: 'display:none', disabled: true },
     '⬇  Export SN Delta');
   _snDeltaBtn.addEventListener('click', handleSnDeltaDownload);
@@ -403,6 +466,12 @@ function buildControls(card, projects) {
 
   _snDeltaNote = el('div', { className: 'be-sn-delta-note', style: 'display:none' }, '');
   card.appendChild(_snDeltaNote);
+
+  _snDeltaCpList = el('div', { className: 'be-sn-cp-list', style: 'display:none' });
+  card.appendChild(_snDeltaCpList);
+
+  // Store reference to direction header so loadSnDeltaInfo can show/hide it
+  _snDeltaBtn._deployHdr = snDeployHdr;
 
   // ── Wire project change ───────────────────────────────────────────────────
   projectSelect.addEventListener('change', async () => {
@@ -435,8 +504,13 @@ function buildControls(card, projects) {
 // ─── SN Delta helpers ─────────────────────────────────────────────────────────
 
 function hideSnDeltaBtn() {
-  if (_snDeltaBtn)  { _snDeltaBtn.style.display  = 'none'; _snDeltaBtn.disabled = true; }
-  if (_snDeltaNote) { _snDeltaNote.style.display = 'none'; _snDeltaNote.textContent = ''; }
+  if (_snDeltaBtn)  {
+    _snDeltaBtn.style.display  = 'none';
+    _snDeltaBtn.disabled = true;
+    if (_snDeltaBtn._deployHdr) _snDeltaBtn._deployHdr.style.display = 'none';
+  }
+  if (_snDeltaNote)   { _snDeltaNote.style.display   = 'none'; _snDeltaNote.textContent = ''; }
+  if (_snDeltaCpList) { _snDeltaCpList.style.display  = 'none'; _snDeltaCpList.innerHTML = ''; }
 }
 
 async function loadSnDeltaInfo(projectId) {
@@ -446,6 +520,8 @@ async function loadSnDeltaInfo(projectId) {
     const info = await apiFetch(`/projects/${projectId}/servicenow/delta-info`);
     if (!info.enabled) return; // not an SN-linked project — keep hidden
 
+    // Show direction header + button whenever the project is SN-linked
+    if (_snDeltaBtn._deployHdr) _snDeltaBtn._deployHdr.style.display = 'flex';
     _snDeltaBtn.style.display = 'block';
 
     if (!info.has_changes) {
@@ -468,6 +544,29 @@ async function loadSnDeltaInfo(projectId) {
       _snDeltaNote.style.display = 'block';
       const since = info.sn_last_synced_at ? info.sn_last_synced_at.slice(0, 10) : 'first sync';
       _snDeltaNote.textContent = `${info.delta_cp_count} approved CP${info.delta_cp_count > 1 ? 's' : ''} since ${since}. Includes delta spec + deployment instructions.`;
+
+      // Render CP breakdown list
+      if (_snDeltaCpList && Array.isArray(info.pending_cps) && info.pending_cps.length) {
+        _snDeltaCpList.innerHTML = '';
+        for (const cp of info.pending_cps) {
+          const dateStr = cp.approved_at ? cp.approved_at.slice(0, 10) : '';
+          const summaryText = cp.summary ? cp.summary : '(no summary)';
+          const item = el('div', { className: 'be-sn-cp-item' },
+            el('span', { className: 'be-sn-cp-code' }, cp.packet_code || '—'),
+            dateStr ? el('span', { className: 'be-sn-cp-date' }, dateStr) : null,
+            el('br'),
+            document.createTextNode(summaryText)
+          );
+          _snDeltaCpList.appendChild(item);
+        }
+        // Cross-reference to ServiceNow Sync for the inbound direction
+        const crossLink = el('a', { className: 'be-sn-cross-link' },
+          'Changes coming FROM ServiceNow? → ServiceNow Sync ↗'
+        );
+        crossLink.addEventListener('click', (e) => { e.preventDefault(); navigate('servicenow_sync'); });
+        _snDeltaCpList.appendChild(crossLink);
+        _snDeltaCpList.style.display = 'flex';
+      }
     }
   } catch (err) {
     // Non-fatal — SN delta is optional; hide button silently

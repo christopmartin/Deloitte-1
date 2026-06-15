@@ -11,7 +11,7 @@
  *     and the auto-vs-HITL decision per item, writing nothing.
  *   • Run sync — apply the safe additive changes and queue the rest.
  */
-import { apiFetch, el, showToast, getCurrentProjectId } from '../app.js';
+import { apiFetch, el, showToast, getCurrentProjectId, navigate } from '../app.js';
 
 const previewKey = pid => `wb_sn_preview_${pid}`;
 
@@ -37,13 +37,38 @@ function conf(n) { return (typeof n === 'number') ? (n * 100).toFixed(0) + '%' :
 
 export async function render(container) {
   container.innerHTML = '';
-  container.appendChild(el('div', { className: 'module-header' },
+
+  const headerEl = el('div', { className: 'module-header' },
     el('h2', {}, 'ServiceNow Sync'),
     el('p', { className: 'purpose-text' },
       'Reconcile a linked ServiceNow application back into this Workbench design. The sync is ' +
       'non-destructive: it never blanks, shrinks, or deletes populated Workbench content. Safe ' +
       'additive changes can auto-apply; conflicts and anything uncertain go to human review.')
-  ));
+  );
+
+  // Direction banner
+  const dirBanner = el('div', {
+    style: 'display:flex;align-items:center;justify-content:space-between;' +
+           'background:var(--color-bg);border:1px solid var(--color-border);' +
+           'border-radius:var(--radius);padding:8px 14px;margin-top:10px;' +
+           'font-size:12px;color:var(--color-text-muted);'
+  },
+    el('span', {},
+      el('strong', { style: 'color:var(--color-text)' }, 'Inbound: ServiceNow → Workbench'),
+      document.createTextNode('  ·  Pull the latest design changes from ServiceNow and reconcile them into your Workbench design.')
+    ),
+    el('a', {
+      style: 'font-size:11px;color:var(--color-accent);cursor:pointer;white-space:nowrap;margin-left:16px;text-decoration:none;flex-shrink:0;',
+      title: 'Go to Build Export to deploy Workbench changes back to ServiceNow'
+    },
+      'Deploy to SN ↗'
+    )
+  );
+  // Wire the reciprocal link
+  dirBanner.querySelector('a').addEventListener('click', (e) => { e.preventDefault(); navigate('build_export'); });
+  headerEl.appendChild(dirBanner);
+
+  container.appendChild(headerEl);
 
   const pid = getCurrentProjectId();
   if (!pid) {

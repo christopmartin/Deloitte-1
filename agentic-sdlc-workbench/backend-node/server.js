@@ -3462,7 +3462,7 @@ app.post('/api/v1/projects/:id/cost-estimate', async (req, res) => {
   const assumption = getEffectiveCostParams(projectId);
 
   const rateCard = db.prepare(
-    'SELECT skill_name, category, assists_per_unit FROM asdlc_assist_rate_card ORDER BY category, skill_name'
+    'SELECT skill_name, category, assists_per_unit, description FROM asdlc_assist_rate_card ORDER BY category, skill_name'
   ).all();
 
   const workflows = db.prepare(
@@ -3522,7 +3522,7 @@ app.post('/api/v1/projects/:id/cost-estimate', async (req, res) => {
   );
 
   const rateCardSummary = agenticSkills.map(r =>
-    `"${r.skill_name}" (${r.category}): ${r.assists_per_unit} assists`
+    `"${r.skill_name}" (${r.category}): ${r.assists_per_unit} assists — ${r.description || ''}`
   ).join('\n');
 
   const prompt = `You are a ServiceNow Now Assist cost estimator for agentic AI workflows.
@@ -3543,7 +3543,8 @@ RULES:
 - Skip pure human steps (owner_type = "Human Role" or "Human Coordinator")
 - For the main agentic processing step, use "Agentic workflow – small" (≤3 tools), "medium" (4-8 tools), or "large" (9-20 tools)
 - For each MCP tool call, add "MCP server call" × number of distinct tool calls
-- For knowledge lookups, add "Knowledge graph query"
+- For knowledge lookups within a workflow (reading one or a few KB articles for a specific record), add "Knowledge graph query" — NOT "Knowledge gaps detection" or "Identify duplicate articles"
+- CRITICAL — read the description carefully before assigning any Knowledge or high-cost skill: several skills are INSTANCE-WIDE BATCH OPERATIONS that scan all records across the entire SN instance (e.g., "Knowledge gaps detection" generates clusters across all cases; "Identify duplicate articles" scans all KB articles). These must NEVER be assigned to a per-record or per-incident agentic workflow step. Assign them only when a step explicitly triggers a full-instance scan as a scheduled or admin operation.
 - branch_probability: 1.0 if always runs, lower if conditional (e.g. 0.4 for a branch path)
 - qty_per_run: how many times this skill fires in one workflow execution
 - Respond with a JSON array ONLY (no markdown, no extra text)
@@ -5621,7 +5622,7 @@ app.get('/api/v1/projects/:id/servicenow/delta-info', (req, res) => {
 
   if (!project.servicenow_scope) {
     return res.json({ enabled: false, has_last_sync: false, sn_last_synced_at: null,
-      delta_cp_count: 0, update_count: 0, create_count: 0, has_changes: false });
+      delta_cp_count: 0, update_count: 0, create_count: 0, has_changes: false, pending_cps: [] });
   }
 
   // Outbound delta EXCLUDES inbound-origin CPs (cp_origin='sn_inbound') — that content
@@ -5630,17 +5631,17 @@ app.get('/api/v1/projects/:id/servicenow/delta-info', (req, res) => {
   let deltaCps;
   if (sinceTs) {
     deltaCps = db.prepare(
-      "SELECT change_packet_id FROM asdlc_change_packet WHERE project_id = ? AND status = 'approved' AND (cp_origin IS NULL OR cp_origin != 'sn_inbound') AND updated_at > ?"
+      "SELECT change_packet_id, packet_code, summary, approval_timestamp, cp_origin FROM asdlc_change_packet WHERE project_id = ? AND status = 'approved' AND (cp_origin IS NULL OR cp_origin != 'sn_inbound') AND updated_at > ?"
     ).all(req.params.id, sinceTs);
   } else {
     deltaCps = db.prepare(
-      "SELECT change_packet_id FROM asdlc_change_packet WHERE project_id = ? AND status = 'approved' AND (cp_origin IS NULL OR cp_origin != 'sn_inbound')"
+      "SELECT change_packet_id, packet_code, summary, approval_timestamp, cp_origin FROM asdlc_change_packet WHERE project_id = ? AND status = 'approved' AND (cp_origin IS NULL OR cp_origin != 'sn_inbound')"
     ).all(req.params.id);
   }
 
   if (!deltaCps.length) {
     return res.json({ enabled: true, has_last_sync: !!sinceTs, sn_last_synced_at: sinceTs,
-      delta_cp_count: 0, update_count: 0, create_count: 0, has_changes: false });
+      delta_cp_count: 0, update_count: 0, create_count: 0, has_changes: false, pending_cps: [] });
   }
 
   const cpIds = deltaCps.map(c => c.change_packet_id);
@@ -5660,6 +5661,13 @@ app.get('/api/v1/projects/:id/servicenow/delta-info', (req, res) => {
     else createCount++;
   }
 
+  const pendingCps = deltaCps.map(c => ({
+    packet_code: c.packet_code,
+    summary: c.summary || null,
+    approved_at: c.approval_timestamp || null,
+    cp_origin: c.cp_origin || null,
+  }));
+
   res.json({
     enabled: true,
     has_last_sync: !!sinceTs,
@@ -5668,6 +5676,7 @@ app.get('/api/v1/projects/:id/servicenow/delta-info', (req, res) => {
     update_count: updateCount,
     create_count: createCount,
     has_changes: (updateCount + createCount) > 0,
+    pending_cps: pendingCps,
   });
 });
 
