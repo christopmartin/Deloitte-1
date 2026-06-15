@@ -15,7 +15,7 @@
 // Everything is deterministic and cheap — safe to run against a huge instance.
 'use strict';
 
-const { SN_CATALOG, SN_COMPLEXITY_PROBES } = require('./sn-catalog');
+const { SN_CATALOG, SN_COMPLEXITY_PROBES, normalizeInstanceUrl } = require('./sn-catalog');
 const aiConfig = require('./ai-config');
 
 // ── Tunable thresholds ───────────────────────────────────────────────────────
@@ -33,7 +33,7 @@ const MIN_FAMILY = (process.env.SN_MIN_FAMILY || '').trim().toLowerCase();
 function makeClient({ instance, user, pw, fetchImpl }) {
   const f = fetchImpl || fetch;
   const auth = 'Basic ' + Buffer.from(`${user}:${pw}`).toString('base64');
-  const base = String(instance || '').replace(/\/$/, '');
+  const base = normalizeInstanceUrl(instance);
   const headers = { Authorization: auth, Accept: 'application/json' };
   return {
     base,

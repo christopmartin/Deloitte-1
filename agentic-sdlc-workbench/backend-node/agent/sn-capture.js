@@ -15,7 +15,7 @@ const { db } = require('../db');
 // SN metadata surfaces we capture, sourced from the shared target-table catalog
 // (sn-catalog.js) so capture and assessment stay in lockstep. Missing tables on an
 // instance are skipped. Covers AI-agent apps + data-centric apps.
-const { SN_SURFACES } = require('./sn-catalog');
+const { SN_SURFACES, normalizeInstanceUrl } = require('./sn-catalog');
 
 // Workbench tables that carry Level-2 provenance (where SN-sourced records live).
 const WB_PROVENANCE_TABLES = [
@@ -42,7 +42,7 @@ function hashArtifact(salient) {
 async function captureScope({ scope, instance, user, pw, fetchImpl }) {
   const f = fetchImpl || fetch;
   const auth = 'Basic ' + Buffer.from(`${user}:${pw}`).toString('base64');
-  const base = instance.replace(/\/$/, '');
+  const base = normalizeInstanceUrl(instance);
   const artifacts = [];
   for (const s of SN_SURFACES) {
     const fields = ['sys_id', ...s.fields].join(',');

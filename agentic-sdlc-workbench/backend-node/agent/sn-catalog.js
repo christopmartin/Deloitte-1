@@ -74,4 +74,13 @@ const SN_COMPLEXITY_PROBES = [
 // Sourced from the catalog so the capture surface list stays in lockstep.
 const SN_SURFACES = SN_CATALOG.map(c => ({ table: c.table, type: c.captureType, fields: c.fields }));
 
-module.exports = { SN_CATALOG, SN_COMPLEXITY_PROBES, SN_SURFACES };
+// Normalize a user-entered instance URL into a fetchable base: trim, drop trailing
+// slashes, and prepend https:// when the scheme is missing (a common entry mistake —
+// fetch() throws "Failed to parse URL" on a scheme-less host).
+function normalizeInstanceUrl(instance) {
+  let base = String(instance || '').trim().replace(/\/+$/, '');
+  if (base && !/^https?:\/\//i.test(base)) base = 'https://' + base;
+  return base;
+}
+
+module.exports = { SN_CATALOG, SN_COMPLEXITY_PROBES, SN_SURFACES, normalizeInstanceUrl };
