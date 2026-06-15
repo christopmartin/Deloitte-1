@@ -13,6 +13,8 @@
  */
 import { apiFetch, el, showToast, getCurrentProjectId } from '../app.js';
 
+const previewKey = pid => `wb_sn_preview_${pid}`;
+
 const APPLY_MODES = [
   { id: 'additive_hitl',  label: 'Additive auto + HITL (default)', hint: 'Auto-apply safe additive changes (new records, fills into empty fields) above the confidence threshold; everything else goes to human review.' },
   { id: 'confidence_gate', label: 'Confidence gate',               hint: 'Auto-apply any non-destructive change that clears the project confidence threshold; the rest goes to human review.' },
@@ -113,6 +115,21 @@ export async function render(container) {
   linkBody.appendChild(el('div', {}, previewBtn, runBtn));
   linkBody.appendChild(out);
 
+  // Restore last dry-run preview — survives navigation without re-running the AI pipeline
+  const _saved = localStorage.getItem(previewKey(pid));
+  if (_saved) {
+    try {
+      const { plan, ts } = JSON.parse(_saved);
+      const ageMin = Math.round((Date.now() - ts) / 60000);
+      renderPlan(out, plan, false);
+      out.insertBefore(
+        el('div', { style: 'font-size:12px;color:var(--text-muted);padding:6px 10px;background:var(--color-bg-panel,#f6f8fa);border:1px solid var(--color-border);border-radius:var(--radius);margin-bottom:8px' },
+          `ℹ Preview from ${ageMin < 1 ? 'just now' : ageMin + ' min ago'} — run again to refresh.`),
+        out.firstChild
+      );
+    } catch { localStorage.removeItem(previewKey(pid)); }
+  }
+
   const busy = (on) => { previewBtn.disabled = on; runBtn.disabled = on; };
 
   previewBtn.addEventListener('click', async () => {
@@ -120,6 +137,7 @@ export async function render(container) {
     try {
       const res = await apiFetch(`/projects/${pid}/servicenow/sync?dry_run=1`, { method: 'POST', body: JSON.stringify({}) });
       renderPlan(out, res.plan, false);
+      localStorage.setItem(previewKey(pid), JSON.stringify({ plan: res.plan, ts: Date.now() }));
     } catch (err) { out.innerHTML = ''; out.appendChild(el('div', { className: 'error-state' }, 'Preview failed: ' + err.message)); }
     finally { busy(false); }
   });
@@ -130,6 +148,7 @@ export async function render(container) {
     try {
       const res = await apiFetch(`/projects/${pid}/servicenow/sync`, { method: 'POST', body: JSON.stringify({}) });
       renderResult(out, res);
+      localStorage.removeItem(previewKey(pid));
     } catch (err) { out.innerHTML = ''; out.appendChild(el('div', { className: 'error-state' }, 'Sync failed: ' + err.message)); }
     finally { busy(false); }
   });

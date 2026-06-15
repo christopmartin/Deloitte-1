@@ -921,6 +921,17 @@ img { max-width: 100%; display: block; }
 
 .btn-success:hover:not(:disabled) { background: #15803d; }
 
+.btn-secondary {
+  background: transparent;
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--color-accent);
+  color: white;
+}
+
 .btn-ghost {
   background: transparent;
   color: var(--color-text);

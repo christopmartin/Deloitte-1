@@ -113,7 +113,7 @@ function buildSystemPrompt(wf, steps, participants) {
   const triggerDesc = fmt(wf.trigger_def);
   const decisions   = fmt(wf.decisions);
   const handoffs    = fmt(wf.handoffs);
-  lines.push(
+  lines.push(...[
     `## Workflow: "${wf.name}"`,
     wf.risk_tier  ? `  Risk tier: ${wf.risk_tier}` : null,
     wf.sla_hours  ? `  End-to-end SLA: ${wf.sla_hours}h` : null,
@@ -121,7 +121,7 @@ function buildSystemPrompt(wf, steps, participants) {
     decisions     ? `  Key decisions: ${decisions}` : null,
     handoffs      ? `  Handoffs: ${handoffs}` : null,
     ``,
-  ).filter(Boolean);
+  ].filter(Boolean));
 
   // Participants
   lines.push(`## Participants (RASIC columns)`);
