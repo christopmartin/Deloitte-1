@@ -4,3 +4,13 @@ node_modules/
 *.log
 .DS_Store
 Thumbs.db
+
+# Python bytecode cache
+__pycache__/
+
+# SQLite database backups (timestamped snapshots)
+*.db.bak-*
+
+# Generated feature-inventory deliverables (regenerable via build_inventory.py)
+SDLC Workbench - Feature Inventory.pptx
+SDLC Workbench - Feature Inventory.xlsx
