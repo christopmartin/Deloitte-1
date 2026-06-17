@@ -59,6 +59,12 @@ const SN_CATALOG = [
   { table: 'sys_hub_flow',       captureType: 'flow',           wbDesignType: 'workflow',       mappingStatus: 'partial', partialIntent: 'gap',
     fields: ['name'], complexityWeight: 2,
     featureNote: 'Flow Designer flows — header only today; step capture planned so swimlanes/RASIC auto-derive (fidelity gap to close)' },
+  { table: 'sys_rest_message',   captureType: 'rest_message',   wbDesignType: 'integration',    mappingStatus: 'mapped',
+    fields: ['name', 'rest_endpoint', 'authentication_type', 'description'], complexityWeight: 1,
+    featureNote: 'Outbound HTTP integrations (REST Message). SDK v4.8+: deployable via RestMessage() Fluent API.' },
+  { table: 'sys_alias',          captureType: 'connection_alias', wbDesignType: 'integration',  mappingStatus: 'mapped',
+    fields: ['name', 'type', 'connection_type', 'description'], complexityWeight: 0.5,
+    featureNote: 'Connection & Credential Aliases — named handles for integration credentials. SDK v4.8+: deployable via Alias() Fluent API.' },
 ];
 
 // Complexity-only probes — counted to estimate import VOLUME, not captured directly.

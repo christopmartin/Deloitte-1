@@ -28,6 +28,7 @@ const WB_PROVENANCE_TABLES = [
   { table: 'asdlc_form_design',    pk: 'form_design_id',    type: 'form_design',    nameCol: 'name' },
   { table: 'asdlc_business_logic', pk: 'business_logic_id', type: 'business_logic', nameCol: 'name' },
   { table: 'asdlc_catalog_item',   pk: 'catalog_item_id',   type: 'catalog_item',   nameCol: 'name' },
+  { table: 'asdlc_integration',    pk: 'integration_id',    type: 'integration',     nameCol: 'name' },
 ];
 
 /** Stable 32-char content hash of an artifact's salient fields. */

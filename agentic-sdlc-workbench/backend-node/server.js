@@ -4922,6 +4922,10 @@ const RT_DESIGN = {
   'catalog-items':  { table: 'asdlc_catalog_item',   pk: 'catalog_item_id',   key: 'catalog_items', entity_type: 'catalog_item',
                       json: ['variables'],
                       allowed: ['name', 'short_description', 'category', 'variables', 'who_can_order', 'delivery_time'] },
+  'integrations':   { table: 'asdlc_integration',    pk: 'integration_id',    key: 'integrations',  entity_type: 'integration',
+                      json: ['functions'],
+                      allowed: ['name', 'description', 'endpoint', 'auth_type', 'functions', 'alias_type', 'connection_type', 'notes'],
+                      enums: { auth_type: ['noAuthentication','basic','oauth2'], alias_type: ['connection','credential'], connection_type: ['httpConnection','jdbcConnection','basicConnection','jmsConnection'] } },
 };
 
 function rtParseRow(row, jsonCols) {
@@ -5254,7 +5258,7 @@ app.get('/api/v1/projects/:id/build-export', async (req, res) => {
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
   const allSections = ['use_cases','workflows','agents','tools','guardrails','data_sources','test_scenarios','user_stories','governance','relationships','cost_summary',
-    'data_models','form_designs','business_logic','catalog_items'];
+    'data_models','form_designs','business_logic','catalog_items','integrations'];
   const sectionsParam = req.query.sections || 'all';
   const sections = sectionsParam === 'all' ? allSections : sectionsParam.split(',').map(s => s.trim()).filter(s => allSections.includes(s));
 
@@ -5445,6 +5449,7 @@ app.get('/api/v1/projects/:id/build-export', async (req, res) => {
     form_designs:   { table: 'asdlc_form_design',    json: ['sections', 'related_lists', 'mandatory_fields', 'readonly_fields'] },
     business_logic: { table: 'asdlc_business_logic', json: ['requirement_refs'] },
     catalog_items:  { table: 'asdlc_catalog_item',   json: ['variables'] },
+    integrations:   { table: 'asdlc_integration',    json: ['functions'] },
   };
   for (const [sectionKey, spec] of Object.entries(RT_EXPORT)) {
     if (sections.includes(sectionKey)) {
@@ -6768,6 +6773,32 @@ function buildExportMarkdown(project, baseline, sections, data) {
       rtFluentDetails(bl);
     }
   }
+  if (sections.includes('integrations') && data.integrations) {
+    lines.push('---'); lines.push('');
+    lines.push('## ServiceNow Integrations'); lines.push('');
+    if (!data.integrations.length) { lines.push('*No integrations.*'); lines.push(''); }
+    for (const intg of data.integrations) {
+      lines.push(`### \`${[intg.name, intg.slug].filter(Boolean).join(' — ')}\``); lines.push('');
+      const srcTable = intg.source_table || (intg.integration_type === 'rest_message' ? 'sys_rest_message' : 'sys_alias');
+      if (intg.source_sys_id) lines.push(`> **Source:** ${srcTable} \`${intg.source_sys_id}\``);
+      if (intg.description) lines.push(`**Description:** ${intg.description}`);
+      if (intg.integration_type === 'rest_message') {
+        if (intg.endpoint) lines.push(`**Endpoint:** ${intg.endpoint}`);
+        if (intg.auth_type) lines.push(`**Authentication:** ${intg.auth_type}`);
+        const fns = Array.isArray(intg.functions) ? intg.functions : [];
+        if (fns.length) {
+          lines.push(''); lines.push('| Method | Name | Endpoint |'); lines.push('|---|---|---|');
+          fns.forEach(fn => lines.push(`| \`${fn.http_method || ''}\` | ${fn.name || ''} | ${fn.endpoint || '*(base)*'} |`));
+        }
+      } else {
+        if (intg.alias_type)      lines.push(`**Alias Type:** ${intg.alias_type}`);
+        if (intg.connection_type) lines.push(`**Connection Type:** ${intg.connection_type}`);
+      }
+      if (intg.notes) lines.push(`**Notes:** ${intg.notes}`);
+      lines.push('');
+      rtFluentDetails(intg);
+    }
+  }
   if (sections.includes('catalog_items') && data.catalog_items) {
     lines.push('---'); lines.push('');
     lines.push('## ServiceNow Catalog Items'); lines.push('');
@@ -7557,7 +7588,9 @@ function inferredToEntityData(inferred) {
     case 'data_model':     return { name, purpose: desc };
     case 'form_design':    return { name, behavior_notes: desc };
     case 'business_logic': return { name, logic_type: 'business_rule', plain_english: desc };
-    case 'catalog_item':   return { name, short_description: purpose || name };
+    case 'catalog_item':     return { name, short_description: purpose || name };
+    case 'rest_message':     return { name, integration_type: 'rest_message', description: desc };
+    case 'connection_alias': return { name, integration_type: 'connection_alias', description: desc };
     default:               return null;   // 'other' → not auto-creatable
   }
 }
