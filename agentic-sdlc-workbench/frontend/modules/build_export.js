@@ -15,6 +15,7 @@ const SECTION_GROUPS = [
       { id: 'form_designs',   label: 'Form Designs (SN)'   },
       { id: 'business_logic', label: 'Business Logic (SN)' },
       { id: 'catalog_items',  label: 'Catalog Items (SN)'  },
+      { id: 'integrations',   label: 'Integrations (SN)'   },
     ],
   },
   {

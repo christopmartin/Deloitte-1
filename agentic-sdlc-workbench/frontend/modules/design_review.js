@@ -147,6 +147,22 @@ const EDIT_CONFIGS = {
       { key: 'delivery_time',     label: 'Delivery Time',    type: 'text'     },
     ],
   },
+  integration: {
+    endpoint: (pid, eid) => `/projects/${pid}/integrations/${eid}`,
+    idKey: 'integration_id', nameKey: 'name', label: 'Integration',
+    fields: [
+      { key: 'name',            label: 'Name',            type: 'text'     },
+      { key: 'description',     label: 'Description',     type: 'textarea' },
+      { key: 'endpoint',        label: 'Endpoint',        type: 'text'     },
+      { key: 'auth_type',       label: 'Auth Type',       type: 'select',
+        options: ['noAuthentication', 'basic', 'oauth2'] },
+      { key: 'alias_type',      label: 'Alias Type',      type: 'select',
+        options: ['connection', 'credential'] },
+      { key: 'connection_type', label: 'Connection Type', type: 'select',
+        options: ['httpConnection', 'jdbcConnection', 'basicConnection', 'jmsConnection'] },
+      { key: 'notes',           label: 'Notes',           type: 'textarea' },
+    ],
+  },
   workflow: {
     endpoint: (pid, eid) => `/projects/${pid}/workflows/${eid}`,
     idKey:    'workflow_id',
@@ -729,6 +745,7 @@ const REPORT_META = {
   'form-designs':   { title: 'Form Designs',          noun: 'form'         },
   'business-logic': { title: 'Business Logic',        noun: 'logic item'   },
   'catalog-items':  { title: 'Catalog Items',         noun: 'catalog item' },
+  'integrations':   { title: 'Integrations',          noun: 'integration'  },
 };
 
 function detectTypeKey(data) {
@@ -740,6 +757,7 @@ function detectTypeKey(data) {
   if (data.form_designs)      return 'form-designs';
   if (data.business_logic)    return 'business-logic';
   if (data.catalog_items)     return 'catalog-items';
+  if (data.integrations)      return 'integrations';
   if (data.guardrails)        return 'guardrails';
   if (data.data_sources)      return 'data-sources';
   if (data.test_scenarios)    return 'test-scenarios';
@@ -769,6 +787,7 @@ function buildReport(data) {
     'form-designs':   'form_designs',
     'business-logic': 'business_logic',
     'catalog-items':  'catalog_items',
+    'integrations':   'integrations',
   };
   const dataKey = DATA_KEY_MAP[typeKey] || typeKey;
   const items = data[dataKey] || [];
@@ -856,6 +875,8 @@ function buildReport(data) {
     wrap.appendChild(buildBusinessLogicSection(data.business_logic));
   } else if (data.catalog_items) {
     wrap.appendChild(buildCatalogItemsSection(data.catalog_items));
+  } else if (data.integrations) {
+    wrap.appendChild(buildIntegrationsSection(data.integrations));
   } else if (data.relationships) {
     wrap.appendChild(buildRelationshipsSection(data.relationships, data.functional_reqs || [], data.nonfunctional_reqs || [], data.use_case_map || {}));
   } else if (data.functional_reqs !== undefined || data.nonfunctional_reqs !== undefined) {
@@ -3092,6 +3113,70 @@ function buildCatalogItemsSection(items) {
       vs.appendChild(el('div', { style: 'color:var(--text-muted);font-style:italic;font-size:12px' }, '— (no variables recorded)'));
     }
     section.appendChild(vs);
+    wrap.appendChild(section);
+  });
+  return wrap;
+}
+
+function buildIntegrationsSection(items) {
+  const TYPE_LABEL = { rest_message: 'REST Message', connection_alias: 'Connection Alias' };
+  const AUTH_LABEL = { noAuthentication: 'None', basic: 'Basic', oauth2: 'OAuth 2.0' };
+  const wrap = el('div', { className: 'dr-agent' });
+  items.forEach((intg, idx) => {
+    if (idx > 0) wrap.appendChild(el('div', { className: 'dr-page-break' }));
+    const section = el('div', { className: 'dr-agent' });
+    section.id = `dr-entity-${intg.integration_id || idx}`;
+    const hdr = el('div', { className: 'dr-agent-header' });
+    const nameEl = el('div', { className: 'dr-agent-name' });
+    const sb = slugBadge(intg.slug);
+    if (sb) nameEl.appendChild(sb);
+    nameEl.appendChild(document.createTextNode(intg.name || '(unnamed)'));
+    hdr.appendChild(nameEl);
+    const badges = el('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } });
+    badges.appendChild(el('span', { className: 'tag tag-info', style: { fontSize: '10px' } }, TYPE_LABEL[intg.integration_type] || intg.integration_type || '—'));
+    badges.appendChild(statusPill(intg.lifecycle_status));
+    const editBtn = buildEditBtn('integration', intg);
+    if (editBtn) badges.appendChild(editBtn);
+    hdr.appendChild(badges);
+    section.appendChild(hdr);
+    if (intg.integration_type === 'rest_message') {
+      const s = subSection('Overview');
+      const grid = el('div', { className: 'dr-kv-grid' });
+      kvRow(grid, 'Description', intg.description);
+      kvRow(grid, 'Endpoint', intg.endpoint);
+      kvRow(grid, 'Authentication', AUTH_LABEL[intg.auth_type] || intg.auth_type);
+      kvRow(grid, 'Notes', intg.notes);
+      s.appendChild(grid);
+      section.appendChild(s);
+      const fns = asArray(intg.functions);
+      const fs = subSection(`HTTP Functions (${fns.length})`);
+      if (fns.length) {
+        const tbl = el('table', { className: 'dr-table' });
+        tbl.innerHTML = '<thead><tr><th style="width:80px">Method</th><th>Name</th><th>Endpoint</th></tr></thead>';
+        const tb = el('tbody');
+        fns.forEach(fn => {
+          tb.appendChild(el('tr', {},
+            el('td', {}, el('code', {}, fn.http_method || '—')),
+            el('td', { style: { fontWeight: '600' } }, fn.name || '—'),
+            el('td', { style: { fontSize: '12px' } }, fn.endpoint || '(base)')
+          ));
+        });
+        tbl.appendChild(tb);
+        fs.appendChild(tbl);
+      } else {
+        fs.appendChild(el('div', { style: 'color:var(--text-muted);font-style:italic;font-size:12px' }, '— (no functions recorded)'));
+      }
+      section.appendChild(fs);
+    } else {
+      const s = subSection('Overview');
+      const grid = el('div', { className: 'dr-kv-grid' });
+      kvRow(grid, 'Description', intg.description);
+      kvRow(grid, 'Alias Type', intg.alias_type);
+      kvRow(grid, 'Connection Type', intg.connection_type);
+      kvRow(grid, 'Notes', intg.notes);
+      s.appendChild(grid);
+      section.appendChild(s);
+    }
     wrap.appendChild(section);
   });
   return wrap;

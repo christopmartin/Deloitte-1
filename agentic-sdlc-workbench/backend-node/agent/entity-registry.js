@@ -823,6 +823,86 @@ const REGISTRY = [
     ],
   },
 
+  {
+    entity_type: 'rest_message',
+    order: 13,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_integration',
+    pk: 'integration_id',
+    slugPrefix: 'RST',
+    nameKeys: ['name'],
+    tool: {
+      name: 'extract_rest_message',
+      description: 'Extract an outbound HTTP integration (REST Message) — a service the app calls, its base URL, authentication type, and HTTP operations. Maps to asdlc_integration with integration_type=rest_message. SDK v4.8+: deployable via RestMessage() Fluent API.',
+      properties: {
+        integration_type: { type: 'string', enum: ['rest_message'], description: 'Always rest_message for this tool' },
+        name:             { type: 'string', description: 'Display name of the REST Message, e.g. "SAP Invoice API"' },
+        description:      { type: 'string', description: 'Purpose of this integration' },
+        endpoint:         { type: 'string', description: 'Base URL of the service' },
+        auth_type:        { type: 'string', enum: ['noAuthentication','basic','oauth2'], description: 'Authentication type' },
+        functions: {
+          type: 'array',
+          description: 'HTTP operations defined on this REST Message',
+          items: { type: 'object', properties: {
+            name:        { type: 'string' },
+            http_method: { type: 'string', enum: ['GET','POST','PUT','PATCH','DELETE'] },
+            endpoint:    { type: 'string', description: 'URL override for this function if different from base' },
+          } },
+        },
+        notes: { type: 'string', description: 'Additional notes or context' },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name', 'integration_type'],
+    },
+    fieldMap: {
+      integration_type: { col: 'integration_type' },
+      name:             { col: 'name' },
+      description:      { col: 'description' },
+      endpoint:         { col: 'endpoint' },
+      auth_type:        { col: 'auth_type' },
+      functions:        { col: 'functions', json: true },
+      notes:            { col: 'notes' },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  {
+    entity_type: 'connection_alias',
+    order: 14,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_integration',
+    pk: 'integration_id',
+    slugPrefix: 'ALI',
+    nameKeys: ['name'],
+    tool: {
+      name: 'extract_connection_alias',
+      description: 'Extract a Connection & Credential Alias — a named handle that integrations use to reference a connection/credential pair without hard-coding instance-specific values. Maps to asdlc_integration with integration_type=connection_alias. SDK v4.8+: deployable via Alias() Fluent API.',
+      properties: {
+        integration_type: { type: 'string', enum: ['connection_alias'], description: 'Always connection_alias for this tool' },
+        name:             { type: 'string', description: 'Display name of the alias, e.g. "SAP Connection"' },
+        description:      { type: 'string', description: 'Purpose of this connection alias' },
+        alias_type:       { type: 'string', enum: ['connection','credential'], description: 'Whether it holds a connection+credential pair or credential only' },
+        connection_type:  { type: 'string', enum: ['httpConnection','jdbcConnection','basicConnection','jmsConnection'], description: 'Underlying connection protocol' },
+        notes:            { type: 'string', description: 'Additional notes or context' },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name', 'integration_type'],
+    },
+    fieldMap: {
+      integration_type: { col: 'integration_type' },
+      name:             { col: 'name' },
+      description:      { col: 'description' },
+      alias_type:       { col: 'alias_type' },
+      connection_type:  { col: 'connection_type' },
+      notes:            { col: 'notes' },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
   // ── Types WITHOUT a dedicated table (v1): extracted + promoted for review, but
   //    not materialized. Add a table + flip materializable to wire them in later.
   {

@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Agentic SDLC Workbench — System Architecture</title>
+<style>
+  :root{
+    --green:#86BC25;        /* Deloitte Green */
+    --neon:#86EB22;
+    --blue:#00A3E0;
+    --ink:#282728;          /* Dark gray */
+    --black:#000000;
+    --white:#ffffff;
+    --bg:#f4f6f2;
+    --card:#ffffff;
+    --line:#e2e6df;
+    --muted:#6b7066;
+    --ai:#00A3E0;           /* AI Agent accent */
+    --det:#86BC25;          /* deterministic accent */
+    --shadow:0 1px 3px rgba(40,39,40,.06),0 8px 24px rgba(40,39,40,.06);
+    font-family:"Open Sans","Segoe UI",system-ui,-apple-system,sans-serif;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--ink);line-height:1.55;-webkit-font-smoothing:antialiased;}
+  a{color:var(--blue);text-decoration:none;}
+
+  /* ---- Header ---- */
+  header.hero{
+    background:var(--ink);
+    color:var(--white);
+    padding:48px clamp(20px,5vw,72px) 56px;
+    position:relative;
+    overflow:hidden;
+  }
+  .hero-circle{
+    position:absolute;border-radius:50%;pointer-events:none;
+  }
+  .hero-circle.c1{width:340px;height:340px;right:-90px;top:-120px;
+    background:radial-gradient(circle at 30% 30%,rgba(134,235,34,.20),rgba(134,188,37,0) 70%);}
+  .hero-circle.c2{width:180px;height:180px;right:160px;bottom:-90px;
+    border:1px solid rgba(0,163,224,.35);}
+  .brand-row{display:flex;align-items:center;gap:14px;margin-bottom:30px;position:relative;z-index:2;}
+  .brand-mark{font-weight:800;font-size:18px;letter-spacing:.3px;}
+  .brand-mark .dot{color:var(--green);}
+  .brand-row .divider{width:1px;height:22px;background:rgba(255,255,255,.25);}
+  .brand-row .tag{font-size:13px;color:rgba(255,255,255,.7);}
+  .brand-row .tag em{font-style:italic;color:var(--neon);font-family:"Stix Two Text",Georgia,serif;}
+  .hero h1{position:relative;z-index:2;margin:0 0 14px;font-size:clamp(30px,4.5vw,46px);font-weight:300;letter-spacing:-.5px;}
+  .hero h1 b{font-weight:800;}
+  .hero h1 em{font-style:italic;font-weight:600;color:var(--neon);font-family:"Stix Two Text",Georgia,serif;}
+  .hero p.lede{position:relative;z-index:2;max-width:760px;font-size:17px;color:rgba(255,255,255,.82);margin:0;}
+  .hero .meta{position:relative;z-index:2;margin-top:26px;display:flex;flex-wrap:wrap;gap:10px;}
+  .pill{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;
+    background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.16);color:#fff;
+    padding:7px 13px;border-radius:30px;}
+  .pill .d{width:8px;height:8px;border-radius:50%;background:var(--green);}
+
+  /* ---- Layout ---- */
+  main{max-width:1180px;margin:0 auto;padding:clamp(28px,4vw,52px) clamp(20px,5vw,40px) 80px;}
+  section{margin-bottom:54px;}
+  .sec-head{display:flex;align-items:baseline;gap:14px;margin-bottom:22px;}
+  .sec-head .num{font-size:13px;font-weight:800;color:var(--green);letter-spacing:1px;}
+  .sec-head h2{margin:0;font-size:24px;font-weight:700;letter-spacing:-.3px;}
+  .sec-head p{margin:0;color:var(--muted);font-size:14px;}
+
+  /* ---- Phase strip ---- */
+  .phases{display:flex;flex-wrap:wrap;gap:0;align-items:stretch;background:var(--card);
+    border:1px solid var(--line);border-radius:14px;padding:8px;box-shadow:var(--shadow);}
+  .phase{flex:1 1 0;min-width:120px;display:flex;align-items:center;}
+  .phase .box{flex:1;padding:14px 12px;text-align:center;border-radius:10px;}
+  .phase .pn{font-size:11px;font-weight:800;color:var(--green);letter-spacing:.5px;}
+  .phase .pt{font-size:13.5px;font-weight:700;margin-top:3px;}
+  .phase .ps{font-size:11.5px;color:var(--muted);margin-top:2px;}
+  .phase .arrow{color:var(--line);font-size:20px;font-weight:700;padding:0 2px;}
+  @media(max-width:760px){.phase{flex:1 1 100%;}.phase .arrow{transform:rotate(90deg);width:100%;text-align:center;padding:4px 0;}}
+
+  /* ---- Architecture layers ---- */
+  .layers{display:flex;flex-direction:column;gap:14px;}
+  .layer{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px;
+    box-shadow:var(--shadow);position:relative;overflow:hidden;}
+  .layer::before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--green);}
+  .layer.frontend::before{background:var(--blue);}
+  .layer.api::before{background:var(--green);}
+  .layer.ai::before{background:linear-gradient(var(--ai),#0079a8);}
+  .layer.data::before{background:var(--ink);}
+  .layer-head{display:flex;align-items:center;gap:12px;margin-bottom:12px;}
+  .layer-head .ico{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;
+    background:#eef3e6;color:var(--green);flex:none;}
+  .layer.frontend .ico{background:#e4f5fc;color:var(--blue);}
+  .layer.ai .ico{background:#e4f5fc;color:var(--ai);}
+  .layer.data .ico{background:#ecedeb;color:var(--ink);}
+  .layer-head h3{margin:0;font-size:16.5px;font-weight:700;}
+  .layer-head .sub{font-size:12.5px;color:var(--muted);}
+  .chips{display:flex;flex-wrap:wrap;gap:7px;}
+  .chip{font-size:12px;background:#f3f5f0;border:1px solid var(--line);border-radius:7px;
+    padding:5px 10px;color:var(--ink);font-weight:600;}
+  .chip code{font-family:ui-monospace,"Cascadia Code",Consolas,monospace;font-weight:600;color:var(--ink);font-size:11.5px;}
+  .flow-conn{text-align:center;color:var(--muted);font-size:11px;font-weight:700;letter-spacing:1px;
+    margin:-4px 0;}
+  .flow-conn span{display:inline-block;background:var(--bg);padding:0 10px;}
+
+  /* ---- Tech stack grid ---- */
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;}
+  .tcard{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:var(--shadow);}
+  .tcard h4{margin:0 0 4px;font-size:11px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:var(--green);}
+  .tcard .main{font-size:17px;font-weight:700;}
+  .tcard .sub{font-size:13px;color:var(--muted);margin-top:4px;}
+  .tcard ul{margin:10px 0 0;padding-left:16px;font-size:13px;color:var(--ink);}
+  .tcard ul li{margin:3px 0;}
+
+  /* ---- Data flow ---- */
+  .legend{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:18px;font-size:12.5px;font-weight:600;}
+  .legend .lk{display:inline-flex;align-items:center;gap:7px;}
+  .legend .sw{width:14px;height:14px;border-radius:4px;}
+  .legend .sw.ai{background:var(--ai);}
+  .legend .sw.det{background:var(--green);}
+  .steps{position:relative;padding-left:34px;}
+  .steps::before{content:"";position:absolute;left:11px;top:6px;bottom:6px;width:2px;background:var(--line);}
+  .step{position:relative;background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:14px 16px;margin-bottom:14px;box-shadow:var(--shadow);}
+  .step::before{content:"";position:absolute;left:-28px;top:18px;width:14px;height:14px;border-radius:50%;
+    background:var(--green);border:3px solid var(--bg);}
+  .step.ai::before{background:var(--ai);}
+  .step-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:5px;}
+  .step-top .n{font-size:11px;font-weight:800;color:var(--muted);}
+  .step-top h4{margin:0;font-size:15px;font-weight:700;}
+  .badge{font-size:10.5px;font-weight:800;letter-spacing:.4px;padding:3px 9px;border-radius:20px;text-transform:uppercase;}
+  .badge.ai{background:#e4f5fc;color:#0079a8;border:1px solid #b9e4f5;}
+  .badge.det{background:#eef3e6;color:#5d8a17;border:1px solid #cfe2b0;}
+  .step p{margin:0;font-size:13.5px;color:var(--ink);}
+  .step p code,.step-top code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:#f3f5f0;padding:1px 5px;border-radius:4px;}
+
+  /* ---- AI roles ---- */
+  .roles{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;}
+  .rolecard{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:var(--shadow);}
+  .rolecard h4{margin:0 0 10px;font-size:13px;font-weight:800;letter-spacing:.5px;display:flex;align-items:center;gap:8px;}
+  .rolecard h4 .d{width:10px;height:10px;border-radius:50%;}
+  .rolecard h4 .d.ai{background:var(--ai);}
+  .rolecard h4 .d.det{background:var(--green);}
+  .rolecard ul{margin:0;padding-left:18px;font-size:13px;}
+  .rolecard ul li{margin:5px 0;}
+  .rolecard ul li b{font-weight:700;}
+  .rolecard .model{font-size:11px;color:var(--muted);font-weight:600;}
+
+  footer{border-top:1px solid var(--line);padding:26px clamp(20px,5vw,40px);max-width:1180px;margin:0 auto;
+    color:var(--muted);font-size:12.5px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px;}
+  footer em{font-style:italic;color:var(--green);font-family:"Stix Two Text",Georgia,serif;}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <span class="hero-circle c1"></span>
+  <span class="hero-circle c2"></span>
+  <div class="brand-row">
+    <span class="brand-mark">Deloitte<span class="dot">.</span></span>
+    <span class="divider"></span>
+    <span class="tag"><em>Together</em> makes progress</span>
+  </div>
+  <h1>Agentic SDLC Workbench<br><b>System Architecture</b> &amp; <em>Data</em> Flow</h1>
+  <p class="lede">A local-prototype web workbench that turns business documents into governed, build-ready
+    ServiceNow Agentic AI application designs — combining a human-in-the-loop review surface with an
+    AI extraction-and-review pipeline backed by a fully audited change-control model.</p>
+  <div class="meta">
+    <span class="pill"><span class="d"></span>Node.js + Express 5</span>
+    <span class="pill"><span class="d"></span>SQLite (~50 tables)</span>
+    <span class="pill"><span class="d"></span>Vanilla JS SPA</span>
+    <span class="pill"><span class="d"></span>Anthropic Claude SDK</span>
+    <span class="pill"><span class="d"></span>localhost:8000</span>
+  </div>
+</header>
+
+<main>
+
+  <!-- 1. LIFECYCLE -->
+  <section>
+    <div class="sec-head">
+      <span class="num">01</span>
+      <div>
+        <h2>The SDLC Lifecycle</h2>
+        <p>Every application moves left-to-right through six governed phases, with iteration loops back to review.</p>
+      </div>
+    </div>
+    <div class="phases">
+      <div class="phase"><div class="box"><div class="pn">PHASE 1</div><div class="pt">Create App</div><div class="ps">Project &amp; access setup</div></div><span class="arrow">›</span></div>
+      <div class="phase"><div class="box"><div class="pn">PHASE 2</div><div class="pt">Ingest Docs</div><div class="ps">AI extraction</div></div><span class="arrow">›</span></div>
+      <div class="phase"><div class="box"><div class="pn">PHASE 3</div><div class="pt">Design Review</div><div class="ps">Human edit &amp; approve</div></div><span class="arrow">›</span></div>
+      <div class="phase"><div class="box"><div class="pn">PHASE 4</div><div class="pt">Change Packets</div><div class="ps">Approve / reject diffs</div></div><span class="arrow">›</span></div>
+      <div class="phase"><div class="box"><div class="pn">PHASE 5</div><div class="pt">Baseline</div><div class="ps">Lock a version</div></div><span class="arrow">›</span></div>
+      <div class="phase"><div class="box"><div class="pn">PHASE 6</div><div class="pt">Build Export</div><div class="ps">Spec for build</div></div></div>
+    </div>
+  </section>
+
+  <!-- 2. ARCHITECTURE -->
+  <section>
+    <div class="sec-head">
+      <span class="num">02</span>
+      <div>
+        <h2>System Architecture</h2>
+        <p>A four-layer monolith: a browser SPA talks to one Express API, which orchestrates an AI agent layer and persists everything to SQLite.</p>
+      </div>
+    </div>
+    <div class="layers">
+
+      <div class="layer frontend">
+        <div class="layer-head">
+          <span class="ico"><svg width="18" height="18" viewBox="0 0 20 20" fill="currentColor"><path d="M2 4.5A2.5 2.5 0 014.5 2h11A2.5 2.5 0 0118 4.5v8a2.5 2.5 0 01-2.5 2.5H11v2h2a1 1 0 110 2H7a1 1 0 110-2h2v-2H4.5A2.5 2.5 0 012 12.5v-8z"/></svg></span>
+          <div>
+            <h3>Presentation — Vanilla JS SPA</h3>
+            <span class="sub"><code>frontend/</code> · ES modules, no framework, ~one module per screen</span>
+          </div>
+        </div>
+        <div class="chips">
+          <span class="chip"><code>index.html</code> shell + sidebar</span>
+          <span class="chip"><code>app.js</code> router &amp; <code>apiFetch</code></span>
+          <span class="chip">Ingest</span><span class="chip">Design Review</span><span class="chip">Change Packets</span>
+          <span class="chip">Testing</span><span class="chip">Costs</span><span class="chip">Build Export</span>
+          <span class="chip">Trust · Audit · Baselines</span>
+          <span class="chip">Admin: AI Settings · AI Guidance · ServiceNow Sync</span>
+        </div>
+      </div>
+
+      <div class="flow-conn"><span>▼ &nbsp; REST /api/v1 · injects <code style="font-size:11px">X-User-ID</code> header &nbsp; ▼</span></div>
+
+      <div class="layer api">
+        <div class="layer-head">
+          <span class="ico"><svg width="18" height="18" viewBox="0 0 20 20" fill="currentColor"><path d="M4 3a1 1 0 00-1 1v12a1 1 0 001 1h12a1 1 0 001-1V4a1 1 0 00-1-1H4zm2 4h8v2H6V7zm0 4h8v2H6v-2z"/></svg></span>
+          <div>
+            <h3>Application — Express 5 API Server</h3>
+            <span class="sub"><code>backend-node/server.js</code> · all REST endpoints · <code>db.js</code> (DatabaseSync + auditLog) · <code>seed.js</code></span>
+          </div>
+        </div>
+        <div class="chips">
+          <span class="chip">Project / use-case / workflow / agent / tool CRUD</span>
+          <span class="chip">Change-packet approve · reject · split</span>
+          <span class="chip"><code>applyChangePacket()</code> materializer</span>
+          <span class="chip">Baselines · Audit · Evidence · Reports</span>
+          <span class="chip">Multer file upload</span>
+          <span class="chip">Auto-seed on empty DB</span>
+        </div>
+      </div>
+
+      <div class="flow-conn"><span>▼ &nbsp; orchestrates &nbsp; ▼</span></div>
+
+      <div class="layer ai">
+        <div class="layer-head">
+          <span class="ico"><svg width="18" height="18" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a1 1 0 011 1v1.06a6 6 0 014.94 4.94H17a1 1 0 110 2h-1.06A6 6 0 0111 15.94V17a1 1 0 11-2 0v-1.06A6 6 0 014.06 11H3a1 1 0 110-2h1.06A6 6 0 019 4.06V3a1 1 0 011-1zm0 5a3 3 0 100 6 3 3 0 000-6z"/></svg></span>
+          <div>
+            <h3>AI Agent Layer <span style="font-size:11px;color:var(--ai);font-weight:700;">— Anthropic Claude SDK</span></h3>
+            <span class="sub"><code>backend-node/agent/</code> · model + extended-thinking resolved per role at runtime via Admin settings</span>
+          </div>
+        </div>
+        <div class="chips">
+          <span class="chip"><code>claude-processor</code> extraction</span>
+          <span class="chip"><code>quality-reviewer</code></span>
+          <span class="chip"><code>entity-registry</code> (source of truth)</span>
+          <span class="chip"><code>test-generator</code></span>
+          <span class="chip"><code>traceability</code> / <code>req-linker</code></span>
+          <span class="chip"><code>rasic-deriver</code> · <code>swimlane-deriver</code></span>
+          <span class="chip">ServiceNow: <code>sn-reverse-engineer</code> · <code>sn-reconcile</code> · <code>sn-review</code></span>
+          <span class="chip"><code>ai-config</code> usage + cost logging</span>
+        </div>
+      </div>
+
+      <div class="flow-conn"><span>▼ &nbsp; persists &nbsp; ▼</span></div>
+
+      <div class="layer data">
+        <div class="layer-head">
+          <span class="ico"><svg width="18" height="18" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2c3.866 0 7 1.343 7 3s-3.134 3-7 3-7-1.343-7-3 3.134-3 7-3zm7 5.5C17 9.157 13.866 10.5 10 10.5S3 9.157 3 7.5V11c0 1.657 3.134 3 7 3s7-1.343 7-3V7.5zm0 5C17 14.157 13.866 15.5 10 15.5S3 14.157 3 12.5V16c0 1.657 3.134 3 7 3s7-1.343 7-3v-3.5z"/></svg></span>
+          <div>
+            <h3>Persistence — SQLite</h3>
+            <span class="sub"><code>backend-node/asdlc.db</code> · ~50 tables defined in <code>schema.sql</code> · embedded, zero-install</span>
+          </div>
+        </div>
+        <div class="chips">
+          <span class="chip">Design: use_case · workflow · agent_spec · tool · requirements</span>
+          <span class="chip">Ingest: document · extraction · clarification</span>
+          <span class="chip">Governance: change_packet · baseline · audit_log · evidence</span>
+          <span class="chip">AI ops: app_setting · ai_usage · best_practice · feedback</span>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- 3. TECH STACK -->
+  <section>
+    <div class="sec-head">
+      <span class="num">03</span>
+      <div>
+        <h2>Technology Stack</h2>
+        <p>Deliberately zero-install: the active backend runs on Node's built-in SQLite, with a PostgreSQL + FastAPI path reserved for scale.</p>
+      </div>
+    </div>
+    <div class="grid">
+      <div class="tcard">
+        <h4>Runtime</h4>
+        <div class="main">Node.js ≥ 22.5</div>
+        <div class="sub">Built-in <code>node:sqlite</code> (DatabaseSync) — no native DB driver to compile.</div>
+      </div>
+      <div class="tcard">
+        <h4>HTTP / API</h4>
+        <div class="main">Express 5</div>
+        <div class="sub">Single server process exposing all <code>/api/v1</code> routes.</div>
+      </div>
+      <div class="tcard">
+        <h4>Database</h4>
+        <div class="main">SQLite</div>
+        <div class="sub">File-based <code>asdlc.db</code>, ~50 tables, seeded on first boot.</div>
+      </div>
+      <div class="tcard">
+        <h4>Frontend</h4>
+        <div class="main">Vanilla JS SPA</div>
+        <div class="sub">Native ES modules, hash routing, hand-rolled fetch — no build step, no framework.</div>
+      </div>
+      <div class="tcard">
+        <h4>AI / LLM</h4>
+        <div class="main">Anthropic Claude</div>
+        <ul>
+          <li><code>@anthropic-ai/sdk</code> tool-use</li>
+          <li>Opus 4.8 · Sonnet 4.6 · Haiku 4.5</li>
+          <li>Per-role model + thinking budget</li>
+        </ul>
+      </div>
+      <div class="tcard">
+        <h4>Documents</h4>
+        <div class="main">Ingest &amp; Export</div>
+        <ul>
+          <li><code>mammoth</code> — .docx → text</li>
+          <li><code>multer</code> — file uploads</li>
+          <li><code>docx</code> — generate exports</li>
+        </ul>
+      </div>
+      <div class="tcard">
+        <h4>Alternate Backend</h4>
+        <div class="main">FastAPI + PostgreSQL 16</div>
+        <div class="sub">Full SQL schema, triggers &amp; row-level security in <code>backend/</code> — for when Docker/Python are available.</div>
+      </div>
+      <div class="tcard">
+        <h4>Config &amp; Ops</h4>
+        <div class="main">Env-driven</div>
+        <div class="sub"><code>dotenv</code> for <code>ANTHROPIC_API_KEY</code>; in-app Admin settings override AI models live (no restart).</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4. DATA FLOW -->
+  <section>
+    <div class="sec-head">
+      <span class="num">04</span>
+      <div>
+        <h2>Data Flow — Document → Build Spec</h2>
+        <p>The core ingestion pipeline. Each step is explicitly an AI Agent or deterministic code; humans gate the transition into the real design tables.</p>
+      </div>
+    </div>
+    <div class="legend">
+      <span class="lk"><span class="sw ai"></span> AI Agent (Claude)</span>
+      <span class="lk"><span class="sw det"></span> Deterministic code</span>
+    </div>
+    <div class="steps">
+
+      <div class="step">
+        <div class="step-top"><span class="n">01</span><h4>Upload &amp; read document</h4><span class="badge det">Deterministic</span></div>
+        <p>User uploads a .docx/text file via <code>multer</code>; <code>document-reader</code> (<code>mammoth</code>) extracts plain text into <code>asdlc_ingest_document</code>.</p>
+      </div>
+
+      <div class="step ai">
+        <div class="step-top"><span class="n">02</span><h4>Extract design entities</h4><span class="badge ai">AI Agent</span></div>
+        <p>The <b>Extraction AI Agent</b> (<code>claude-processor</code>) uses Claude tool-use to emit structured entities — use cases, workflows, agents, tools, requirements — staged in <code>asdlc_ingest_extraction</code>. Tools &amp; field maps come from the deterministic <code>entity-registry</code>.</p>
+      </div>
+
+      <div class="step ai">
+        <div class="step-top"><span class="n">03</span><h4>Two-pass reconciliation</h4><span class="badge ai">AI Agent</span></div>
+        <p>For every <code>update</code>/<code>delete</code> against existing design, the server loads the full current record and the <b>Reconciler AI Agent</b> re-emits a complete, conflict-free version — no stale fields left behind.</p>
+      </div>
+
+      <div class="step ai">
+        <div class="step-top"><span class="n">04</span><h4>Clarification Q&amp;A rounds</h4><span class="badge ai">AI Agent</span></div>
+        <p>Where confidence is low, the agent raises clarification questions (<code>asdlc_ingest_clarification</code>); human answers feed a multi-round AI re-process until the extraction settles.</p>
+      </div>
+
+      <div class="step">
+        <div class="step-top"><span class="n">05</span><h4>Promote to a Change Packet</h4><span class="badge det">Deterministic</span></div>
+        <p>Promotion resolves target slugs and bundles all staged entities into <b>one</b> Change Packet (<code>pending_review</code>) with per-item create / update / delete diff items.</p>
+      </div>
+
+      <div class="step ai">
+        <div class="step-top"><span class="n">06</span><h4>Quality review</h4><span class="badge ai">AI Agent</span></div>
+        <p>The <b>Quality Reviewer AI Agent</b> checks requirements, workflow steps and derived elements for conflicts, gaps and validity, attaching findings for the human reviewer.</p>
+      </div>
+
+      <div class="step">
+        <div class="step-top"><span class="n">07</span><h4>Human approves → materialize</h4><span class="badge det">Deterministic</span></div>
+        <p>On approval, <code>applyChangePacket()</code> writes into the real design tables (insert / partial update / soft-delete), bumps the project version and records a full field-level <b>audit log</b>.</p>
+      </div>
+
+      <div class="step ai">
+        <div class="step-top"><span class="n">08</span><h4>Auto-generate tests &amp; links</h4><span class="badge ai">AI Agent</span></div>
+        <p>Fire-and-forget after commit: the <b>Test-Generator</b> and <b>Traceability AI Agents</b> synthesize test cases and requirement↔element links for newly materialized entities.</p>
+      </div>
+
+      <div class="step">
+        <div class="step-top"><span class="n">09</span><h4>Baseline &amp; Build Export</h4><span class="badge det">Deterministic</span></div>
+        <p>A reviewed version is locked as a <b>baseline</b>; Build Export emits a Markdown build spec for Claude Code / ServiceNow, with an optional AI design-review appendix.</p>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- 5. AGENTS -->
+  <section>
+    <div class="sec-head">
+      <span class="num">05</span>
+      <div>
+        <h2>AI Agents vs. Deterministic Code</h2>
+        <p>A clear seam runs through the system: Claude reasons and proposes; deterministic code resolves, gates and persists.</p>
+      </div>
+    </div>
+    <div class="roles">
+      <div class="rolecard">
+        <h4><span class="d ai"></span>Ingestion &amp; Design AI Agents</h4>
+        <ul>
+          <li><b>Extraction</b> — entities from documents <span class="model">· Sonnet 4.6 (default)</span></li>
+          <li><b>Reconciler</b> — full re-emit on updates</li>
+          <li><b>Quality Reviewer</b> — conflicts &amp; gaps</li>
+          <li><b>Test Generator</b> — coverage synthesis</li>
+          <li><b>Req-Linker</b> — traceability <span class="model">· Haiku 4.5</span></li>
+          <li><b>RASIC &amp; Swimlane derivers</b> — role/lane inference</li>
+        </ul>
+      </div>
+      <div class="rolecard">
+        <h4><span class="d ai"></span>ServiceNow Round-Trip AI Agents</h4>
+        <ul>
+          <li><b>Reverse-Engineer</b> — live SN app → design <span class="model">· Opus 4.8 + thinking</span></li>
+          <li><b>Reconcile</b> — merge against Workbench design <span class="model">· Opus 4.8</span></li>
+          <li><b>Review</b> — validate reconciled output <span class="model">· Opus 4.8</span></li>
+        </ul>
+      </div>
+      <div class="rolecard">
+        <h4><span class="d det"></span>Deterministic (non-AI) Code</h4>
+        <ul>
+          <li><b>entity-registry</b> — single source of truth</li>
+          <li><b>/promote</b> — slug resolution &amp; diffing</li>
+          <li><b>applyChangePacket()</b> — materializer</li>
+          <li><b>audit log</b> — field-level history</li>
+          <li><b>capture · gate · seed</b> — pipeline plumbing</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <span>Agentic SDLC Workbench — architecture overview · generated from the live codebase</span>
+  <span><em>Together</em> makes progress</span>
+</footer>
+
+</body>
+</html>

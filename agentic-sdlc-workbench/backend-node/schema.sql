@@ -499,6 +499,41 @@ CREATE INDEX IF NOT EXISTS idx_form_design_sysid    ON asdlc_form_design(source_
 CREATE INDEX IF NOT EXISTS idx_biz_logic_sysid      ON asdlc_business_logic(source_sys_id);
 CREATE INDEX IF NOT EXISTS idx_catalog_item_sysid   ON asdlc_catalog_item(source_sys_id);
 
+-- Outbound integrations — REST Message + Connection Alias in one table, differentiated by integration_type.
+-- rest_message fields: endpoint, auth_type, functions (JSON array of {name, http_method, endpoint?}).
+-- connection_alias fields: alias_type, connection_type.
+CREATE TABLE IF NOT EXISTS asdlc_integration (
+    integration_id   TEXT PRIMARY KEY,
+    project_id       TEXT REFERENCES asdlc_project(project_id),
+    slug             TEXT,
+    integration_type TEXT NOT NULL DEFAULT 'rest_message'
+        CHECK (integration_type IN ('rest_message', 'connection_alias')),
+    name             TEXT NOT NULL,
+    description      TEXT,
+    endpoint         TEXT,
+    auth_type        TEXT,
+    functions        TEXT NOT NULL DEFAULT '[]',
+    alias_type       TEXT,
+    connection_type  TEXT,
+    notes            TEXT,
+    -- ── Level-2 provenance (hidden) ──
+    source_system    TEXT NOT NULL DEFAULT 'servicenow',
+    source_sys_id    TEXT,
+    source_table     TEXT,
+    source_scope     TEXT,
+    source_fluent    TEXT,
+    source_hash      TEXT,
+    visibility_scope TEXT NOT NULL DEFAULT 'PROJECT',
+    lifecycle_status TEXT NOT NULL DEFAULT 'active',
+    created_by       TEXT,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by       TEXT,
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    version          INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_integration_project ON asdlc_integration(project_id);
+CREATE INDEX IF NOT EXISTS idx_integration_sysid   ON asdlc_integration(source_sys_id);
+
 CREATE TABLE IF NOT EXISTS asdlc_knowledge_article (
     knowledge_article_id TEXT PRIMARY KEY,
     project_id          TEXT REFERENCES asdlc_project(project_id),
