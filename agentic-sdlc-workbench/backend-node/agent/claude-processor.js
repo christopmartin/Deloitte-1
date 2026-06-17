@@ -23,7 +23,8 @@ const path      = require('path');
 const { db, generateId } = require('../db');
 const registry  = require('./entity-registry');
 const aiConfig  = require('./ai-config');
-const { withWiki } = require('./wiki-context');
+const { withWikiCore, getWikiTool, readWikiPage, wikiAvailable } = require('./wiki-context');
+const { render } = require('./prompt-templates');
 
 // ── Anthropic client (lazy) ───────────────────────────────────────────────────
 let _client;
@@ -84,6 +85,11 @@ const EXTRACTION_TOOLS = [
     },
   },
 ];
+
+// ── ServiceNow wiki lookup tool (progressive disclosure) ──────────────────────
+// Null when no wiki is loaded. Offered ONLY for ServiceNow work (platform-gated in
+// runExtractionLoop) and answered inline like get_existing_entity — never staged.
+const WIKI_TOOL = getWikiTool();
 
 // ── tool name → entity_type (from registry) ───────────────────────────────────
 const TOOL_TO_ENTITY = registry.toolToEntity();
@@ -271,12 +277,11 @@ function writeClarification(ingestId, round, q) {
 
 // ── Prompt builders ───────────────────────────────────────────────────────────
 function buildSystemPrompt(doc, threshold, answeredClarifications, existingSummary, bestPractices) {
-  const lines = [
-    `You are an expert requirements extraction agent for an Agentic AI Software Development Lifecycle (SDLC) Workbench.`,
-    ``,
-    `Your job: read the document and call the appropriate extraction tool for EVERY design entity you find.`,
-    `Call tools repeatedly — one call per entity. Do not combine multiple entities into one tool call.`,
-  ];
+  // Static prose lives in agent/prompts/*.md (versioned, diffable). The ASSEMBLY
+  // logic — which sections to include and in what order — stays here. Dynamic
+  // sections (best practices, document context, clarification answers) are built
+  // from DB data below. SCHEMA_SQL is injected from code as before.
+  const lines = [ render('extraction/role') ];
 
   if (bestPractices && bestPractices.length > 0) {
     lines.push(
@@ -287,145 +292,21 @@ function buildSystemPrompt(doc, threshold, answeredClarifications, existingSumma
   }
 
   lines.push(
-    ``,
-    `## Confidence rules`,
-    `- confidence is on a 0–1 scale and is REQUIRED on every extraction tool call.`,
-    `- If confidence >= ${threshold}: extract it. It will be staged for human review.`,
-    `- If confidence < ${threshold} but you have SOME basis: still extract your best inference, AND call`,
-    `  raise_clarification with a specific answerable question targeting the uncertain field.`,
-    `- Per FIELD: only fill a field when you have a basis. If you have NO basis for a field, LEAVE IT`,
-    `  BLANK (omit it) — never fabricate a value just to fill the slot. Raise a clarification for any`,
-    `  blank that is material to the design.`,
-    `- Be honest. Overconfidence creates bad data. It is better to ask (or leave blank) than to guess wrong.`,
-    `- Confidence means: how certain are you the extracted FIELD VALUES are accurate — not just that the entity exists.`,
-    ``,
-    `## What to extract`,
-    `  functional_req    — every explicit functional requirement, user need, or system capability`,
-    `  nonfunctional_req — every non-functional constraint (performance, security, scalability, compliance, etc.)`,
-    `  use_case          — any business objective or automation goal`,
-    `  workflow          — any named process or sequence of steps`,
-    `  workflow_step     — each individual step within a workflow (one tool call per step)`,
-    `  hitl_gate         — any point where a human must review, approve, or decide`,
-    `  agent_spec        — any AI agent described or clearly implied`,
-    `  tool              — any tool, API, function, query, or integration an agent uses`,
-    `  data_model        — any ServiceNow table / record type and its fields, at the business level`,
-    `  catalog_item      — a customer- or employee-facing REQUEST / intake form people fill in and`,
-    `                      submit (a Service Catalog item / record producer). Its variables ARE the`,
-    `                      form fields. Use this for "a prospect/user fills out a form to submit X".`,
-    `  form_design       — the layout of an INTERNAL record's form (section/field order, mandatory &`,
-    `                      read-only fields, dynamic UI behaviour) — what a fulfiller/reviewer sees on`,
-    `                      an existing record. NOT a public intake form (that is a catalog_item).`,
-    `  business_logic    — a NAMED automation mechanism with a concrete trigger (business rule on a`,
-    `                      record event, UI policy that toggles a field, scheduled job, client/server`,
-    `                      script). See the mechanism guard below — do NOT restate a plain requirement.`,
-    `  acceptance_criterion — ONE verifiable condition per call; ONLY when the parent Use Case is known`,
-    `  test_case         — ONE test scenario per call; link requirement_refs to FR/NFR slugs`,
-    `  guardrail         — any rule, constraint, limit, or boundary on agent behaviour`,
-    `  user_story        — any requirement stated from a user's perspective`,
-    `  data_source       — any system, database, API, or data store mentioned`,
-    `  process_segment   — named phases or stages (as-is or to-be analysis)`,
-    `  governance_control — any recurring audit, review, or oversight mechanism`,
-    ``,
-    `## Extraction order — follow this sequence`,
-    `  1. SCAN the document first to identify the use cases and their scope — note their titles`,
-    `     so you can correctly assign use_case_title when you extract requirements.`,
-    `     Then extract functional_req / nonfunctional_req — they are the source of truth.`,
-    `     Assign a priority (must_have / should_have / could_have / wont_have) to each.`,
-    `     ALWAYS set use_case_title on every FR/NFR — see Linking entities rule below.`,
-    `  2. use_case / workflow / agent_spec / tool — design entities derived from requirements.`,
-    `     Set use_case_title on each to link it to the requirement it serves.`,
-    `  3. data_model FIRST, then catalog_item / form_design, then business_logic — the ServiceNow`,
-    `     platform layer. A form_design lays out a table, so extract the data_model first and set the`,
-    `     form's data_model_name to it. business_logic usually runs on a table too — set its`,
-    `     data_model_name when known. Choose catalog_item for a customer-facing intake/request form`,
-    `     (its variables are the fields); choose form_design for an internal record's screen layout.`,
-    `  4. acceptance_criterion — extract ONLY when you can name the parent Use Case exactly.`,
-    `     Set req_slug to the FR-### or NFR-### it satisfies (e.g. req_slug: "FR-003").`,
-    `     If no Use Case is identifiable, raise a clarification instead of guessing.`,
-    `  5. test_case — link scope_entity_name to a Use Case, Workflow, Agent, or Tool you are`,
-    `     extracting. Set requirement_refs to the FR/NFR slugs this test validates`,
-    `     (e.g. ["FR-003", "NFR-001"]). Use slugs from the existing design or from this`,
-    `     extraction — if the FR has no slug yet, reference its title instead and the system`,
-    `     will resolve it post-materialization.`,
-    ``,
-    `## business_logic vs functional_req — the mechanism guard`,
-    `  A functional_req is WHAT the system must do (the stakeholder's need). A business_logic is a`,
-    `  concrete HOW — a named automation mechanism with a specific trigger. Extract business_logic`,
-    `  ONLY when the document names a concrete mechanism AND trigger, e.g.:`,
-    `    - a business rule firing on a record event ("when an Adoption is saved, set Status = Pending")`,
-    `    - a UI policy that toggles a field ("make Return Date mandatory when Status = Returned")`,
-    `    - a scheduled job ("every night, flag overdue adoptions")`,
-    `    - a client/server script with a defined trigger`,
-    `  A generic "the system shall X" with NO named mechanism stays a functional_req — do NOT also emit`,
-    `  a business_logic that merely restates it. Describe business_logic in plain business language;`,
-    `  NEVER include code. When a business_logic elaborates a requirement, set requirement_refs to the`,
-    `  FR/NFR slug(s) it implements.`,
-    ``,
-    `## Linking entities`,
-    `  - When you extract a workflow, set use_case_title to the use case it belongs to.`,
-    `  - When you extract a workflow_step or hitl_gate, set workflow_name to its parent workflow.`,
-    `  - When you extract an agent_spec, set use_case_title (and workflow_name if relevant).`,
-    `  - When you extract a functional_req or nonfunctional_req, ALWAYS set use_case_title`,
-    `    to the use case it logically belongs to. You extract use cases in the same pass, so`,
-    `    scan for them first (see Extraction order step 1). Only omit use_case_title for`,
-    `    genuinely cross-cutting NFRs (e.g. "system uptime 99.9%", "data encrypted at rest")`,
-    `    that apply equally to every use case — not simply because the doc hasn't named the UC.`,
-    `    Unlinked requirements appear as orphans in the design and cannot be traced to use cases.`,
-    `  - When you extract a form_design, set data_model_name to the table it lays out.`,
-    `  - When you extract a catalog_item, set workflow_name to the workflow that fulfils the request.`,
-    `  - When you extract a business_logic, set data_model_name to the table it runs on (if any), and`,
-    `    set requirement_refs to the FR/NFR slug(s) it implements when it elaborates a requirement.`,
-    `  - Use the EXACT title/name of an entity you are also extracting, or one already in the existing design.`,
-    ``,
-    `## What NOT to do`,
-    `  - Do not invent entities not present or clearly implied in the document`,
-    `  - Do not extract the same entity twice`,
-    `  - Do not extract acceptance_criterion or test_case when the parent Use Case is ambiguous — raise a clarification`,
-    `  - Do not raise clarification questions for things you can reasonably infer`,
-    `  - Do not stop early — read the entire document before concluding`,
+    ``, render('extraction/confidence-rules', { threshold }),
+    ``, render('extraction/what-to-extract'),
+    ``, render('extraction/extraction-order'),
+    ``, render('extraction/mechanism-guard'),
+    ``, render('extraction/linking'),
+    ``, render('extraction/what-not-to-do'),
   );
 
   // ── AI mode dial (Faithful ↔ Balanced ↔ Suggestive) ────────────────────────
   const level = String(doc.enrichment_level || 'balanced').toLowerCase();
   if (level === 'balanced' || level === 'suggestive') {
-    lines.push(
-      ``,
-      `## AI mode: ${level.toUpperCase()} — go beyond verbatim transcription`,
-      `Stakeholders write incomplete documents. In this mode you act as a senior agentic-SDLC architect,`,
-      `not just a transcriber. FILL the obviously-implied EMPTY fields on the entities you extract — but`,
-      `NEVER overwrite or contradict something the document actually states:`,
-      `  - use_case: owner, primary_success_metric, risk_tier, success_criteria, users, urgency, volume_assumptions, readiness`,
-      `  - workflow: trigger (set the structured trigger.type/system/event_name/schedule, not just a sentence),`,
-      `    handoffs, decisions, fallback_paths, risk_tier, sla_hours, runs_per_period, readiness`,
-      `  - workflow_step: actor_role (the role/system that performs it), step_type, step_purpose, preconditions, evidence_captured, inputs, outputs`,
-      `  - agent_spec: supervision_model, orchestration_strategy, maintenance_owner, latency_target, inputs, outputs, goals, done_criteria`,
-      `  - hitl_gate: gate_type, criteria, owner_role, sla, handoff_mechanism`,
-      `  - nonfunctional_req: measurable_target, verification_method, category`,
-      `  - tool: contract, inputs, outputs, errors, access_requirements, boundaries, dev_status`,
-      `Base every inferred value on what the design clearly implies, and keep confidence honest (lower it`,
-      `for inferred values). Filling an empty field on a document-evidenced entity does NOT make that`,
-      `entity system_generated — leave that flag false for it.`,
-    );
+    lines.push(``, render('extraction/ai-mode-balanced', { level_upper: level.toUpperCase() }));
   }
   if (level === 'suggestive') {
-    lines.push(
-      ``,
-      `### SUGGESTIVE additions — propose clearly-implied NET-NEW elements`,
-      `Here the "do not invent" rule above is RELAXED, but ONLY for elements you explicitly label. Propose`,
-      `the best-practice and clearly-implied elements a senior architect would add to make THIS design`,
-      `production-ready, and set system_generated=true (operation="create") on EACH so a human can review,`,
-      `keep, or delete it:`,
-      `  - Standard agentic NON-FUNCTIONAL REQUIREMENTS this document omits: risk tiering, latency / SLA,`,
-      `    throughput & volume, security & PII handling, observability / audit logging, human-oversight &`,
-      `    fallback behaviour, cost / rate limits. One nonfunctional_req per concern, each with a`,
-      `    measurable_target placeholder for a human to confirm.`,
-      `  - IMPLIED DATA SOURCES the agents must read or write that the document never named (e.g. a`,
-      `    catalog/inventory an agent must look up, or a system of record it must query).`,
-      `  - Any obviously-missing supporting TOOL an agent needs to perform a stated step.`,
-      `Stay grounded: propose only what THIS design genuinely implies — never pad with generic boilerplate`,
-      `that does not fit. Every suggestive net-new entity MUST carry system_generated=true; never set that`,
-      `flag on something the document actually states.`,
-    );
+    lines.push(``, render('extraction/ai-mode-suggestive'));
   }
 
   // ── Conflict detection against existing design ──────────────────────────────
@@ -434,36 +315,9 @@ function buildSystemPrompt(doc, threshold, answeredClarifications, existingSumma
     `## Existing design for this application (detect overlaps before creating new)`,
   );
   if (existingSummary && existingSummary.trim()) {
-    lines.push(
-      `Each line is:  slug | entity_type | "name"`,
-      existingSummary,
-      ``,
-      `For every entity you extract, set these fields:`,
-      `  - operation: "create" for a brand-new entity; "update" if it changes one of the entities`,
-      `    listed above; "delete" if the document says to remove one.`,
-      `  - target_slug: REQUIRED for update/delete — the slug from the list above. NEVER invent a slug.`,
-      `  - conflict_classification: net_new | modifies_existing | deletes_existing.`,
-      `  - conflict_rationale: one sentence explaining the classification.`,
-      `If you are unsure whether something matches an existing entity, prefer operation=create and note the`,
-      `possible overlap in conflict_rationale so a human can decide.`,
-      ``,
-      `### Reconciling updates (IMPORTANT — avoid leaving stale data)`,
-      `The list above shows only slugs and names, NOT field values. Before you propose operation=update`,
-      `or operation=delete, you MUST call get_existing_entity(slug, entity_type) to load the entity's`,
-      `full current record. Then re-emit the COMPLETE entity with EVERY field reconciled — not just the`,
-      `one field the document mentions. Only fields you include are written; any field you omit keeps its`,
-      `old value.`,
-      `Changes ripple: e.g. renaming a tool from a SAP integration to an Oracle one usually also changes`,
-      `its error codes (sap_unavailable → oracle_unavailable), access roles ("SAP AP read role" → the`,
-      `Oracle equivalent), endpoints, base URLs, and descriptions. Inspect every field of the loaded`,
-      `record and update anything that still references the old system, name, or behaviour. Do not leave`,
-      `stale values behind.`,
-    );
+    lines.push(render('extraction/existing-design', { existing_design: existingSummary }));
   } else {
-    lines.push(
-      `This application has no existing design yet — everything you find is brand new.`,
-      `Set operation="create" and conflict_classification="net_new" on every entity.`,
-    );
+    lines.push(render('extraction/no-existing-design'));
   }
 
   lines.push(
@@ -540,6 +394,11 @@ function buildUserMessage(doc, round, threshold) {
 async function runExtractionLoop(systemPrompt, userMessage, usageCtx, role = 'extraction') {
   const client = getClient();
   const projectId = usageCtx && usageCtx.projectId;
+  const platform  = usageCtx && usageCtx.platform;
+  // Offer the ServiceNow wiki via progressive disclosure (small core block up
+  // front + read_wiki_page tool) only for ServiceNow work and only when a wiki
+  // is loaded. Non-ServiceNow projects pay nothing for it.
+  const wikiOn    = wikiAvailable(platform) && !!WIKI_TOOL;
   const allToolUses = [];
   let messages = [{ role: 'user', content: userMessage }];
   let loops = 0;
@@ -565,8 +424,10 @@ async function runExtractionLoop(systemPrompt, userMessage, usageCtx, role = 'ex
       // Cache the (within-run-identical) system prompt as one ephemeral block, mirroring the
       // SN modules (sn-reverse-engineer.js:227). The schema SQL + static guidance are the bulk of
       // it; loops 2..N of this extraction run then read it from cache instead of re-billing it.
-      system:     withWiki([{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }]),
-      tools:      EXTRACTION_TOOLS,
+      // withWikiCore prepends only the small wiki core (TOC + page list) when wikiOn; the model
+      // pulls full pages on demand via read_wiki_page.
+      system:     withWikiCore([{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }], platform),
+      tools:      wikiOn ? [...EXTRACTION_TOOLS, WIKI_TOOL] : EXTRACTION_TOOLS,
       tool_choice:{ type: 'auto' },
       messages,
     };
@@ -592,9 +453,10 @@ async function runExtractionLoop(systemPrompt, userMessage, usageCtx, role = 'ex
       `total so far: ${allToolUses.length + toolUses.length}`
     );
 
-    // Lookups (get_existing_entity) are answered inline below — they are NOT
-    // extractions, so keep them out of the collected tool-use set.
-    allToolUses.push(...toolUses.filter(tu => tu.name !== 'get_existing_entity'));
+    // Lookups (get_existing_entity, read_wiki_page) are answered inline below —
+    // they are NOT extractions, so keep them out of the collected tool-use set.
+    allToolUses.push(...toolUses.filter(
+      tu => tu.name !== 'get_existing_entity' && tu.name !== 'read_wiki_page'));
 
     // Done when Claude signals end_turn or produces no tool calls
     if (response.stop_reason === 'end_turn' || toolUses.length === 0) break;
@@ -613,6 +475,13 @@ async function runExtractionLoop(systemPrompt, userMessage, usageCtx, role = 'ex
           content:     rec
             ? JSON.stringify(rec)
             : `No active entity found for slug "${slug}" (entity_type "${etype}"). It may not exist or may already be retired — prefer operation=create and note the uncertainty in conflict_rationale.`,
+        };
+      }
+      if (tu.name === 'read_wiki_page') {
+        return {
+          type:        'tool_result',
+          tool_use_id: tu.id,
+          content:     readWikiPage(tu.input && tu.input.page),
         };
       }
       return { type: 'tool_result', tool_use_id: tu.id, content: 'Recorded.' };
@@ -663,13 +532,7 @@ function deleteExtraction(extractionId) {
 }
 
 function buildReconcileSystemPrompt(doc, bestPractices) {
-  const lines = [
-    `You are reconciling UPDATES to existing design entities for the application "${doc.project_name || 'Unknown'}".`,
-    ``,
-    `You will be given a set of existing entities that the source document changes. For EACH one you`,
-    `receive its COMPLETE current stored record (JSON). Your job is to call that entity's extract_<type>`,
-    `tool ONCE, re-emitting the FULL reconciled record.`,
-  ];
+  const lines = [ render('reconcile/intro', { project_name: doc.project_name || 'Unknown' }) ];
 
   if (bestPractices && bestPractices.length > 0) {
     lines.push(
@@ -681,20 +544,7 @@ function buildReconcileSystemPrompt(doc, bestPractices) {
 
   lines.push(
     ``,
-    `## Reconciliation rules (CRITICAL)`,
-    `  - Call the extract_<type> tool once per entity listed below — no more, no fewer.`,
-    `  - Set operation="update" (or "delete" if the document removes the entity) and target_slug to the`,
-    `    slug shown for that entity. Never invent a slug.`,
-    `  - Include EVERY field of the entity, not just the ones that change. Any field you omit is LOST —`,
-    `    the system only writes fields you provide.`,
-    `  - Start from the current record. Change every field affected by the document; keep correct fields`,
-    `    exactly as they are.`,
-    `  - Propagate ripple effects. A rename or system change cascades: e.g. moving a tool from SAP to`,
-    `    Oracle also changes its error codes (sap_unavailable → oracle_unavailable), access roles`,
-    `    ("SAP AP read role" → the Oracle equivalent), endpoints, base URLs, contract, and descriptions.`,
-    `    Scan the whole record for anything still referencing the old system, name, or behaviour and fix it.`,
-    `  - Do NOT introduce new entities or re-emit entities not in the list below.`,
-    `  - Set confidence (0–1) and conflict_rationale on each call.`,
+    render('reconcile/rules'),
     ``,
     `## Workbench database schema`,
     SCHEMA_SQL,
@@ -733,7 +583,7 @@ function buildReconcileUserMessage(doc, targets) {
  * reconcile (no update/delete whose target resolves to a real entity).
  * @returns {Promise<null | { corrected: Array, replacedKeys: Set<string> }>}
  */
-async function reconcileUpdates(doc, threshold, round, pass1Items, bestPractices) {
+async function reconcileUpdates(doc, threshold, round, pass1Items, bestPractices, platform) {
   // Find pass-1 update/delete items whose target_slug resolves to a live record.
   const targets = [];
   for (const it of pass1Items) {
@@ -753,7 +603,7 @@ async function reconcileUpdates(doc, threshold, round, pass1Items, bestPractices
   const toolUses = await runExtractionLoop(
     buildReconcileSystemPrompt(doc, bestPractices),
     buildReconcileUserMessage(doc, targets),
-    { projectId: doc.project_id, ingestId: doc.ingest_id, round, source: 'ingest_reconcile' }
+    { projectId: doc.project_id, ingestId: doc.ingest_id, round, source: 'ingest_reconcile', platform }
   );
 
   // Keep only entity extractions that target one of the slugs we asked about.
@@ -797,36 +647,17 @@ function buildSynthesisUserMessage(doc, pass1Items, standingQuestions) {
     ? standingQuestions.map(q => `  - [${q.scope}] ${q.title}: ${q.rule_text}`).join('\n')
     : '  (none configured)';
 
-  return [
-    `You are acting as a SENIOR AGENTIC-SDLC ARCHITECT performing a second-pass design review.`,
-    `A first pass already faithfully extracted what the document literally states (listed below).`,
-    `Your job now is to turn that into a COMPLETE, production-ready design — not to re-transcribe the document.`,
-    ``,
-    `## Already captured — do NOT re-emit these unless you are filling an empty field on one`,
-    `   (then re-emit with the SAME name so it UPDATES rather than duplicating):`,
+  const bold_line = level === 'suggestive'
+    ? `     Be bold — also add standard agentic best-practice elements even if only loosely implied.`
+    : `     Add only entities clearly warranted by the stated design (balanced mode — be selective).`;
+
+  return render('synthesis/user', {
     captured,
-    ``,
-    `## Your tasks (AI mode: ${level.toUpperCase()})`,
-    `  1. FILL obviously-implied empty fields on the captured entities (re-emit with the same name; lower`,
-    `     your confidence for inferred values).`,
-    `  2. PROPOSE clearly-implied NET-NEW entities a senior architect would add to make THIS design work —`,
-    `     agents, workflow steps, HITL gates, tools, data models, forms, NFRs, acceptance criteria, test`,
-    `     cases, etc. Set system_generated=true and operation="create" on each so a human can review it.`,
-    level === 'suggestive'
-      ? `     Be bold — also add standard agentic best-practice elements even if only loosely implied.`
-      : `     Add only entities clearly warranted by the stated design (balanced mode — be selective).`,
-    `  3. Leave a field BLANK when you have no basis for it — never fabricate a value.`,
-    `  4. Raise a clarification (raise_clarification) for any GLARING gap a product owner must resolve,`,
-    `     phrased specifically against THIS document. Use these org "standing questions" as SEEDS — raise`,
-    `     the ones MATERIAL here, ignore the rest. Do NOT ask about workflow run-volumes or agent cost`,
-    `     models — those are collected separately.`,
+    level_upper: level.toUpperCase(),
+    bold_line,
     seeds,
-    ``,
-    `## Source document`,
-    `---`,
-    doc.raw_text,
-    `---`,
-  ].join('\n');
+    raw_text: doc.raw_text,
+  });
 }
 
 /**
@@ -834,7 +665,7 @@ function buildSynthesisUserMessage(doc, pass1Items, standingQuestions) {
  * role (Opus by default). Skipped in faithful mode. Caller wraps this in try/catch (never fatal).
  * @returns {Promise<{created:number, clarified:number}>}
  */
-async function synthesizeDesign(doc, threshold, round, pass1Items, existingSummary, bestPractices, answeredClarifications) {
+async function synthesizeDesign(doc, threshold, round, pass1Items, existingSummary, bestPractices, answeredClarifications, platform) {
   const level = String(doc.enrichment_level || 'balanced').toLowerCase();
   if (level === 'faithful') {
     console.log('[claude-processor] Synthesis pass skipped — faithful mode');
@@ -853,7 +684,7 @@ async function synthesizeDesign(doc, threshold, round, pass1Items, existingSumma
   const toolUses = await runExtractionLoop(
     buildSystemPrompt(doc, threshold, answeredClarifications, existingSummary, bestPractices),
     buildSynthesisUserMessage(doc, pass1Items, standingQuestions),
-    { projectId: doc.project_id, ingestId: doc.ingest_id, round, source: 'ingest_synthesis' },
+    { projectId: doc.project_id, ingestId: doc.ingest_id, round, source: 'ingest_synthesis', platform },
     'synthesis'
   );
 
@@ -921,7 +752,7 @@ async function processDocument(ingestId) {
     allToolUses = await runExtractionLoop(
       buildSystemPrompt(doc, threshold, answeredClarifications, existingSummary, bestPractices),
       buildUserMessage(doc, round, threshold),
-      { projectId: doc.project_id, ingestId, round }
+      { projectId: doc.project_id, ingestId, round, platform }
     );
   } catch (err) {
     console.error('[claude-processor] API error:', err.message);
@@ -980,7 +811,7 @@ async function processDocument(ingestId) {
   // ── Pass 2: forced reconciliation of update/delete targets ─────────────────
   // Never fatal — if the reconciliation call fails we keep the pass-1 versions.
   try {
-    const result = await reconcileUpdates(doc, threshold, round, pass1Items, bestPractices);
+    const result = await reconcileUpdates(doc, threshold, round, pass1Items, bestPractices, platform);
     if (result && result.corrected.length) {
       for (const c of result.corrected) {
         const key   = `${c.entityType}::${c.entityData.target_slug}`;
@@ -1000,7 +831,7 @@ async function processDocument(ingestId) {
   //    take 5-6 min with no meaningful design gain. Never fatal — failure keeps the pass-1/2 design.
   if (round === 1) {
     try {
-      const synth = await synthesizeDesign(doc, threshold, round, pass1Items, existingSummary, bestPractices, answeredClarifications);
+      const synth = await synthesizeDesign(doc, threshold, round, pass1Items, existingSummary, bestPractices, answeredClarifications, platform);
       if (synth) clarified += synth.clarified;
     } catch (err) {
       console.warn(`[claude-processor] Synthesis pass failed — keeping prior design: ${err.message}`);
@@ -1034,4 +865,11 @@ async function processDocument(ingestId) {
   return { extractions_staged: staged, clarifications_raised: clarified, round, new_status: newStatus, threshold };
 }
 
-module.exports = { processDocument };
+module.exports = {
+  processDocument,
+  // Exported for the prompt-parity harness / future tests. The builders are pure
+  // (string in → string out); exporting them does not change runtime behavior.
+  buildSystemPrompt,
+  buildReconcileSystemPrompt,
+  buildSynthesisUserMessage,
+};
