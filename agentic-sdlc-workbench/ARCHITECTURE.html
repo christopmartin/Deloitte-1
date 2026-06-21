@@ -1,0 +1,996 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agentic SDLC Workbench — Architecture</title>
+  <style>
+    :root {
+      --blue:    #1d4ed8;
+      --blue-lt: #dbeafe;
+      --purple:  #7c3aed;
+      --purp-lt: #ede9fe;
+      --green:   #059669;
+      --grn-lt:  #d1fae5;
+      --teal:    #0891b2;
+      --teal-lt: #cffafe;
+      --amber:   #d97706;
+      --amb-lt:  #fef3c7;
+      --rose:    #be185d;
+      --rose-lt: #fce7f3;
+      --slate:   #475569;
+      --slate-lt:#f1f5f9;
+      --bg:      #f8fafc;
+      --card:    #ffffff;
+      --border:  #e2e8f0;
+      --text:    #0f172a;
+      --muted:   #64748b;
+      --sidebar: 220px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+           background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.6; }
+    a { color: var(--blue); }
+    code { font-family: 'Cascadia Code', 'Fira Code', 'Courier New', monospace;
+           background: var(--slate-lt); padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+    pre code { background: transparent; padding: 0; }
+    pre.code-block { background: #1e293b; color: #e2e8f0; padding: 16px; border-radius: 8px;
+                     overflow-x: auto; font-size: 12px; line-height: 1.5; }
+
+    /* LAYOUT */
+    .app { display: flex; min-height: 100vh; }
+    .sidebar {
+      width: var(--sidebar); background: #1e293b; color: #cbd5e1;
+      position: fixed; top: 0; left: 0; height: 100vh; overflow-y: auto;
+      display: flex; flex-direction: column; z-index: 100;
+    }
+    .sidebar-header { padding: 20px 16px 12px; border-bottom: 1px solid #334155; }
+    .sidebar-header h2 { font-size: 13px; font-weight: 700; color: #f1f5f9;
+                          letter-spacing: 0.05em; text-transform: uppercase; }
+    .sidebar-header p  { font-size: 11px; color: #94a3b8; margin-top: 2px; }
+    .sidebar nav { padding: 8px 0; flex: 1; }
+    .nav-group { padding: 8px 12px 4px; font-size: 10px; font-weight: 700;
+                  text-transform: uppercase; letter-spacing: 0.08em; color: #475569; }
+    .nav-btn {
+      display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 16px;
+      background: none; border: none; color: #94a3b8; cursor: pointer;
+      text-align: left; font-size: 13px; transition: all 0.15s; border-left: 3px solid transparent;
+    }
+    .nav-btn:hover  { background: #273549; color: #e2e8f0; }
+    .nav-btn.active { background: #1e3a5f; color: #93c5fd; border-left-color: #3b82f6; }
+    .nav-icon { font-size: 15px; width: 18px; text-align: center; }
+
+    .main { margin-left: var(--sidebar); flex: 1; }
+    .page-header {
+      background: var(--card); border-bottom: 1px solid var(--border);
+      padding: 24px 32px; position: sticky; top: 0; z-index: 50;
+    }
+    .page-header h1 { font-size: 20px; font-weight: 700; color: var(--text); }
+    .page-header p  { color: var(--muted); font-size: 13px; margin-top: 3px; }
+    .content { padding: 32px; max-width: 1400px; }
+
+    /* SECTIONS */
+    .section { display: none; }
+    .section.active { display: block; }
+
+    /* CARDS */
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 10px; overflow: hidden; margin-bottom: 20px;
+    }
+    .card-header {
+      padding: 14px 20px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 10px;
+    }
+    .card-header h3 { font-size: 15px; font-weight: 600; }
+    .card-header p  { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .card-body { padding: 20px; }
+    .card-body p { color: var(--muted); margin-bottom: 12px; font-size: 13px; }
+    .card-body p:last-child { margin-bottom: 0; }
+
+    /* GRID LAYOUTS */
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+
+    /* STAT CARDS */
+    .stat-card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 8px; padding: 16px; text-align: center;
+    }
+    .stat-card .num { font-size: 28px; font-weight: 800; }
+    .stat-card .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase;
+                       letter-spacing: 0.06em; margin-top: 4px; }
+
+    /* TABLES */
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { background: var(--slate-lt); padding: 8px 12px; text-align: left;
+          font-size: 11px; font-weight: 700; text-transform: uppercase;
+          letter-spacing: 0.06em; color: var(--muted); border-bottom: 1px solid var(--border); }
+    td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: var(--slate-lt); }
+    td code { font-size: 11px; }
+
+    /* BADGES */
+    .badge {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 600;
+    }
+    .badge-blue   { background: var(--blue-lt); color: var(--blue); }
+    .badge-purple { background: var(--purp-lt); color: var(--purple); }
+    .badge-green  { background: var(--grn-lt);  color: var(--green); }
+    .badge-teal   { background: var(--teal-lt); color: var(--teal); }
+    .badge-amber  { background: var(--amb-lt);  color: var(--amber); }
+    .badge-rose   { background: var(--rose-lt); color: var(--rose); }
+    .badge-slate  { background: var(--slate-lt);color: var(--slate); }
+
+    /* MERMAID */
+    .diagram-wrap {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 10px; padding: 24px; margin-bottom: 20px; overflow-x: auto;
+    }
+    .diagram-wrap h3 { font-size: 14px; font-weight: 600; margin-bottom: 16px;
+                        color: var(--muted); text-transform: uppercase;
+                        letter-spacing: 0.05em; font-size: 11px; }
+    .mermaid { min-width: 400px; }
+
+    /* FLOW BLOCKS (custom) */
+    .flow-steps { display: flex; flex-direction: column; gap: 0; }
+    .flow-step {
+      display: flex; align-items: flex-start; gap: 16px;
+      padding: 14px 0; border-bottom: 1px solid var(--border);
+      position: relative;
+    }
+    .flow-step:last-child { border-bottom: none; }
+    .flow-num {
+      width: 28px; height: 28px; border-radius: 50%;
+      background: var(--blue); color: #fff; font-weight: 700; font-size: 12px;
+      display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 2px;
+    }
+    .flow-step-content h4 { font-size: 14px; font-weight: 600; }
+    .flow-step-content p  { color: var(--muted); font-size: 12px; margin-top: 3px; }
+
+    /* MODULE GRID */
+    .module-card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 8px; padding: 14px; border-left: 4px solid var(--blue);
+    }
+    .module-card h4 { font-size: 13px; font-weight: 700; }
+    .module-card p  { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .module-card.purple { border-left-color: var(--purple); }
+    .module-card.green  { border-left-color: var(--green); }
+    .module-card.teal   { border-left-color: var(--teal); }
+    .module-card.amber  { border-left-color: var(--amber); }
+    .module-card.rose   { border-left-color: var(--rose); }
+    .module-card.slate  { border-left-color: var(--slate); }
+
+    /* DB DOMAIN CARDS */
+    .domain-card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 10px; overflow: hidden; margin-bottom: 20px;
+    }
+    .domain-header {
+      padding: 12px 16px; font-size: 13px; font-weight: 700;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .domain-header.dh-blue   { background: var(--blue-lt); color: var(--blue); }
+    .domain-header.dh-purple { background: var(--purp-lt); color: var(--purple); }
+    .domain-header.dh-green  { background: var(--grn-lt);  color: var(--green); }
+    .domain-header.dh-teal   { background: var(--teal-lt); color: var(--teal); }
+    .domain-header.dh-amber  { background: var(--amb-lt);  color: var(--amber); }
+    .domain-header.dh-rose   { background: var(--rose-lt); color: var(--rose); }
+    .domain-header.dh-slate  { background: var(--slate-lt);color: var(--slate); }
+    .table-row { padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; gap: 16px; }
+    .table-row:last-child { border-bottom: none; }
+    .table-row:hover { background: var(--bg); }
+    .table-name { font-family: 'Cascadia Code','Fira Code',monospace; font-size: 12px;
+                   font-weight: 700; min-width: 260px; color: var(--text); }
+    .table-desc { font-size: 12px; color: var(--muted); flex: 1; }
+    .table-pk   { font-family: 'Cascadia Code','Fira Code',monospace; font-size: 11px;
+                   color: var(--amber); min-width: 160px; }
+
+    /* DECISION CARDS */
+    .decision-card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 10px; padding: 18px 20px; margin-bottom: 12px;
+      display: flex; gap: 16px; align-items: flex-start;
+    }
+    .decision-num {
+      width: 32px; height: 32px; border-radius: 8px; background: var(--blue);
+      color: #fff; font-weight: 800; font-size: 14px;
+      display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    }
+    .decision-content h4 { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+    .decision-content p  { font-size: 13px; color: var(--muted); }
+
+    /* SECTION HEADER */
+    .section-intro { margin-bottom: 24px; }
+    .section-intro h2 { font-size: 22px; font-weight: 800; margin-bottom: 6px; }
+    .section-intro p  { font-size: 14px; color: var(--muted); max-width: 700px; }
+
+    .sep { height: 1px; background: var(--border); margin: 28px 0; }
+    h3.sub { font-size: 16px; font-weight: 700; margin: 24px 0 12px; }
+
+    @media (max-width: 900px) {
+      .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+      .sidebar { display: none; }
+      .main { margin-left: 0; }
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+
+<!-- SIDEBAR -->
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>SDLC Workbench</h2>
+    <p>Architecture Reference</p>
+  </div>
+  <nav>
+    <div class="nav-group">Diagrams</div>
+    <button class="nav-btn active" data-section="overview" onclick="show('overview',this)">
+      <span class="nav-icon">🏗</span> System Architecture
+    </button>
+    <button class="nav-btn" data-section="frontend" onclick="show('frontend',this)">
+      <span class="nav-icon">🖥</span> Frontend Modules
+    </button>
+    <button class="nav-btn" data-section="backend" onclick="show('backend',this)">
+      <span class="nav-icon">⚙️</span> Backend &amp; AI Pipeline
+    </button>
+    <div class="nav-group">Data Model</div>
+    <button class="nav-btn" data-section="erd" onclick="show('erd',this)">
+      <span class="nav-icon">🔗</span> Relationships (ERD)
+    </button>
+    <button class="nav-btn" data-section="tables" onclick="show('tables',this)">
+      <span class="nav-icon">📋</span> Table Details
+    </button>
+    <div class="nav-group">Reference</div>
+    <button class="nav-btn" data-section="decisions" onclick="show('decisions',this)">
+      <span class="nav-icon">💡</span> Key Decisions
+    </button>
+    <button class="nav-btn" data-section="api" onclick="show('api',this)">
+      <span class="nav-icon">🌐</span> API Quick Ref
+    </button>
+  </nav>
+</aside>
+
+<!-- MAIN CONTENT -->
+<div class="main">
+<div class="page-header">
+  <h1>Agentic SDLC Workbench</h1>
+  <p>Architecture reference &mdash; functional blocks, data flows, and database schema</p>
+</div>
+<div class="content">
+
+<!-- ====== SECTION: OVERVIEW ====== -->
+<section id="overview" class="section active">
+  <div class="section-intro">
+    <h2>System Architecture</h2>
+    <p>A local-prototype web application that takes a BRD or transcript, uses Claude to extract structured design artifacts, routes them through a change-control review, and produces a ServiceNow deployment-ready design package.</p>
+  </div>
+
+  <div class="grid-4" style="margin-bottom:24px">
+    <div class="stat-card"><div class="num" style="color:var(--blue)">45</div><div class="lbl">Database Tables</div></div>
+    <div class="stat-card"><div class="num" style="color:var(--purple)">20</div><div class="lbl">Frontend Modules</div></div>
+    <div class="stat-card"><div class="num" style="color:var(--green)">100+</div><div class="lbl">REST Routes</div></div>
+    <div class="stat-card"><div class="num" style="color:var(--amber)">15+</div><div class="lbl">AI Agent Files</div></div>
+  </div>
+
+  <div class="diagram-wrap">
+    <h3>Top-Level Architecture</h3>
+    <div class="mermaid">
+graph LR
+    subgraph Browser["Browser — Vanilla JS SPA (20 modules)"]
+        FE_D["Design &amp; Ingest\ningest · design_review\nchange_packets · testing"]
+        FE_G["Governance\nvalidation · baseline\naudit · evidence · library"]
+        FE_S["ServiceNow\nsn_sync · sn_assessment"]
+        FE_A["Admin &amp; Cost\nadmin_ai · cost_projections\nreports · build_export"]
+    end
+
+    subgraph Server["Node.js 22.5 / Express 5"]
+        REST["REST API Layer\n~100 routes / 18 groups"]
+        subgraph Agents["agent/ — AI Processing Modules"]
+            IP["Ingest Pipeline\nprocessor → claude-processor\nentity-registry → cross-check"]
+            SN["ServiceNow\nsn-sync → sn-capture\nsn-reverse-engineer"]
+            QA["Quality &amp; Analysis\nquality-reviewer\nswimlanet-deriver · rasic-deriver"]
+        end
+        AIC["ai-config.js\nPer-role model routing"]
+        DB[("SQLite asdlc.db\n45 tables")]
+    end
+
+    Claude["Anthropic Claude\nOpus · Sonnet · Haiku"]
+    SNAPI["ServiceNow\nREST API"]
+
+    Browser -->|"X-User-ID + /api/v1/*"| REST
+    REST --> IP & SN & QA
+    REST --> DB
+    IP & SN & QA --> DB
+    IP & SN & QA --> AIC
+    AIC --> Claude
+    SN --> SNAPI
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><div><h3>Tech Stack</h3></div></div>
+    <div class="card-body" style="padding:0">
+      <table>
+        <thead><tr><th>Layer</th><th>Technology</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td><span class="badge badge-blue">Runtime</span></td><td>Node.js ≥ 22.5</td><td>Uses built-in <code>node:sqlite</code> — no separate SQLite driver needed</td></tr>
+          <tr><td><span class="badge badge-blue">HTTP Server</span></td><td>Express 5</td><td>Async error handling built-in; server.js is ~3500 lines</td></tr>
+          <tr><td><span class="badge badge-amber">Database</span></td><td>SQLite (<code>asdlc.db</code>)</td><td>WAL mode, FK enforcement, UUID PKs, JSON columns</td></tr>
+          <tr><td><span class="badge badge-green">Frontend</span></td><td>Vanilla JS ES Modules</td><td>No framework; direct DOM manipulation; 20 render-function modules</td></tr>
+          <tr><td><span class="badge badge-purple">AI Engine</span></td><td>Anthropic Claude API</td><td>Opus 4.8 (reasoning) / Sonnet 4.6 (default) / Haiku 4.5 (lightweight)</td></tr>
+          <tr><td><span class="badge badge-teal">ServiceNow</span></td><td>REST API + Fluent IR</td><td>Read capability assessment; Fluent notation for round-trip source exchange</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><div><h3>How It Works — The Core Loop</h3></div></div>
+    <div class="card-body">
+      <div class="flow-steps">
+        <div class="flow-step"><div class="flow-num">1</div><div class="flow-step-content"><h4>Upload</h4><p>Delivery team uploads a BRD, requirements transcript, or ServiceNow source (Fluent IR) via the Ingest module.</p></div></div>
+        <div class="flow-step"><div class="flow-num">2</div><div class="flow-step-content"><h4>Extract</h4><p>Claude runs an agentic tool-call loop (up to 20 iterations) extracting use cases, workflows, agents, tools, requirements, guardrails, and data sources. Confidence determines enrichment level.</p></div></div>
+        <div class="flow-step"><div class="flow-num">3</div><div class="flow-step-content"><h4>Cross-Check</h4><p>Deterministic + optional LLM tiers scan for design drift and requirement conflicts. Blocking questions pause the flow; FYI notes proceed.</p></div></div>
+        <div class="flow-step"><div class="flow-num">4</div><div class="flow-step-content"><h4>Change Packet Review</h4><p>Staged extractions become a Change Packet. Product owners approve or reject each item individually. Disputed items return to extraction. Quality-reviewer flags missing or inconsistent fields.</p></div></div>
+        <div class="flow-step"><div class="flow-num">5</div><div class="flow-step-content"><h4>Apply &amp; Baseline</h4><p>Approved items are applied atomically to the design tables with a full audit trail. A locked Baseline captures an immutable snapshot (Draft → Build → Pilot → Production).</p></div></div>
+        <div class="flow-step"><div class="flow-num">6</div><div class="flow-step-content"><h4>ServiceNow Round-Trip</h4><p>The approved design is exported as a Fluent deployment plan and pushed to the ServiceNow instance. <code>sys_id</code> provenance is written back to enable the next sync cycle.</p></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====== SECTION: FRONTEND ====== -->
+<section id="frontend" class="section">
+  <div class="section-intro">
+    <h2>Frontend Modules</h2>
+    <p>20 Vanilla JS ES modules loaded on demand by the SPA shell (<code>app.js</code>). Each exports a <code>render(container)</code> function. User identity and project context are stored in <code>localStorage</code> and sent as <code>X-User-ID</code> on every API call.</p>
+  </div>
+
+  <div class="diagram-wrap">
+    <h3>Module Organization</h3>
+    <div class="mermaid">
+graph TB
+    subgraph SHELL["App Shell"]
+        APP["app.js\nBootstrap · routing\napiFetch · global state\ncurrentUser · currentProject"]
+        HOME["home.js\nDashboard: metrics\nmissing owners\nreusable records"]
+        PROJ["projects.js\nProject admin\nteam management\nSN link config"]
+    end
+
+    subgraph FLOW["Design &amp; Ingest Workflow"]
+        ING["ingest.js\nUpload BRD\nextract → Q&amp;A\npromote to CP"]
+        CP["change_packets.js\nCP queue\napprove / reject\nsplit · send-back"]
+        DR["design_review.js\nBrowse UC/WF/AG/T\nedit forms\nquality review"]
+        TEST["testing.js\nTest cases\ncoverage matrix\nAI generation"]
+    end
+
+    subgraph GOV["Governance"]
+        VAL["validation.js\nException queue\nresolve / dismiss"]
+        BASE["baseline.js\nCreate · lock\ndiff two baselines"]
+        AUD["audit.js\nFull change history"]
+        EV["evidence.js\nSource registry"]
+        LIB["library.js\nReusable entities"]
+    end
+
+    subgraph SNFE["ServiceNow"]
+        SNS["servicenow_sync.js\nLink · ingest SN design\ndelta export · register sys_ids"]
+        SNA["servicenow_assessment.js\nFit analysis\ncapability matrix"]
+    end
+
+    subgraph ADM["Admin &amp; Cost"]
+        AAI["admin_ai.js\nModel selection\nthinking budget\nusage dashboard"]
+        ABP["admin_best_practices.js\nAI Guidance rules\nstanding questions"]
+        COP["cost_projections.js\nEstimate end-to-end cost"]
+        COM["cost_management.js\nRate card · cost params"]
+        REP["reports.js\nDesign report builder"]
+        BLD["build_export.js\nBuild artifact export"]
+        TRU["trust.js\nAgent trust levels"]
+    end
+    </div>
+  </div>
+
+  <h3 class="sub">Module Quick Reference</h3>
+  <div class="card">
+    <div class="card-body" style="padding:0">
+      <table>
+        <thead><tr><th>Module</th><th>Group</th><th>Primary API Calls</th><th>Key Feature</th></tr></thead>
+        <tbody>
+          <tr><td><code>app.js</code></td><td><span class="badge badge-slate">Shell</span></td><td>all routes (via apiFetch)</td><td>User picker, project selector, module router</td></tr>
+          <tr><td><code>home.js</code></td><td><span class="badge badge-slate">Shell</span></td><td><code>GET /dashboard</code></td><td>Metrics + missing owners + recent CPs</td></tr>
+          <tr><td><code>projects.js</code></td><td><span class="badge badge-slate">Shell</span></td><td><code>GET/POST/PUT /projects</code></td><td>Project admin, team, SN link, cost params</td></tr>
+          <tr><td><code>ingest.js</code></td><td><span class="badge badge-blue">Design</span></td><td><code>POST /ingest-documents</code>, process, promote, clarifications</td><td>Upload → extract → Q&amp;A → promote</td></tr>
+          <tr><td><code>change_packets.js</code></td><td><span class="badge badge-blue">Design</span></td><td><code>GET /change-packets</code>, approve, reject, split, send-back</td><td>Per-item and whole-CP decisions</td></tr>
+          <tr><td><code>design_review.js</code></td><td><span class="badge badge-blue">Design</span></td><td><code>GET/PUT /projects/:id/use-cases</code> etc.</td><td>Browse &amp; edit all entity types + quality review</td></tr>
+          <tr><td><code>testing.js</code></td><td><span class="badge badge-blue">Design</span></td><td><code>GET/POST /test-cases</code>, infer, generate</td><td>AC→TC traceability + AI test generation</td></tr>
+          <tr><td><code>validation.js</code></td><td><span class="badge badge-green">Governance</span></td><td><code>GET /exceptions</code>, summary, update status</td><td>Exception queue by severity + resolve</td></tr>
+          <tr><td><code>baseline.js</code></td><td><span class="badge badge-green">Governance</span></td><td><code>GET/POST /baselines</code>, lock, compare</td><td>Locked immutable snapshots + diff view</td></tr>
+          <tr><td><code>audit.js</code></td><td><span class="badge badge-green">Governance</span></td><td><code>GET /audit-log</code></td><td>Who changed what, when — old vs new diff</td></tr>
+          <tr><td><code>evidence.js</code></td><td><span class="badge badge-green">Governance</span></td><td><code>GET/POST /evidence-sources</code></td><td>Link evidence sources to CP items</td></tr>
+          <tr><td><code>library.js</code></td><td><span class="badge badge-green">Governance</span></td><td><code>GET /library</code></td><td>Cross-project reusable UCs, workflows, tools</td></tr>
+          <tr><td><code>servicenow_sync.js</code></td><td><span class="badge badge-teal">ServiceNow</span></td><td>sync, delta-export, register-sysid</td><td>Full round-trip orchestration UI</td></tr>
+          <tr><td><code>servicenow_assessment.js</code></td><td><span class="badge badge-teal">ServiceNow</span></td><td>assess, get assessments</td><td>Fit analysis + capability matrix report</td></tr>
+          <tr><td><code>admin_ai.js</code></td><td><span class="badge badge-amber">Admin</span></td><td><code>GET/PUT /settings/ai</code>, usage</td><td>Per-role model selection + token dashboard</td></tr>
+          <tr><td><code>admin_best_practices.js</code></td><td><span class="badge badge-amber">Admin</span></td><td><code>GET/POST/PUT/DELETE /best-practices</code></td><td>AI Guidance rules injected into prompts</td></tr>
+          <tr><td><code>cost_projections.js</code></td><td><span class="badge badge-amber">Admin</span></td><td><code>POST /cost-estimate</code>, cost-bindings</td><td>End-to-end Now Assist cost estimate</td></tr>
+          <tr><td><code>cost_management.js</code></td><td><span class="badge badge-amber">Admin</span></td><td><code>GET/PUT /cost-assumption</code>, rate-card</td><td>Global + per-project cost params + rate card</td></tr>
+          <tr><td><code>reports.js</code></td><td><span class="badge badge-amber">Admin</span></td><td><code>GET /design-report/*</code>, POST /reports</td><td>Design report builder + docx/json export</td></tr>
+          <tr><td><code>trust.js</code></td><td><span class="badge badge-amber">Admin</span></td><td><code>GET/PUT /projects/:id/agent-settings</code></td><td>Per-project agent trust + permission overrides</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ====== SECTION: BACKEND ====== -->
+<section id="backend" class="section">
+  <div class="section-intro">
+    <h2>Backend &amp; AI Pipeline</h2>
+    <p>The backend is a single Express 5 server (<code>server.js</code>) with ~100 routes and a family of <code>agent/</code> modules that handle all AI processing. Long-running operations are async — they return immediately and update a status field the frontend polls.</p>
+  </div>
+
+  <div class="diagram-wrap">
+    <h3>Ingest Pipeline (the main AI loop)</h3>
+    <div class="mermaid">
+flowchart TD
+    A(["Upload document\nPOST /ingest-documents"]) --> B["Create asdlc_ingest_document\nstore raw file · status=pending"]
+    B --> C["POST .../process\nasync trigger"]
+    C --> D{"ANTHROPIC_API_KEY?"}
+    D -->|Yes| E["claude-processor.js\nrunExtractionLoop\nmodel: Sonnet default"]
+    D -->|No| F["stub-processor.js\nRegex fallback — dev mode"]
+    E --> G["Agentic tool-call loop\nup to 20 iterations\n30+ entity tools from entity-registry.js"]
+    G --> H{"Tool called"}
+    H -->|"create / update / delete entity"| I["Stage asdlc_ingest_extraction row"]
+    H -->|raise_clarification| J["Block → asdlc_ingest_clarification\nstatus = review_required"]
+    H -->|get_existing_entity| G
+    I --> K["cross-check.js\nTier 0: drift scan — FREE\nTier 1: req conflict scan — LLM\nTier 2: deep scan — conditional"]
+    K --> L{"Conflicts?"}
+    L -->|"Blocking"| O["Raise blocking clarification"]
+    L -->|"FYI only"| P["Emit note · continue"]
+    L -->|None| Q["status = staged"]
+    J --> R(["User answers Q&amp;A\nPOST .../clarifications/answer"])
+    O --> R
+    R --> G
+    P --> Q
+    Q --> S["POST .../promote\nCreate asdlc_change_packet\n+ change_packet_items"]
+    S --> T["quality-reviewer.js\nFlag exceptions per entity"]
+    T --> U(["User reviews CP"])
+    U --> V{"Decision"}
+    V -->|"Approve"| W["Apply atomically to design tables\nINSERT / UPDATE / DELETE\naudit_log per row changed"]
+    V -->|Reject| X["cp.status = rejected"]
+    V -->|"Send back"| G
+    W --> Y(["Lock Baseline"])
+    </div>
+  </div>
+
+  <div class="diagram-wrap">
+    <h3>ServiceNow Round-Trip</h3>
+    <div class="mermaid">
+flowchart LR
+    A(["Link project to SN instance\nPOST .../servicenow-link"]) --> B["Store instance + scope\nAES-256-GCM credentials"]
+    B --> C["POST .../servicenow/assess ASYNC\nsn-assess.js — Opus + thinking\nCapability matrix · volume · cost"]
+    C --> D(["User reviews fit report"])
+    D --> E["POST .../servicenow/sync ASYNC\nsn-sync.js orchestrates:"]
+    E --> F["sn-capture.js\nFetch Business Rules\nClient Scripts · Workflows\n→ Fluent IR"]
+    F --> G["claude-processor.js\nExtract Level-1 design\nsource_sys_id provenance"]
+    G --> H["sn-reconcile.js\nCompare vs workbench\nDetect: new · changed · deleted"]
+    H --> I["Stage CP\ncp_origin = sn_inbound"]
+    I --> J(["CP approval flow"])
+    J --> K["GET .../delta-export\nWorkbench changes\n→ Fluent deploy plan"]
+    K --> L(["Deploy to SN"])
+    L --> M["POST .../register-sysid\nWrite sys_id back to design rows\nRound-trip identity for next sync"]
+    </div>
+  </div>
+
+  <div class="diagram-wrap">
+    <h3>AI Configuration &amp; Model Routing (ai-config.js)</h3>
+    <div class="mermaid">
+graph LR
+    subgraph Roles["Per-Role Defaults"]
+        R1["extraction → Sonnet"]
+        R2["quality_reviewer → Sonnet"]
+        R3["synthesis → Opus"]
+        R4["reverse_engineer → Opus + thinking"]
+        R5["reconciler → Opus + thinking"]
+        R6["cost_estimate → Opus + thinking"]
+        R7["rasic_deriver → Sonnet"]
+        R8["req_linker → Haiku"]
+        R9["prompt_drafter → Sonnet"]
+    end
+    Res["resolveModel(role)\n1. asdlc_app_setting\n2. env CLAUDE_ROLE_MODEL\n3. hardcoded default"]
+    Log["Every call logs:\nasdlc_ai_usage\nasdlc_tool_call_log"]
+    Res --> Roles
+    Roles --> Log
+    </div>
+  </div>
+
+  <h3 class="sub">Agent Module Reference</h3>
+  <div class="card">
+    <div class="card-body" style="padding:0">
+      <table>
+        <thead><tr><th>Module</th><th>Group</th><th>Model</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><code>ai-config.js</code></td><td><span class="badge badge-purple">Core</span></td><td>N/A</td><td>Model routing, cost logging, best-practice injection, token usage</td></tr>
+          <tr><td><code>entity-registry.js</code></td><td><span class="badge badge-purple">Core</span></td><td>N/A</td><td>Entity→table map, 30+ Claude tool definitions, field schemas, enums</td></tr>
+          <tr><td><code>processor.js</code></td><td><span class="badge badge-blue">Ingest</span></td><td>Routes</td><td>Router: real Claude vs stub; runs cross-check on result</td></tr>
+          <tr><td><code>claude-processor.js</code></td><td><span class="badge badge-blue">Ingest</span></td><td>Sonnet (config)</td><td>Agentic extraction loop; 30+ tools; raise_clarification blocks</td></tr>
+          <tr><td><code>stub-processor.js</code></td><td><span class="badge badge-blue">Ingest</span></td><td>None</td><td>Regex fallback when no API key — safe for UI development</td></tr>
+          <tr><td><code>cross-check.js</code></td><td><span class="badge badge-blue">Ingest</span></td><td>Sonnet (Tier 1+)</td><td>Tier 0 free drift scan / Tier 1 req conflict / Tier 2 deep scan</td></tr>
+          <tr><td><code>prompt-templates.js</code></td><td><span class="badge badge-blue">Ingest</span></td><td>N/A</td><td>Extraction system prompt with best-practice rules injected</td></tr>
+          <tr><td><code>wiki-context.js</code></td><td><span class="badge badge-blue">Ingest</span></td><td>N/A</td><td>Load SN design wiki; inject core block + read_wiki_page tool</td></tr>
+          <tr><td><code>quality-reviewer.js</code></td><td><span class="badge badge-green">Quality</span></td><td>Sonnet</td><td>Detect missing/incomplete/inconsistent fields; upsert asdlc_exception</td></tr>
+          <tr><td><code>swimlane-deriver.js</code></td><td><span class="badge badge-green">Quality</span></td><td>Sonnet</td><td>Derive swimlane diagram from WF steps + participants</td></tr>
+          <tr><td><code>rasic-deriver.js</code></td><td><span class="badge badge-green">Quality</span></td><td>Opus</td><td>Assign R/A/S/C/I codes per participant per step</td></tr>
+          <tr><td><code>test-generator.js</code></td><td><span class="badge badge-green">Quality</span></td><td>Sonnet</td><td>Generate test scenarios from AC + FR context</td></tr>
+          <tr><td><code>test-coverage.js</code></td><td><span class="badge badge-green">Quality</span></td><td>Sonnet</td><td>Analyse coverage gaps; recommend new test cases</td></tr>
+          <tr><td><code>traceability.js</code></td><td><span class="badge badge-green">Quality</span></td><td>Sonnet</td><td>Infer FR→step traceability links from design evidence</td></tr>
+          <tr><td><code>design-repair.js</code></td><td><span class="badge badge-green">Quality</span></td><td>Sonnet</td><td>Auto-repair missing step owners and orphaned requirements</td></tr>
+          <tr><td><code>prompt-drafter.js</code></td><td><span class="badge badge-green">Quality</span></td><td>Sonnet</td><td>Draft agent system prompts from spec metadata</td></tr>
+          <tr><td><code>sn-sync.js</code></td><td><span class="badge badge-teal">ServiceNow</span></td><td>Opus + thinking</td><td>Orchestrate full round-trip: capture → extract → reconcile</td></tr>
+          <tr><td><code>sn-capture.js</code></td><td><span class="badge badge-teal">ServiceNow</span></td><td>N/A</td><td>Fetch SN source code via REST API → Fluent IR</td></tr>
+          <tr><td><code>sn-reverse-engineer.js</code></td><td><span class="badge badge-teal">ServiceNow</span></td><td>Opus + thinking</td><td>Extract Level-1 design from Fluent with sys_id provenance</td></tr>
+          <tr><td><code>sn-reconcile.js</code></td><td><span class="badge badge-teal">ServiceNow</span></td><td>Opus + thinking</td><td>Compare inbound SN changes vs workbench; stage as CP</td></tr>
+          <tr><td><code>sn-assess.js</code></td><td><span class="badge badge-teal">ServiceNow</span></td><td>Opus + thinking</td><td>Read-only SN instance fit analysis; store sn_assessment row</td></tr>
+          <tr><td><code>sn-review.js</code></td><td><span class="badge badge-teal">ServiceNow</span></td><td>Sonnet</td><td>Validate design vs SN naming and trigger conventions</td></tr>
+          <tr><td><code>sn-catalog.js</code></td><td><span class="badge badge-teal">ServiceNow</span></td><td>N/A</td><td>Export catalog items to Fluent notation for deployment</td></tr>
+          <tr><td><code>document-reader.js</code></td><td><span class="badge badge-slate">Util</span></td><td>N/A</td><td>Extract text from .docx (mammoth), .txt, .csv, .md</td></tr>
+          <tr><td><code>fluent-ingest.js</code></td><td><span class="badge badge-slate">Util</span></td><td>N/A</td><td>Parse Fluent notation IR → structured artifacts</td></tr>
+          <tr><td><code>review-queue.js</code></td><td><span class="badge badge-slate">Util</span></td><td>N/A</td><td>Clarification Q&amp;A queue state for ingest UI</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ====== SECTION: ERD ====== -->
+<section id="erd" class="section">
+  <div class="section-intro">
+    <h2>Data Model — Relationships</h2>
+    <p>45 tables across 9 domains. All primary keys are UUIDs. All M:N relationships use junction tables. JSON columns hold arrays and objects (goals, fields, requirement_ids, etc.).</p>
+  </div>
+
+  <div class="diagram-wrap">
+    <h3>Core Design Entity Hierarchy</h3>
+    <div class="mermaid">
+erDiagram
+    CLIENT ||--o{ PROJECT : contains
+    PROJECT ||--o{ PROJECT_MEMBER : has
+    USER ||--o{ PROJECT_MEMBER : joins
+    PROJECT ||--o{ USE_CASE : contains
+    USE_CASE ||--o{ WORKFLOW : has
+    WORKFLOW ||--o{ WORKFLOW_STEP : has
+    WORKFLOW ||--o{ WORKFLOW_PARTICIPANT : has
+    WORKFLOW ||--o{ WORKFLOW_PATH : has
+    WORKFLOW_PARTICIPANT ||--o{ WORKFLOW_STEP : owns
+    USE_CASE ||--o{ AGENT_SPEC : uses
+    AGENT_SPEC ||--o{ AGENT_TOOL : binds
+    WORKFLOW ||--o{ HITL_GATE : has
+    </div>
+  </div>
+
+  <div class="diagram-wrap">
+    <h3>Requirements &amp; Testing Chain</h3>
+    <div class="mermaid">
+erDiagram
+    PROJECT ||--o{ FUNCTIONAL_REQ : has
+    PROJECT ||--o{ NONFUNCTIONAL_REQ : has
+    USE_CASE ||--o{ ACCEPTANCE_CRITERION : has
+    ACCEPTANCE_CRITERION ||--o{ TEST_CASE : generates
+    FUNCTIONAL_REQ ||--o{ REQUIREMENT_LINK : tracked
+    WORKFLOW_STEP ||--o{ REQUIREMENT_LINK : satisfies
+    WORKFLOW_STEP ||--o{ STEP_COST_BINDING : has
+    </div>
+  </div>
+
+  <div class="diagram-wrap">
+    <h3>Ingest &amp; Change Control</h3>
+    <div class="mermaid">
+erDiagram
+    PROJECT ||--o{ INGEST_DOCUMENT : has
+    INGEST_DOCUMENT ||--o{ INGEST_EXTRACTION : produces
+    INGEST_DOCUMENT ||--o{ INGEST_CLARIFICATION : blocks
+    INGEST_DOCUMENT ||--o{ INGEST_FEEDBACK : receives
+    INGEST_DOCUMENT ||--o{ CHANGE_PACKET : generates
+    CHANGE_PACKET ||--o{ CHANGE_PACKET_ITEM : contains
+    USER ||--o{ INGEST_FEEDBACK : provides
+    </div>
+  </div>
+
+  <div class="diagram-wrap">
+    <h3>ServiceNow Level-1 Design &amp; Governance</h3>
+    <div class="mermaid">
+erDiagram
+    PROJECT ||--o{ DATA_MODEL : has
+    DATA_MODEL ||--o{ FORM_DESIGN : has
+    DATA_MODEL ||--o{ BUSINESS_LOGIC : has
+    PROJECT ||--o{ CATALOG_ITEM : has
+    CATALOG_ITEM ||--o{ WORKFLOW : references
+    PROJECT ||--o{ GUARDRAIL : has
+    PROJECT ||--o{ DATA_SOURCE : has
+    PROJECT ||--o{ USER_STORY : has
+    PROJECT ||--o{ BASELINE : has
+    PROJECT ||--o{ EXCEPTION : has
+    PROJECT ||--o{ SN_ASSESSMENT : has
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><div><h3>Domain Groups Summary</h3></div></div>
+    <div class="card-body" style="padding:0">
+      <table>
+        <thead><tr><th>Domain</th><th>Tables</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><span class="badge badge-blue">Workspace &amp; Access</span></td><td>4</td><td>Users, clients, projects, team assignments</td></tr>
+          <tr><td><span class="badge badge-blue">Design — Tier 1</span></td><td>6</td><td>Core UC→WF→Step hierarchy + agents, tools, HITL gates</td></tr>
+          <tr><td><span class="badge badge-blue">Design — Tier 2</span></td><td>6</td><td>RASIC participants, step paths, FR/NFR, AC, test cases</td></tr>
+          <tr><td><span class="badge badge-teal">Design — Level-1 SN</span></td><td>4</td><td>Reverse-engineered SN design with sys_id provenance</td></tr>
+          <tr><td><span class="badge badge-teal">BRD Materialized</span></td><td>3</td><td>Guardrails, data sources, user stories from BRD</td></tr>
+          <tr><td><span class="badge badge-purple">Relationships</span></td><td>4</td><td>M:N bindings (agent↔UC, agent↔tool) + traceability + cost bindings</td></tr>
+          <tr><td><span class="badge badge-green">Ingest &amp; Change</span></td><td>6</td><td>Document pipeline, extraction audit trail, change packets</td></tr>
+          <tr><td><span class="badge badge-green">Governance &amp; Audit</span></td><td>5</td><td>Baselines, exceptions, audit log, AI usage, tool-call log</td></tr>
+          <tr><td><span class="badge badge-amber">Cost &amp; Config</span></td><td>7</td><td>Cost model, rate card, app settings, AI Guidance, agent catalog, SN assessment</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ====== SECTION: TABLES ====== -->
+<section id="tables" class="section">
+  <div class="section-intro">
+    <h2>Data Model — Table Details</h2>
+    <p>All 45 tables organized by domain. PK column shown; all PKs are UUID (<code>TEXT</code>). Key columns indicate the most important fields for understanding the table's role.</p>
+  </div>
+
+  <!-- Workspace -->
+  <div class="domain-card">
+    <div class="domain-header dh-blue">🏢 Workspace &amp; Access — 4 tables</div>
+    <div class="table-row"><div class="table-name">asdlc_user</div><div class="table-pk">PK: user_id</div><div class="table-desc">User accounts — <code>display_name, email, role, active</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_client</div><div class="table-pk">PK: client_id</div><div class="table-desc">Customer organisations — <code>client_name, client_code, lifecycle_status</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_project</div><div class="table-pk">PK: project_id</div><div class="table-desc">Applications (one per customer + scope) — <code>client_id FK, project_code, stage, target_platform, servicenow_instance, sn_scope</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_project_member</div><div class="table-pk">PK: project_member_id</div><div class="table-desc">Team assignments — <code>project_id FK, user_id FK, member_role, can_approve</code></div></div>
+  </div>
+
+  <!-- Design Tier 1 -->
+  <div class="domain-card">
+    <div class="domain-header dh-blue">🏗 Design — Tier 1 (Core Entities) — 6 tables</div>
+    <div class="table-row"><div class="table-name">asdlc_use_case</div><div class="table-pk">PK: use_case_id</div><div class="table-desc">Business use cases — root ingest entity — <code>slug, title, risk_tier, supervision_model, baseline_cost_annual_usd</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_workflow</div><div class="table-pk">PK: workflow_id</div><div class="table-desc">Multi-step processes — UC children — <code>use_case_id FK, slug, risk_tier, runs_per_period</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_workflow_step</div><div class="table-pk">PK: workflow_step_id</div><div class="table-desc">Activity / decision / approval / wait — WF children — <code>workflow_id FK, slug, step_type, step_number, owner_participant_id</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_agent_spec</div><div class="table-pk">PK: agent_spec_id</div><div class="table-desc">AI agent definitions — UC children — <code>use_case_id FK, slug, supervision_model, orchestration_strategy, cost_model</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_tool</div><div class="table-pk">PK: tool_id</div><div class="table-desc">Tools / APIs / integrations — <code>project_id (nullable for global), slug, name, dev_status, visibility_scope</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_hitl_gate</div><div class="table-pk">PK: hitl_gate_id</div><div class="table-desc">Human-in-the-loop approval gates — <code>workflow_id FK, workflow_step_id FK, gate_type, criteria</code></div></div>
+  </div>
+
+  <!-- Design Tier 2 -->
+  <div class="domain-card">
+    <div class="domain-header dh-blue">🔧 Design — Tier 2 (Phase 2 Additions) — 6 tables</div>
+    <div class="table-row"><div class="table-name">asdlc_workflow_participant</div><div class="table-pk">PK: workflow_participant_id</div><div class="table-desc">RASIC roles — <code>workflow_id FK, slug, participant_type (Orchestrator/Specialist/Human/Coordinator), authority_level</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_workflow_path</div><div class="table-pk">PK: workflow_path_id</div><div class="table-desc">Step transitions — <code>workflow_id FK, from_step_id FK, to_step_id FK, slug, condition</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_functional_req</div><div class="table-pk">PK: fr_id</div><div class="table-desc">Functional requirements — <code>project_id FK, slug, requirement, priority, acceptance_criterion_ids (JSON)</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_nonfunctional_req</div><div class="table-pk">PK: nfr_id</div><div class="table-desc">NFR spec — <code>project_id FK, slug, category, target_value, scope (performance / security / availability / etc.)</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_acceptance_criterion</div><div class="table-pk">PK: acceptance_criterion_id</div><div class="table-desc">AC — child of UC / user story / FR — <code>project_id FK, parent_id FK, parent_type, slug, criterion_text</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_test_case</div><div class="table-pk">PK: test_case_id</div><div class="table-desc">Test cases — <code>project_id FK, slug, name, scope, requirement_ids (JSON), steps (JSON)</code></div></div>
+  </div>
+
+  <!-- Level-1 SN -->
+  <div class="domain-card">
+    <div class="domain-header dh-teal">🔄 Design — Level-1 ServiceNow (Reverse-Engineered) — 4 tables</div>
+    <div class="table-row"><div class="table-name">asdlc_data_model</div><div class="table-pk">PK: data_model_id</div><div class="table-desc">SN table designs — <code>slug, name, physical_name, extends_table, fields (JSON), source_sys_id, source_fluent, source_hash</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_form_design</div><div class="table-pk">PK: form_design_id</div><div class="table-desc">Form layouts + UI policies — <code>data_model_id FK, slug, name, sections (JSON), behavior_notes</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_business_logic</div><div class="table-pk">PK: business_logic_id</div><div class="table-desc">Business rules / client scripts / scheduled jobs — <code>data_model_id FK, logic_type, plain_english, when_runs, requirement_refs</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_catalog_item</div><div class="table-pk">PK: catalog_item_id</div><div class="table-desc">Service Catalog items — <code>workflow_id FK, slug, name, variables (JSON), who_can_order</code></div></div>
+  </div>
+
+  <!-- BRD -->
+  <div class="domain-card">
+    <div class="domain-header dh-teal">📄 BRD Materialized — 3 tables</div>
+    <div class="table-row"><div class="table-name">asdlc_guardrail</div><div class="table-pk">PK: guardrail_id</div><div class="table-desc">Governance / compliance rules — <code>slug, rule_name, severity, applies_to, threshold_value, regulatory_reference</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_data_source</div><div class="table-pk">PK: data_source_id</div><div class="table-desc">Data sources / APIs — <code>slug, source_name, access_type, contains_pii, rate_limits</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_user_story</div><div class="table-pk">PK: user_story_id</div><div class="table-desc">User stories from BRD — <code>slug, role, want, so_that, priority, requirement_refs</code></div></div>
+  </div>
+
+  <!-- Relationships -->
+  <div class="domain-card">
+    <div class="domain-header dh-purple">🔗 Relationships &amp; Bindings — 4 tables</div>
+    <div class="table-row"><div class="table-name">asdlc_agent_use_case</div><div class="table-pk">PK: agent_use_case_id</div><div class="table-desc">M:N agent ↔ UC binding — <code>agent_spec_id FK, use_case_id FK, project_id</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_agent_tool</div><div class="table-pk">PK: agent_tool_id</div><div class="table-desc">M:N agent ↔ tool binding — <code>agent_spec_id FK, tool_id FK, binding_supervision_model</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_requirement_link</div><div class="table-pk">PK: link_id</div><div class="table-desc">FR/NFR traceability — <code>fr_id FK, nfr_id FK, related_entity_ids (JSON)</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_workflow_step_cost_binding</div><div class="table-pk">PK: binding_id</div><div class="table-desc">AI cost per step — <code>workflow_step_id FK, skill_name, qty_per_run</code></div></div>
+  </div>
+
+  <!-- Ingest & Change -->
+  <div class="domain-card">
+    <div class="domain-header dh-green">📥 Ingest &amp; Change Control — 6 tables</div>
+    <div class="table-row"><div class="table-name">asdlc_ingest_document</div><div class="table-pk">PK: ingest_id</div><div class="table-desc">Uploaded documents — <code>file_name, ingest_status, enrichment_level, platform, raw_text</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_ingest_extraction</div><div class="table-pk">PK: extraction_id</div><div class="table-desc">Staged extraction per entity — <code>ingest_id FK, entity_type, entity_slug, round, confidence</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_ingest_feedback</div><div class="table-pk">PK: feedback_id</div><div class="table-desc">Human/AI feedback on extractions — <code>ingest_id FK, extraction_id FK, reviewer_id, feedback_type, feedback_text</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_ingest_clarification</div><div class="table-pk">PK: clarification_id</div><div class="table-desc">Q&amp;A blocking questions — <code>ingest_id FK, question_text, target_entity_type, answer_text, answered_by</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_change_packet</div><div class="table-pk">PK: change_packet_id</div><div class="table-desc">Staged changeset — <code>ingest_id FK, status, cp_origin (null=workbench / sn_inbound), baseline_impacting</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_change_packet_item</div><div class="table-pk">PK: change_packet_item_id</div><div class="table-desc">Per-item decision — <code>change_packet_id FK, entity_type, entity_id, operation, item_status, item_decided_by</code></div></div>
+  </div>
+
+  <!-- Governance & Audit -->
+  <div class="domain-card">
+    <div class="domain-header dh-rose">🛡 Governance &amp; Audit — 5 tables</div>
+    <div class="table-row"><div class="table-name">asdlc_baseline</div><div class="table-pk">PK: baseline_id</div><div class="table-desc">Locked versions — <code>baseline_name, lifecycle_status (Draft/Build/Pilot/Production), locked, locked_at</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_exception</div><div class="table-pk">PK: exception_id</div><div class="table-desc">Design anomalies — <code>related_entity_id, related_entity_type, finding_category, detected_by, severity, status</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_audit_log</div><div class="table-pk">PK: audit_id</div><div class="table-desc">Full change history — <code>table_name, record_id, operation, old_data (JSON), new_data (JSON), changed_by</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_ai_usage</div><div class="table-pk">PK: usage_id</div><div class="table-desc">Token metrics — <code>project_id FK, source, model, input_tokens, output_tokens, cost_usd</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_tool_call_log</div><div class="table-pk">PK: call_id</div><div class="table-desc">Tool invocation audit — <code>source, tool_name, created_at</code></div></div>
+  </div>
+
+  <!-- Cost & Config -->
+  <div class="domain-card">
+    <div class="domain-header dh-amber">⚙️ Cost &amp; Config — 7 tables</div>
+    <div class="table-row"><div class="table-name">asdlc_cost_assumption</div><div class="table-pk">PK: cost_assumption_id</div><div class="table-desc">Global cost singleton (legacy fallback) — <code>cost_per_assist, overage_rate, planning_period, entitlement_enabled</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_assist_rate_card</div><div class="table-pk">PK: skill_id</div><div class="table-desc">Now Assist cost rates — <code>skill_name, assists_per_unit, category, effective_date</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_app_setting</div><div class="table-pk">PK: setting_key</div><div class="table-desc">Global app config key→value — <code>setting_value, updated_by, updated_at</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_best_practice</div><div class="table-pk">PK: best_practice_id</div><div class="table-desc">AI Guidance rules — <code>scope, platform (servicenow/generic/any), title, rule_text, practice_type, is_active</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_agent_catalog</div><div class="table-pk">PK: workbench_agent_id</div><div class="table-desc">Catalog of workbench agent types — <code>agent_type, agent_name, purpose, default_trust_level</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_project_agent_setting</div><div class="table-pk">PK: project_agent_setting_id</div><div class="table-desc">Per-project trust overrides — <code>project_id FK, workbench_agent_id FK, trust_level, enabled, requires_human_approval</code></div></div>
+    <div class="table-row"><div class="table-name">asdlc_sn_assessment</div><div class="table-pk">PK: assessment_id</div><div class="table-desc">SN fit analysis audit trail — <code>project_id FK, instance_url, status, report_json</code></div></div>
+  </div>
+</section>
+
+<!-- ====== SECTION: DECISIONS ====== -->
+<section id="decisions" class="section">
+  <div class="section-intro">
+    <h2>Key Architectural Decisions</h2>
+    <p>Ten decisions that shaped the current design. Understanding these will help you avoid re-litigating settled trade-offs and know which assumptions are safe to change.</p>
+  </div>
+
+  <div class="decision-card">
+    <div class="decision-num">1</div>
+    <div class="decision-content">
+      <h4>Slug Naming Convention</h4>
+      <p>Every entity gets a stable human-readable slug: <code>UC-001</code>, <code>WF-002</code>, <code>AG-003</code>, <code>T-004</code>, <code>S-005</code>, <code>FR-006</code>, <code>NFR-007</code>, <code>AC-008</code>, <code>TC-009</code>, <code>DM-010</code>, etc. Slugs are per-project (except global tools which have <code>NULL project_id</code>). They survive in prompts, audit logs, requirements docs, and CP item references — UUID alone is too opaque for cross-references in Claude conversations.</p>
+    </div>
+  </div>
+
+  <div class="decision-card">
+    <div class="decision-num">2</div>
+    <div class="decision-content">
+      <h4>Supervision Model Enum</h4>
+      <p>Three values: <code>Advisory-only</code>, <code>Supervised HITL</code>, <code>Autonomous</code>. The quality-reviewer validates required fields <em>per supervision model</em> (e.g., Autonomous requires more complete agent specs than Advisory-only). The old <code>Assisted</code> value was migrated to <code>Supervised HITL</code> — do not re-introduce it.</p>
+    </div>
+  </div>
+
+  <div class="decision-card">
+    <div class="decision-num">3</div>
+    <div class="decision-content">
+      <h4>Per-Item Change Packet Decisions</h4>
+      <p>Product owners can approve or reject each item in a CP individually (<code>item_status: pending / approved / rejected</code>). This allows partial CPs to proceed while a disputed item goes back to the extraction loop. Whole-CP approval is a convenience shortcut that approves all pending items atomically.</p>
+    </div>
+  </div>
+
+  <div class="decision-card">
+    <div class="decision-num">4</div>
+    <div class="decision-content">
+      <h4>Enrichment Levels</h4>
+      <p><code>faithful</code> — transcribe only what is explicitly stated. <code>balanced</code> — fill logically implied fields (default, used for most documents). <code>suggestive</code> — Claude proposes net-new best-practice items (<code>system_generated = 1</code> flag set). Controls how liberally Claude extends beyond the source material.</p>
+    </div>
+  </div>
+
+  <div class="decision-card">
+    <div class="decision-num">5</div>
+    <div class="decision-content">
+      <h4>Cross-Check Tiers (Plan C)</h4>
+      <p><strong>Tier 0 (always free):</strong> deterministic salient-token drift scan — extract key identifiers from changed entities and scan the design corpus for references. <strong>Tier 1 (bounded LLM):</strong> check new/changed extractions against all FR/NFR. <strong>Tier 2 (conditional):</strong> deep scan + new clarifications, only when Tier 0 or 1 found something with non-trivial severity. Never skip Tier 0.</p>
+    </div>
+  </div>
+
+  <div class="decision-card">
+    <div class="decision-num">6</div>
+    <div class="decision-content">
+      <h4>ServiceNow Provenance (Level-2)</h4>
+      <p>Level-1 design rows carry <code>source_system</code>, <code>source_sys_id</code>, <code>source_table</code>, <code>source_scope</code>, <code>source_fluent</code>, and <code>source_hash</code>. These are hidden from the business user but critical for round-trip identity: sync → extract → reconcile → deploy → <code>register-sysid</code> writes <code>source_sys_id</code> back, enabling the next sync cycle to detect changes vs the same records. CPs with <code>cp_origin = sn_inbound</code> are never exported back to SN.</p>
+    </div>
+  </div>
+
+  <div class="decision-card">
+    <div class="decision-num">7</div>
+    <div class="decision-content">
+      <h4>Per-Project Cost Parameters</h4>
+      <p>Cost overrides live on <code>asdlc_project</code> (cost_per_assist, overage_rate, planning_period, entitlement) — not the global <code>asdlc_cost_assumption</code> singleton. Different clients negotiate different ServiceNow price sheets. The API resolves from project row first, then falls back to the global singleton for safety. The global singleton is now legacy — new cost logic should always use per-project params.</p>
+    </div>
+  </div>
+
+  <div class="decision-card">
+    <div class="decision-num">8</div>
+    <div class="decision-content">
+      <h4>AI Guidance Platform Scoping</h4>
+      <p><code>asdlc_best_practice.platform</code> can be <code>servicenow</code>, <code>generic</code>, or <code>any</code>. When building the extraction prompt, <code>ai-config.getActiveBestPractices()</code> filters by the document's platform. This prevents ServiceNow-specific rules from polluting extractions of, say, a generic workflow design. Platform-tagged rules were added alongside the 2026-06-16 hybrid wiki refactor.</p>
+    </div>
+  </div>
+
+  <div class="decision-card">
+    <div class="decision-num">9</div>
+    <div class="decision-content">
+      <h4>Cryptographic SN Credentials</h4>
+      <p>Per-project SN username and password are stored AES-256-GCM encrypted in <code>asdlc_app_setting</code> via <code>crypto-util.js</code>. Falls back to env vars <code>SN_USER</code> / <code>SN_PASSWORD</code> if per-project credentials are not set. The <code>scrubProject()</code> helper in <code>server.js</code> removes the encrypted password from any API response, replacing it with a boolean <code>has_sn_password</code> flag.</p>
+    </div>
+  </div>
+
+  <div class="decision-card">
+    <div class="decision-num">10</div>
+    <div class="decision-content">
+      <h4>Two-Layer Design Model</h4>
+      <p>Level-1 = business design in plain English (shown in the workbench UI, editable by humans). Level-2 = SN <code>sys_id</code> + Fluent notation + source hash (never shown in UI, used only by the round-trip engine). This separation means the workbench can be used as a pure design tool without any SN connection, and the SN integration is additive — it writes Level-2 provenance without touching the Level-1 human-facing content.</p>
+    </div>
+  </div>
+
+  <div class="sep"></div>
+  <h3 class="sub">Extension Points</h3>
+  <div class="grid-3">
+    <div class="module-card">
+      <h4>New Entity Type</h4>
+      <p>1. Add table to <code>schema.sql</code><br>
+         2. Register in <code>entity-registry.js</code><br>
+         3. Add CRUD routes in <code>server.js</code><br>
+         4. Update <code>quality-reviewer.js</code><br>
+         5. Extend <code>design_review.js</code></p>
+    </div>
+    <div class="module-card purple">
+      <h4>New AI Role</h4>
+      <p>1. Add to <code>ai-config.js AVAILABLE_ROLES</code><br>
+         2. Set default model + thinking config<br>
+         3. Expose in <code>admin_ai.js</code><br>
+         4. Call <code>resolveModel('role')</code> in your module</p>
+    </div>
+    <div class="module-card teal">
+      <h4>New SN Surface</h4>
+      <p>1. Add capture to <code>sn-capture.js</code><br>
+         2. Add extraction to <code>sn-reverse-engineer.js</code><br>
+         3. Add reconciliation to <code>sn-reconcile.js</code><br>
+         4. Add export to <code>sn-catalog.js</code><br>
+         5. Register sys_id in <code>/register-sysid</code></p>
+    </div>
+  </div>
+</section>
+
+<!-- ====== SECTION: API ====== -->
+<section id="api" class="section">
+  <div class="section-intro">
+    <h2>API Quick Reference</h2>
+    <p>All routes are prefixed <code>/api/v1/</code>. Async endpoints respond immediately and update a status field; the frontend polls the GET endpoint for completion.</p>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><div><h3>Route Groups</h3></div></div>
+    <div class="card-body" style="padding:0">
+      <table>
+        <thead><tr><th>Group</th><th>Prefix</th><th>Async Endpoints</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>Users</td><td><code>/users</code>, <code>/dashboard</code></td><td>—</td><td>List users, dashboard metrics</td></tr>
+          <tr><td>Projects &amp; Clients</td><td><code>/projects</code>, <code>/clients</code></td><td>—</td><td>CRUD + team members + agent-settings</td></tr>
+          <tr><td>Change Packets</td><td><code>/change-packets</code></td><td>—</td><td>approve / reject / split / send-back / mass-approve</td></tr>
+          <tr><td>Design Entities</td><td><code>/projects/:id/use-cases</code>, <code>workflows</code>, etc.</td><td>—</td><td>Full CRUD for all 20+ entity types</td></tr>
+          <tr><td>Workflow RASIC</td><td><code>/projects/:id/workflows/:wfId/participants</code>, <code>paths</code></td><td>—</td><td>Participants, paths, RASIC matrix per step</td></tr>
+          <tr><td>Ingest Documents</td><td><code>/ingest-documents</code></td><td><code>POST .../process</code>, <code>POST .../promote</code></td><td>Upload multipart; process triggers Claude; promote creates CP</td></tr>
+          <tr><td>ServiceNow</td><td><code>/projects/:id/servicenow/*</code></td><td><code>POST .../sync</code>, <code>POST .../assess</code></td><td>Full round-trip + fit analysis + delta export</td></tr>
+          <tr><td>Quality &amp; Repair</td><td><code>/projects/:id/quality-review/*</code></td><td><code>POST .../full</code>, <code>POST .../entity/:type/:id</code></td><td>Also repair-design, traceability/infer</td></tr>
+          <tr><td>Cost</td><td><code>/projects/:id/cost-estimate</code></td><td><code>POST .../cost-estimate</code></td><td>Opus + thinking; step bindings CRUD is sync</td></tr>
+          <tr><td>Baselines</td><td><code>/baselines</code></td><td>—</td><td>Create, lock, compare (diff) two baselines</td></tr>
+          <tr><td>Exceptions</td><td><code>/exceptions</code></td><td>—</td><td>List, create, update, summary stats</td></tr>
+          <tr><td>Evidence &amp; Audit</td><td><code>/evidence-sources</code>, <code>/audit-log</code></td><td>—</td><td>Evidence source registry + full audit trail</td></tr>
+          <tr><td>Reporting &amp; Build</td><td><code>/projects/:id/design-report/*</code>, <code>/reports</code></td><td><code>GET .../build-export</code></td><td>9 design-report sub-routes; build export is async</td></tr>
+          <tr><td>Test Coverage</td><td><code>/projects/:id/test-cases</code>, <code>test-coverage</code></td><td><code>POST .../generate</code>, <code>POST .../infer</code></td><td>Generate test cases + infer coverage gaps</td></tr>
+          <tr><td>Admin</td><td><code>/settings/ai</code>, <code>/best-practices</code>, <code>/usage</code></td><td>—</td><td>Model config, AI Guidance rules, token usage</td></tr>
+          <tr><td>Library</td><td><code>/library</code></td><td>—</td><td>Cross-project reusable entities by scope/type</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:20px">
+    <div class="card-header"><div><h3>Common Headers &amp; Conventions</h3></div></div>
+    <div class="card-body" style="padding:0">
+      <table>
+        <thead><tr><th>Convention</th><th>Detail</th></tr></thead>
+        <tbody>
+          <tr><td><code>X-User-ID</code> header</td><td>Required on every mutating call. Set by <code>app.js:apiFetch()</code> from <code>localStorage.asdlc_user_id</code>.</td></tr>
+          <tr><td>Async endpoints</td><td>Return <code>{ status: 'processing', id }</code>. Poll <code>GET .../status</code> or the parent entity until status changes.</td></tr>
+          <tr><td>Error format</td><td><code>{ error: "message", details: {...} }</code> with appropriate HTTP status code.</td></tr>
+          <tr><td>JSON columns</td><td>Returned as parsed objects in GET responses. Send as objects in POST/PUT — server calls <code>JSON.stringify()</code> before write.</td></tr>
+          <tr><td>Pagination</td><td>Not implemented — all list endpoints return full result sets. Add <code>?limit=&offset=</code> when result sets grow large.</td></tr>
+          <tr><td>CORS</td><td>All origins allowed. Headers: <code>GET, POST, PUT, DELETE, OPTIONS</code> + <code>X-User-ID</code>.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+</div><!-- .content -->
+</div><!-- .main -->
+</div><!-- .app -->
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+  // IMPORTANT: startOnLoad is false. Mermaid's ER and complex-flowchart layout
+  // relies on getBBox(), which returns 0 inside a display:none tab and throws
+  // ("Syntax error in text"). So we render each section's diagrams lazily, only
+  // once that section is visible. See window.renderSection below.
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: 'loose',
+    theme: 'base',
+    themeVariables: {
+      primaryColor: '#dbeafe',
+      primaryTextColor: '#1e3a8a',
+      primaryBorderColor: '#93c5fd',
+      lineColor: '#64748b',
+      secondaryColor: '#ede9fe',
+      tertiaryColor: '#d1fae5',
+      background: '#ffffff',
+      mainBkg: '#f8fafc',
+      nodeBorder: '#cbd5e1',
+      clusterBkg: '#f1f5f9',
+      clusterBorder: '#cbd5e1',
+      titleColor: '#0f172a',
+      edgeLabelBackground: '#f8fafc',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+      fontSize: '13px'
+    }
+  });
+
+  const renderedSections = new Set();
+  // Render the mermaid nodes inside a section, but only after it is visible
+  // (display:block) so getBBox() returns real dimensions. Idempotent per section.
+  window.renderSection = async function (sectionId) {
+    if (renderedSections.has(sectionId)) return;
+    const section = document.getElementById(sectionId);
+    if (!section) return;
+    const nodes = Array.from(section.querySelectorAll('.mermaid'));
+    if (!nodes.length) { renderedSections.add(sectionId); return; }
+    renderedSections.add(sectionId);
+    try {
+      await mermaid.run({ nodes });
+    } catch (e) {
+      console.error('mermaid render failed for section', sectionId, e);
+      renderedSections.delete(sectionId); // allow a retry on next activation
+    }
+  };
+
+  // Render the section that is active on initial load (it is already visible).
+  const initial = document.querySelector('.section.active');
+  window.renderSection(initial ? initial.id : 'overview');
+</script>
+
+<script>
+function show(sectionId, btn) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById(sectionId).classList.add('active');
+  btn.classList.add('active');
+  // Section is now visible — render its diagrams (no-op if already rendered).
+  if (window.renderSection) window.renderSection(sectionId);
+}
+
+// Track page header title per section
+const TITLES = {
+  overview:  ['System Architecture', 'Top-level components and how they connect'],
+  frontend:  ['Frontend Modules', '20 Vanilla JS modules loaded on demand by the SPA shell'],
+  backend:   ['Backend & AI Pipeline', 'Express routes, agent modules, and AI processing flows'],
+  erd:       ['Data Model — Relationships', 'Entity-relationship diagram across 45 tables'],
+  tables:    ['Data Model — Tables', 'All 45 tables organized by domain with key columns'],
+  decisions: ['Key Architectural Decisions', 'Trade-offs that shaped the current design'],
+  api:       ['API Quick Reference', 'Route groups, async patterns, and conventions'],
+};
+
+document.querySelectorAll('.nav-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const sec = btn.dataset.section;
+    if (TITLES[sec]) {
+      document.querySelector('.page-header h1').textContent = TITLES[sec][0];
+      document.querySelector('.page-header p').textContent = TITLES[sec][1];
+    }
+  });
+});
+</script>
+</body>
+</html>
