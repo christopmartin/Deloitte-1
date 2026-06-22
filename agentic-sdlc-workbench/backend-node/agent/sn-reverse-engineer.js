@@ -249,6 +249,7 @@ async function reverseEngineerOne(artifact, ctx = {}) {
 
   const resp = await client.messages.create(req);
   aiConfig.logUsage({ projectId: ctx.projectId, source: 'sn_reverse_engineer', refId: artifact.source_sys_id, model, usage: resp.usage });
+  aiConfig.logToolCalls('sn_reverse_engineer', (resp.content || []).filter(b => b.type === 'tool_use'));
 
   const tu = (resp.content || []).find(b => b.type === 'tool_use' && b.name === tool.name);
   const inferred = tu ? buildInferred(designType, tu.input, artifact) : stubInference(artifact);

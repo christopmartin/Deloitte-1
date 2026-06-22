@@ -141,6 +141,24 @@ function logUsage(o) {
 }
 
 /**
+ * Record every tool invoked by Claude in one API run. Never throws.
+ * @param {string} source  e.g. 'ingest_extraction' | 'sn_reconcile'
+ * @param {Array}  toolUses  response.content blocks with type === 'tool_use'
+ */
+function logToolCalls(source, toolUses) {
+  if (!toolUses || !toolUses.length) return;
+  try {
+    const stmt = db.prepare(
+      `INSERT INTO asdlc_tool_call_log (call_id, source, tool_name, created_at)
+       VALUES (?, ?, ?, datetime('now'))`
+    );
+    for (const tu of toolUses) stmt.run(generateId(), source, tu.name);
+  } catch (err) {
+    console.error('[ai-config] logToolCalls failed:', err.message);
+  }
+}
+
+/**
  * Active best-practice rules to inject into a prompt. Returns rules that pass BOTH
  * gates: (1) scope — global, or scoped to one of the given entity types; and
  * (2) platform — platform-agnostic ('any'/NULL), or matching the context platform.
@@ -193,6 +211,7 @@ module.exports = {
   getThinkingConfig,
   estimateCost,
   logUsage,
+  logToolCalls,
   getActiveBestPractices,
   getProjectPlatform,
 };

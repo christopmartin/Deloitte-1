@@ -154,6 +154,7 @@ async function reconcileChanged(item, ctx) {
 
   const resp = await client.messages.create(req);
   aiConfig.logUsage({ projectId: ctx.projectId, source: 'sn_reconcile', refId: item.source_sys_id, model, usage: resp.usage });
+  aiConfig.logToolCalls('sn_reconcile', (resp.content || []).filter(b => b.type === 'tool_use'));
   const tu = (resp.content || []).find(b => b.type === 'tool_use' && b.name === 'emit_reconciliation');
   const proposal = tu ? tu.input : { action: 'conflict', destructive: true, confidence: 0.2, field_changes: [], rationale: 'model did not call the tool' };
   // Safety net: never let a non-destructive action carry a modify change.

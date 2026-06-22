@@ -833,6 +833,15 @@ CREATE TABLE IF NOT EXISTS asdlc_ai_usage (
 CREATE INDEX IF NOT EXISTS idx_ai_usage_project ON asdlc_ai_usage(project_id);
 CREATE INDEX IF NOT EXISTS idx_ai_usage_source  ON asdlc_ai_usage(source);
 
+-- One row per tool invocation by Claude — proof of which tools were called and by which phase.
+CREATE TABLE IF NOT EXISTS asdlc_tool_call_log (
+    call_id    TEXT PRIMARY KEY,
+    source     TEXT NOT NULL,                                      -- e.g. ingest_extraction | sn_reconcile | quality_review
+    tool_name  TEXT NOT NULL,                                      -- e.g. extract_workflow | emit_reconciliation
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_tool_call_source ON asdlc_tool_call_log(source, created_at);
+
 -- Human-authored, global house rules injected into the extraction prompt.
 CREATE TABLE IF NOT EXISTS asdlc_best_practice (
     best_practice_id TEXT PRIMARY KEY,

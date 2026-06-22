@@ -512,6 +512,7 @@ async function runExtractionLoop(systemPrompt, userMessage, usageCtx, role = 'ex
       `[claude-processor] Usage — in:${totalUsage.input_tokens} out:${totalUsage.output_tokens}` +
       (cost != null ? ` ~$${cost.toFixed(4)}` : '')
     );
+    aiConfig.logToolCalls(usageCtx.source || 'ingest_extraction', allToolUses);
   }
 
   return allToolUses;

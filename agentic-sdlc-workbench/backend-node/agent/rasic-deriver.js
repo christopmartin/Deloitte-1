@@ -314,6 +314,7 @@ async function inferRasicMatrix(workflowId, projectId, uid) {
       round:    1,
       usage:    response.usage,
     });
+    aiConfig.logToolCalls('rasic_derive', (response.content || []).filter(b => b.type === 'tool_use'));
 
     const toolUses = (response.content || []).filter(b => b.type === 'tool_use' && b.name === 'assign_rasic_codes');
     console.log(`[rasic-deriver] received ${toolUses.length} assign_rasic_codes calls for workflow ${workflowId}`);

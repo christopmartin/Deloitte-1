@@ -203,6 +203,56 @@ export async function render(container) {
   } catch (err) {
     usageBody.appendChild(el('p', { style: 'color:var(--danger)' }, 'Failed to load usage: ' + err.message));
   }
+
+  // ── Tool Call Audit ────────────────────────────────────────────────────────
+  const auditPanel = el('div', { className: 'panel' });
+  auditPanel.appendChild(el('div', { className: 'panel-header' },
+    el('h3', { className: 'panel-title' }, 'Tool Call Audit'),
+    el('span', { style: 'font-size:12px;color:var(--text-muted);margin-left:8px' },
+      'Every tool Claude invoked via the API — proof of which tools were used')
+  ));
+  const auditBody = el('div', { className: 'panel-body' });
+  auditPanel.appendChild(auditBody);
+  container.appendChild(auditPanel);
+
+  try {
+    const audit = await apiFetch('/admin/tool-calls');
+    if (!(audit.distinct_tools || []).length) {
+      auditBody.appendChild(el('p', { className: 'dr-empty-note' },
+        'No tool calls recorded yet. Run an ingest or ServiceNow sync to populate this.'));
+    } else {
+      const t = el('table', { className: 'dr-compact-table', style: 'width:100%' });
+      t.appendChild(el('thead', {}, el('tr', {},
+        el('th', {}, 'Tool Name'),
+        el('th', { style: 'text-align:right' }, 'Total Calls'),
+        el('th', {}, 'Last Seen'))));
+      const tb = el('tbody');
+      audit.distinct_tools.forEach(r => tb.appendChild(el('tr', {},
+        el('td', {}, el('code', { style: 'font-size:12px' }, r.tool_name)),
+        el('td', { style: 'text-align:right' }, String(r.total_count)),
+        el('td', {}, formatDateTime(r.last_seen)))));
+      t.appendChild(tb);
+      auditBody.appendChild(t);
+
+      // Per-source breakdown (collapsible)
+      const details = el('details', { style: 'margin-top:12px' });
+      details.appendChild(el('summary', { style: 'cursor:pointer;font-size:12px;color:var(--text-muted)' }, 'Show breakdown by phase'));
+      const bt = el('table', { className: 'dr-compact-table', style: 'width:100%;margin-top:8px' });
+      bt.appendChild(el('thead', {}, el('tr', {},
+        el('th', {}, 'Phase'), el('th', {}, 'Tool'), el('th', { style: 'text-align:right' }, 'Calls'), el('th', {}, 'Last Seen'))));
+      const bb = el('tbody');
+      audit.by_source.forEach(r => bb.appendChild(el('tr', {},
+        el('td', {}, el('span', { className: 'badge' }, (r.source || '').replace(/_/g, ' '))),
+        el('td', {}, el('code', { style: 'font-size:12px' }, r.tool_name)),
+        el('td', { style: 'text-align:right' }, String(r.count)),
+        el('td', {}, formatDateTime(r.last_seen)))));
+      bt.appendChild(bb);
+      details.appendChild(bt);
+      auditBody.appendChild(details);
+    }
+  } catch (err) {
+    auditBody.appendChild(el('p', { style: 'color:var(--danger)' }, 'Failed to load tool call audit: ' + err.message));
+  }
 }
 
 function stat(label, value) {

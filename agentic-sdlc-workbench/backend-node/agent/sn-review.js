@@ -109,6 +109,7 @@ async function reviewChanged(item, ctx) {
   if (thinkCfg) { req.thinking = thinkCfg.thinking; if (thinkCfg.outputConfig) req.output_config = thinkCfg.outputConfig; }
   const resp = await client.messages.create(req);
   aiConfig.logUsage({ projectId: ctx.projectId, source: 'sn_reconcile_review', refId: item.source_sys_id, model, usage: resp.usage });
+  aiConfig.logToolCalls('sn_reconcile_review', (resp.content || []).filter(b => b.type === 'tool_use'));
   const tu = (resp.content || []).find(b => b.type === 'tool_use' && b.name === 'emit_review');
   const review = tu ? tu.input : { verdict: 'downgrade_to_hitl', destructive_confirmed: true, final_confidence: 0.2, issues: ['reviewer did not call the tool'], note: '' };
   return { ...review, usage: resp.usage };

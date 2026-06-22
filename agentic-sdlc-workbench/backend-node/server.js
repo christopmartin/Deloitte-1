@@ -1768,6 +1768,32 @@ app.get('/api/v1/ingest-documents/:id/usage', (req, res) => {
   res.json(rows);
 });
 
+// Tool-call audit: distinct tools ever invoked by Claude, with count + last-seen
+app.get('/api/v1/admin/tool-calls', (req, res) => {
+  const summary = db.prepare(
+    `SELECT tool_name, source, COUNT(*) AS count, MAX(created_at) AS last_seen
+     FROM asdlc_tool_call_log
+     GROUP BY tool_name, source
+     ORDER BY count DESC`
+  ).all();
+  const distinct_tools = db.prepare(
+    `SELECT tool_name, SUM(count) AS total_count, MAX(last_seen) AS last_seen
+     FROM (SELECT tool_name, COUNT(*) AS count, MAX(created_at) AS last_seen
+           FROM asdlc_tool_call_log GROUP BY tool_name)
+     GROUP BY tool_name ORDER BY total_count DESC`
+  ).all();
+  res.json({ distinct_tools, by_source: summary });
+});
+
+// Raw tool-call log (time-ordered, capped)
+app.get('/api/v1/admin/tool-calls/raw', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 100, 1000);
+  const rows = db.prepare(
+    `SELECT * FROM asdlc_tool_call_log ORDER BY created_at DESC LIMIT ?`
+  ).all(limit);
+  res.json(rows);
+});
+
 // ──────────────────────────────────────────────
 // BEST PRACTICES (global house rules for the AI) + LEARNING FEEDBACK
 // ──────────────────────────────────────────────

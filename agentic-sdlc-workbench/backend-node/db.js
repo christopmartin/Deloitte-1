@@ -329,6 +329,12 @@ const MIGRATIONS = [
      updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')),
      version INTEGER NOT NULL DEFAULT 1
    )`,
+  // Tool-call audit log
+  `CREATE TABLE IF NOT EXISTS asdlc_tool_call_log (
+     call_id TEXT PRIMARY KEY, source TEXT NOT NULL, tool_name TEXT NOT NULL,
+     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_tool_call_source ON asdlc_tool_call_log(source, created_at)`,
 ];
 for (const migration of MIGRATIONS) {
   try { db.exec(migration); } catch { /* column already exists — safe to ignore */ }

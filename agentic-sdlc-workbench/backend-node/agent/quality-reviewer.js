@@ -590,6 +590,7 @@ async function claudeReview(entityType, entity, neighbors, opts = {}) {
   });
   // Cost parity with the ingest pipeline — best-effort, never throws.
   aiConfig.logUsage({ projectId: opts.projectId, source: 'quality_review', refId: opts.refId, model, usage: response.usage });
+  aiConfig.logToolCalls('quality_review', (response.content || []).filter(b => b.type === 'tool_use'));
   const text = (response.content || [])
     .filter(b => b.type === 'text')
     .map(b => b.text)
