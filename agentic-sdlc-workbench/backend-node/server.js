@@ -7719,6 +7719,33 @@ function snPlanItemToCpSpec(pl, scope) {
   const cls = pl.classification;
   const a = pl.artifact || {};
   const dec = pl.decision || {};
+
+  // Generic (Tier-B/C) artifacts (Phase 2): deterministic capture → asdlc_sn_artifact.
+  // No registry/business mapping; the prebuilt generic_record already carries type,
+  // deploy_strategy, full provenance and (for new/auto-changed) source_hash.
+  if (pl.generic) {
+    if (cls === 'drift') {
+      // Advisory only — field_path deliberately does NOT match the materializer regex.
+      return {
+        entity_type: 'sn_artifact', operation: 'update', entity_id: pl.wb_id || generateId(),
+        field_path: 'sn_artifact.drift_flag', old_value: null,
+        new_value: JSON.stringify({ name: pl.name || null }),
+        rationale: `[SN sync · drift] ${(dec && dec.reason) || ''}`,
+      };
+    }
+    const rec = pl.generic_record;
+    if (!rec) return null;
+    const isNew = cls === 'new';
+    // Drop source_hash on a non-auto changed item so it re-surfaces until applied.
+    if (!(isNew || dec.target === 'auto')) rec.source_hash = null;
+    return {
+      entity_type: 'sn_artifact', operation: isNew ? 'create' : 'update',
+      entity_id: pl.wb_id || generateId(),
+      field_path: isNew ? 'sn_artifact.new_record' : 'sn_artifact.update',
+      old_value: null, new_value: JSON.stringify(rec),
+      rationale: `[SN sync · ${cls}] generic ${rec.sn_metadata_type} "${rec.name}"${rec.tier ? ` (Tier ${rec.tier})` : ''} — ${(dec && dec.reason) || ''}`,
+    };
+  }
   const conf = (pl.review && typeof pl.review.final_confidence === 'number') ? ` conf ${pl.review.final_confidence.toFixed(2)}` : '';
   const withHash = cls === 'new' || (cls === 'changed' && dec.target === 'auto');
   const prov = {

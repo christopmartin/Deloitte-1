@@ -16,6 +16,36 @@ const { db } = require('../db');
 // (sn-catalog.js) so capture and assessment stay in lockstep. Missing tables on an
 // instance are skipped. Covers AI-agent apps + data-centric apps.
 const { SN_SURFACES, normalizeInstanceUrl } = require('./sn-catalog');
+const reg = require('./sn-type-registry');
+
+// Pure-audit/system columns dropped from a generic artifact payload (noise, not design).
+const PAYLOAD_NOISE = new Set([
+  'sys_id', 'sys_created_on', 'sys_created_by', 'sys_updated_on', 'sys_updated_by',
+  'sys_mod_count', 'sys_tags', 'sys_domain', 'sys_domain_path', 'sys_class_name',
+  'sys_scope', 'sys_package', 'sys_policy', 'sys_update_name', 'sys_overrides',
+  'sys_customer_update', 'sys_replace_on_upgrade', 'sys_name',
+]);
+const REAL_TABLE = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/;
+
+/**
+ * Tier-B/C capture surfaces, sourced from the SDK capability registry: real top-level
+ * tables that have NO rich Tier-A Level-1 mapping and are NOT column/variable sub-elements
+ * (those are captured under their parent, never as standalone surfaces). These are the
+ * long-tail artifacts dropped today (ACLs, roles, SLAs, properties, ATF tests, …).
+ */
+function genericSurfaces() {
+  const catalogTables = new Set(SN_SURFACES.map(s => s.table));
+  const seen = new Set();
+  const out = [];
+  for (const t of reg.allTypes()) {
+    if (!t.source_table || t.tier === 'A' || t.parent_type) continue;     // skip Tier-A + child subtypes
+    if (catalogTables.has(t.source_table) || seen.has(t.source_table)) continue;
+    if (!REAL_TABLE.test(t.source_table)) continue;                        // exclude bogus column-derived "tables"
+    seen.add(t.source_table);
+    out.push({ table: t.source_table, sn_metadata_type: t.sn_metadata_type, tier: t.tier });
+  }
+  return out;
+}
 
 // Workbench tables that carry Level-2 provenance (where SN-sourced records live).
 const WB_PROVENANCE_TABLES = [
@@ -66,6 +96,35 @@ async function captureScope({ scope, instance, user, pw, fetchImpl }) {
       artifacts.push({
         source_table: s.table, design_type: s.type, source_sys_id: row.sys_id,
         name: row[s.fields[0]] || row.name || '(unnamed)', salient, hash: hashArtifact(salient),
+      });
+    }
+  }
+
+  // ── Tier-B/C GENERIC capture (Phase 2): the long tail dropped today ──────────
+  // Pull the full RAW field payload (no display_value → deployable values, e.g. real
+  // reference sys_ids) for every registry-known surface without a rich Tier-A mapping.
+  // Each becomes a generic artifact (design_type = sn_metadata_type, generic:true);
+  // nothing is dropped. Errors per table are tolerated (skipped), exactly like above.
+  for (const s of genericSurfaces()) {
+    const u = `${base}/api/now/table/${s.table}?sysparm_query=${encodeURIComponent('sys_scope.scope=' + scope)}&sysparm_exclude_reference_link=true&sysparm_limit=1000`;
+    let rows = [];
+    try {
+      const r = await f(u, { headers: { Authorization: auth, Accept: 'application/json' } });
+      if (!r.ok) { artifacts.push({ __error: `${s.table} -> HTTP ${r.status}` }); continue; }
+      rows = (await r.json()).result || [];
+    } catch (e) { artifacts.push({ __error: `${s.table} -> ${e.message}` }); continue; }
+    for (const row of rows) {
+      const payload = {};
+      for (const [k, v] of Object.entries(row)) {
+        if (PAYLOAD_NOISE.has(k)) continue;
+        if (v === '' || v == null) continue;
+        payload[k] = v;
+      }
+      artifacts.push({
+        source_table: s.table, design_type: s.sn_metadata_type, sn_metadata_type: s.sn_metadata_type,
+        tier: s.tier, generic: true, source_sys_id: row.sys_id,
+        name: row.name || row.short_description || row.label || payload.name || '(unnamed)',
+        salient: payload, payload, hash: hashArtifact(payload),
       });
     }
   }

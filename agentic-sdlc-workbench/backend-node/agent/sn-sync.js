@@ -36,6 +36,36 @@ const { captureScope, classifyArtifacts, WB_PROVENANCE_TABLES } = require('./sn-
 const { reverseEngineer } = require('./sn-reverse-engineer');
 const { reconcile } = require('./sn-reconcile');
 const { review } = require('./sn-review');
+const { buildArtifactRecord } = require('./sn-artifact');
+
+// ── Tier-B/C GENERIC plan (Phase 2) ──────────────────────────────────────────
+// Generic artifacts are deterministic ServiceNow captures, NOT business inferences,
+// so they bypass the Opus reverse-engineer/reconcile/review stages entirely. ServiceNow
+// is the source of truth for these Level-2 technical bodies, so a new/changed generic
+// artifact is a safe additive create/refresh; drift is flagged for human awareness only.
+function genericDecision(classification, mode) {
+  if (classification === 'drift') {
+    return { target: 'hitl', auto_apply: false, reason: 'drift — generic artifact in Workbench, absent from ServiceNow; flagged, never deleted' };
+  }
+  if (mode === 'review_all') {
+    return { target: 'hitl', auto_apply: false, reason: 'apply mode = review_all — human reviews every change' };
+  }
+  return classification === 'new'
+    ? { target: 'auto', auto_apply: true, reason: 'new generic artifact — additive create' }
+    : { target: 'auto', auto_apply: true, reason: 'generic artifact refreshed from ServiceNow (Level-2 source of truth)' };
+}
+
+/** Build deterministic plan items for captured generic (Tier-B/C) artifacts. */
+function buildGenericPlan(items, classification, scope, mode) {
+  return items.map(a => {
+    const rec = buildArtifactRecord(a, { scope });
+    return {
+      classification, source_sys_id: a.source_sys_id, generic: true, generic_record: rec,
+      artifact: a, wb_table: a.wb_table || null, wb_id: a.wb_id || null, name: rec.name,
+      decision: genericDecision(classification, mode),
+    };
+  });
+}
 
 // wb table → Workbench entity_type (the registry key the materializer uses).
 const TYPE_BY_WB_TABLE = {};
@@ -229,6 +259,21 @@ async function runSyncPlan(opts = {}, ctx = {}) {
   // 2. Deterministic tier-0 classification against the linked project.
   const classified = classifyArtifacts(artifacts, projectId);
 
+  // 2a. Partition: Tier-B/C GENERIC artifacts take the deterministic path (no Opus);
+  //     Tier-A RICH artifacts flow through reverse-engineer → reconcile → review → gate.
+  const isGen = x => !!x.generic;
+  const richNew     = classified.new.filter(a => !isGen(a));
+  const richChanged = classified.changed.filter(a => !isGen(a));
+  const richDrift   = classified.drift.filter(d => d.wb_type !== 'sn_artifact');
+  const genericPlanned = [
+    ...buildGenericPlan(classified.new.filter(isGen), 'new', scope, mode),
+    ...buildGenericPlan(classified.changed.filter(isGen), 'changed', scope, mode),
+    ...classified.drift.filter(d => d.wb_type === 'sn_artifact').map(d => ({
+      classification: 'drift', source_sys_id: d.source_sys_id, generic: true, generic_record: null,
+      wb_table: d.wb_table, wb_id: d.wb_id, name: d.name, decision: genericDecision('drift', mode),
+    })),
+  ];
+
   // 3. Reverse-engineer ONLY changed + new (the cost tier — unchanged skip the LLM).
   //    MATERIALITY (NEW only): Stage 1 drops disallowed capture types BEFORE inference
   //    (saves the expensive Opus call); Stage 2 drops immaterial business-logic AFTER
@@ -238,12 +283,12 @@ async function runSyncPlan(opts = {}, ctx = {}) {
   const disallow = new Set(matCfg.disallowTypes || []);
   const skipped_disallowed = [];
   const newAllowed = [];
-  for (const a of classified.new) {
+  for (const a of richNew) {
     if (disallow.has(a.design_type)) skipped_disallowed.push(matReport(a, 'new', `capture type "${a.design_type}" is in materiality_disallow_types`));
     else newAllowed.push(a);
   }
 
-  const toInfer = [...classified.changed, ...newAllowed];
+  const toInfer = [...richChanged, ...newAllowed];
   const inferences = await reverseEngineer(toInfer, logCtx);
   const inferBySysId = {};
   for (const inf of inferences) inferBySysId[inf.source_sys_id] = inf.inferred;
@@ -258,11 +303,11 @@ async function runSyncPlan(opts = {}, ctx = {}) {
     else captured_not_elevated.push(matReport(a, 'new', m.reason, inferred));
   }
 
-  const changedWithInf = classified.changed.map(a => ({ ...a, inferred: inferBySysId[a.source_sys_id] }));
+  const changedWithInf = richChanged.map(a => ({ ...a, inferred: inferBySysId[a.source_sys_id] }));
   const newWithInf     = elevatedNew.map(a => ({ ...a, inferred: inferBySysId[a.source_sys_id] }));
 
   // 4. Reconcile (non-destructive proposals). 5. Independent adversarial review.
-  const proposals = await reconcile({ changed: changedWithInf, new: newWithInf, drift: classified.drift }, logCtx);
+  const proposals = await reconcile({ changed: changedWithInf, new: newWithInf, drift: richDrift }, logCtx);
   const reviewed  = await review(proposals, logCtx);
 
   // 6. Gate each reviewed proposal; carry the captured artifact (hash/salient) for materialization.
@@ -271,17 +316,21 @@ async function runSyncPlan(opts = {}, ctx = {}) {
   const infItemBySysId = {};
   for (const it of [...changedWithInf, ...newWithInf]) infItemBySysId[it.source_sys_id] = it.inferred;
 
-  const planned = reviewed.map(rv => ({
+  const richPlanned = reviewed.map(rv => ({
     ...rv,
     inferred: infItemBySysId[rv.source_sys_id] || rv.inferred || null,
     artifact: artBySysId[rv.source_sys_id] || null,
     decision: gateProposal(rv, { mode, threshold }),
   }));
 
+  // Rich (Opus-reasoned) + generic (deterministic) plans share one materialization path.
+  const planned = [...richPlanned, ...genericPlanned];
+
   const summary = summarize(planned, classified);
   summary.elevated_new = newWithInf.length;
   summary.captured_not_elevated = captured_not_elevated.length;
   summary.skipped_disallowed = skipped_disallowed.length;
+  summary.generic = genericPlanned.length;
 
   return {
     project_id: projectId, scope, mode, threshold,
