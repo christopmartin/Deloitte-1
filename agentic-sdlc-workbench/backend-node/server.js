@@ -5792,6 +5792,14 @@ app.get('/api/v1/projects/:id/servicenow/delta-info', (req, res) => {
 
   let updateCount = 0, createCount = 0;
   for (const item of items) {
+    // Generic artifacts (Phase 3): live in asdlc_sn_artifact, not the 22-type registry.
+    if (item.entity_type === 'sn_artifact') {
+      let row = null;
+      try { row = db.prepare('SELECT source_sys_id FROM asdlc_sn_artifact WHERE sn_artifact_id = ?').get(item.entity_id); } catch { /* ignore */ }
+      if (!row) continue;
+      if (row.source_sys_id) updateCount++; else createCount++;
+      continue;
+    }
     const ent = registry.byEntityType[item.entity_type];
     if (!ent || !ent.materializable) continue;
     let row = null;
@@ -5865,8 +5873,26 @@ app.get('/api/v1/projects/:id/servicenow/delta-export', (req, res) => {
 
   const STRIP_INTERNAL = ['created_by','created_at','updated_by','updated_at','version','project_id',
     'lifecycle_status','source_hash','source_fluent','ingest_id'];
-  const updates = [], creates = [];
+  const updates = [], creates = [], generics = [];
   for (const item of allItems) {
+    // Generic artifacts (Phase 3): emit Fluent from asdlc_sn_artifact, not the rich JSON path.
+    if (item.entity_type === 'sn_artifact') {
+      let row = null;
+      try { row = db.prepare('SELECT * FROM asdlc_sn_artifact WHERE sn_artifact_id = ?').get(item.entity_id); } catch { /* ignore */ }
+      if (!row) continue;
+      let payload = {}, override = {};
+      try { payload = JSON.parse(row.payload || '{}'); } catch { /* keep {} */ }
+      try { override = JSON.parse(row.override_fields || '{}'); } catch { /* keep {} */ }
+      generics.push({
+        entity_id: item.entity_id, slug: row.slug, name: row.name,
+        sn_metadata_type: row.sn_metadata_type, fluent_api_name: row.fluent_api_name,
+        deploy_strategy: row.deploy_strategy, tier: row.tier, source_table: row.source_table,
+        source_sys_id: row.source_sys_id, source_scope: row.source_scope,
+        parent_artifact_id: row.parent_artifact_id, child_role: row.child_role, child_order: row.child_order,
+        payload, override, cp_ref: item.cp_ref, cp_title: item.cp_title,
+      });
+      continue;
+    }
     const ent = registry.byEntityType[item.entity_type];
     if (!ent || !ent.materializable) continue;
     let row = null;
@@ -5890,7 +5916,7 @@ app.get('/api/v1/projects/:id/servicenow/delta-export', (req, res) => {
     else creates.push(entry);
   }
 
-  const md       = buildSNDeltaMarkdown(project, deltaCps, updates, creates, sinceTs);
+  const md       = buildSNDeltaMarkdown(project, deltaCps, updates, creates, sinceTs, generics);
   const dateStr  = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const code     = (project.project_code || project.project_name || 'project').replace(/\s+/g, '-');
   const fileName = `${code}-sn-delta-${dateStr}.md`;
@@ -5933,20 +5959,27 @@ app.post('/api/v1/projects/:id/servicenow/register-sysid', (req, res) => {
     if (!entity_type || !sys_id || (!entity_id && !slug)) {
       skipped.push({ entity_id: ref, slug: slug || null, reason: 'missing entity_type, sys_id, or one of entity_id/slug' }); continue;
     }
-    const ent = registry.byEntityType[entity_type];
-    if (!ent || !ent.materializable || !ent.table || !ent.pk) {
-      skipped.push({ entity_id: ref, slug: slug || null, reason: `unknown or non-materializable entity_type "${entity_type}"` }); continue;
+    // Resolve target table/pk: generic artifacts live in asdlc_sn_artifact; everything
+    // else in the 22-type business registry.
+    let tbl, pk;
+    if (entity_type === 'sn_artifact') { tbl = 'asdlc_sn_artifact'; pk = 'sn_artifact_id'; }
+    else {
+      const ent = registry.byEntityType[entity_type];
+      if (!ent || !ent.materializable || !ent.table || !ent.pk) {
+        skipped.push({ entity_id: ref, slug: slug || null, reason: `unknown or non-materializable entity_type "${entity_type}"` }); continue;
+      }
+      tbl = ent.table; pk = ent.pk;
     }
     let row;
     try {
       if (!entity_id && slug) {
-        row = db.prepare(`SELECT ${ent.pk} AS pk, source_sys_id FROM ${ent.table} WHERE slug = ? AND project_id = ?`).get(slug, req.params.id);
+        row = db.prepare(`SELECT ${pk} AS pk, source_sys_id FROM ${tbl} WHERE slug = ? AND project_id = ?`).get(slug, req.params.id);
         if (row) entity_id = row.pk;
       } else {
-        row = db.prepare(`SELECT ${ent.pk} AS pk, source_sys_id FROM ${ent.table} WHERE ${ent.pk} = ? AND project_id = ?`).get(entity_id, req.params.id);
+        row = db.prepare(`SELECT ${pk} AS pk, source_sys_id FROM ${tbl} WHERE ${pk} = ? AND project_id = ?`).get(entity_id, req.params.id);
       }
     } catch (e) {
-      skipped.push({ entity_id: ref, slug: slug || null, reason: `table ${ent.table} does not support ServiceNow links` }); continue;
+      skipped.push({ entity_id: ref, slug: slug || null, reason: `table ${tbl} does not support ServiceNow links` }); continue;
     }
     if (!row) { skipped.push({ entity_id: ref, slug: slug || null, reason: slug ? `slug "${slug}" not found in this project` : 'not found in this project' }); continue; }
     if (row.source_sys_id && row.source_sys_id !== sys_id) {
@@ -5955,14 +5988,14 @@ app.post('/api/v1/projects/:id/servicenow/register-sysid', (req, res) => {
     if (row.source_sys_id === sys_id) { registered.push({ entity_id, slug: slug || null, sys_id, already_linked: true }); continue; }
     try {
       db.prepare(`
-        UPDATE ${ent.table}
+        UPDATE ${tbl}
            SET source_sys_id = ?,
                source_table  = COALESCE(?, source_table),
                source_scope  = COALESCE(?, source_scope),
                updated_by    = ?, updated_at = datetime('now')
-         WHERE ${ent.pk} = ? AND project_id = ?
+         WHERE ${pk} = ? AND project_id = ?
       `).run(sys_id, r.source_table || null, r.source_scope || project.servicenow_scope || null, uid, entity_id, req.params.id);
-      auditLog(ent.table, entity_id, 'sn_register_sysid', { source_sys_id: null }, { source_sys_id: sys_id }, uid);
+      auditLog(tbl, entity_id, 'sn_register_sysid', { source_sys_id: null }, { source_sys_id: sys_id }, uid);
       registered.push({ entity_id, slug: slug || null, sys_id });
     } catch (e) {
       skipped.push({ entity_id, slug: slug || null, reason: e.message });
@@ -5974,9 +6007,11 @@ app.post('/api/v1/projects/:id/servicenow/register-sysid', (req, res) => {
 
 // ─── SN Delta markdown assembler ─────────────────────────────────────────────
 
-function buildSNDeltaMarkdown(project, deltaCps, updates, creates, sinceTs) {
+function buildSNDeltaMarkdown(project, deltaCps, updates, creates, sinceTs, generics = []) {
   const lines    = [];
   const ts       = new Date().toISOString();
+  const genUpdates = generics.filter(g => g.source_sys_id).length;
+  const genCreates = generics.length - genUpdates;
   const prefix   = project.client_name ? `${project.client_name} — ` : '';
   const scope    = project.servicenow_scope    || '(not set)';
   const instance = project.servicenow_instance || '(not configured)';
@@ -6005,6 +6040,7 @@ function buildSNDeltaMarkdown(project, deltaCps, updates, creates, sinceTs) {
   lines.push(`| Change Packets | ${deltaCps.length} approved |`);
   lines.push(`| Updates (PATCH) | ${updates.length} |`);
   lines.push(`| Creates (POST) | ${creates.length} |`);
+  if (generics.length) lines.push(`| Generic artifacts (Fluent) | ${generics.length} (${genUpdates} update, ${genCreates} create) |`);
   lines.push(`| Exported | ${ts} |`);
   lines.push('');
   lines.push('---');
@@ -6084,6 +6120,62 @@ function buildSNDeltaMarkdown(project, deltaCps, updates, creates, sinceTs) {
       lines.push(JSON.stringify(stripProvenance(c.row), null, 2));
       lines.push('```');
       lines.push('');
+    }
+  }
+
+  // ── Fluent: generic artifacts (auto-generated deployable code) ───────────────
+  lines.push('---');
+  lines.push('');
+  lines.push('## 🧱 ServiceNow Fluent — Generic Artifacts');
+  lines.push('');
+  if (!generics.length) {
+    lines.push('_No generic artifacts in this delta._');
+    lines.push('');
+  } else {
+    lines.push('Auto-generated Fluent (now-sdk) for artifacts on the generic substrate. Records carrying a');
+    lines.push('`sys_id` are **updates** — coalesce on that `sys_id` (via `keys.ts`) so they PATCH rather than');
+    lines.push('duplicate; records without are **creates**. The long tail deploys via the generic `Record()`;');
+    lines.push('where a dedicated constructor exists it is noted (use it for higher fidelity once a typed field');
+    lines.push('map is curated). Child artifacts (e.g. a table\'s columns) are listed under their parent.');
+    lines.push('');
+
+    const fluentKey = (g) => (g.slug || `${g.sn_metadata_type}_${(g.source_sys_id || 'new').slice(0, 14)}`).replace(/[^A-Za-z0-9_-]/g, '-');
+    const emitFluent = (g) => {
+      const isUpdate = !!g.source_sys_id;
+      lines.push(`### ${g.sn_metadata_type}: ${mdCell(g.name)}${g.child_role ? ` _(child: ${g.child_role})_` : ''} — ${isUpdate ? '🔄 UPDATE' : '✨ CREATE'}`);
+      lines.push('');
+      lines.push(`- Tier ${g.tier} · deploy strategy \`${g.deploy_strategy}\`${g.fluent_api_name ? ` · constructor \`${g.fluent_api_name}\`` : ''}`);
+      if (isUpdate) lines.push(`- Existing ServiceNow \`sys_id\`: \`${g.source_sys_id}\` — coalesce on this so it PATCHes (no duplicate)`);
+      lines.push(`- From CP ${mdCell(g.cp_ref)}`);
+      if (g.fluent_api_name && g.deploy_strategy === 'typed') {
+        lines.push(`- A dedicated Fluent API \`new ${g.fluent_api_name}({...})\` exists; the raw field map below deploys reliably via \`Record()\` until a typed field map is curated.`);
+      }
+      lines.push('');
+      lines.push('```typescript');
+      lines.push(`import { Record } from '@servicenow/sdk/core'`);
+      lines.push('');
+      lines.push('Record({');
+      lines.push(`  $id: Now.ID['${fluentKey(g)}'],`);
+      lines.push(`  table: '${g.source_table || '(unknown)'}',`);
+      const dataStr = JSON.stringify({ ...g.payload, ...g.override }, null, 2).split('\n').join('\n  ');
+      lines.push(`  data: ${dataStr},`);
+      lines.push('})');
+      lines.push('```');
+      lines.push('');
+    };
+
+    // Group children under their parent (when the parent is also in this delta).
+    const ids = new Set(generics.map(g => g.entity_id));
+    const childrenOf = {};
+    const tops = [];
+    for (const g of generics) {
+      if (g.parent_artifact_id && ids.has(g.parent_artifact_id)) {
+        (childrenOf[g.parent_artifact_id] = childrenOf[g.parent_artifact_id] || []).push(g);
+      } else tops.push(g);
+    }
+    for (const g of tops) {
+      emitFluent(g);
+      for (const ch of (childrenOf[g.entity_id] || []).sort((a, b) => (a.child_order ?? 0) - (b.child_order ?? 0))) emitFluent(ch);
     }
   }
 
