@@ -29,6 +29,12 @@ const WB_PROVENANCE_TABLES = [
   { table: 'asdlc_business_logic', pk: 'business_logic_id', type: 'business_logic', nameCol: 'name' },
   { table: 'asdlc_catalog_item',   pk: 'catalog_item_id',   type: 'catalog_item',   nameCol: 'name' },
   { table: 'asdlc_integration',    pk: 'integration_id',    type: 'integration',     nameCol: 'name' },
+  // Generic substrate — MUST stay LAST. For Tier-A surfaces a captured sys_id matches its
+  // rich Level-1 projection first (preserving the existing reconcile path); only the long
+  // tail (Tier B/C, no L1 twin) resolves here. This single entry makes findWbBySysId /
+  // findWbBySlug / classifyArtifacts / drift detection cover generic artifacts for free.
+  // (Phase 2: once L1 rows are back-linked to artifact twins, de-dup the double drift entry.)
+  { table: 'asdlc_sn_artifact',    pk: 'sn_artifact_id',    type: 'sn_artifact',    nameCol: 'name' },
 ];
 
 /** Stable 32-char content hash of an artifact's salient fields. */

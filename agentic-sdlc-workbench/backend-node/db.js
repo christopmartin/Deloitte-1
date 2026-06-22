@@ -335,6 +335,18 @@ const MIGRATIONS = [
      created_at TEXT NOT NULL DEFAULT (datetime('now'))
    )`,
   `CREATE INDEX IF NOT EXISTS idx_tool_call_source ON asdlc_tool_call_log(source, created_at)`,
+
+  // ── Generic SN artifact substrate (back-link from L1 projections) ────────────
+  // Each Level-1 SN-technical row that surfaces a generic artifact carries a nullable
+  // FK to it. Existing rows stay NULL (= no generic twin yet); the Phase-2 backfill
+  // creates one artifact per provenance-bearing L1 row and sets this. The tables
+  // asdlc_sn_artifact + asdlc_sn_type_registry themselves are created in schema.sql
+  // (IF NOT EXISTS, so safe on fresh + existing DBs).
+  "ALTER TABLE asdlc_data_model     ADD COLUMN sn_artifact_id TEXT",
+  "ALTER TABLE asdlc_form_design    ADD COLUMN sn_artifact_id TEXT",
+  "ALTER TABLE asdlc_business_logic ADD COLUMN sn_artifact_id TEXT",
+  "ALTER TABLE asdlc_catalog_item   ADD COLUMN sn_artifact_id TEXT",
+  "ALTER TABLE asdlc_integration    ADD COLUMN sn_artifact_id TEXT",
 ];
 for (const migration of MIGRATIONS) {
   try { db.exec(migration); } catch { /* column already exists — safe to ignore */ }
