@@ -158,6 +158,10 @@ function classifyArtifacts(artifacts, projectId) {
   }
   // Drift: Workbench records carrying a source_sys_id that this capture did NOT return.
   // NEVER a delete — a lossy/partial SN view must not erase Workbench design. Flag only.
+  // A sys_id may live in BOTH an L1 table and its generic asdlc_sn_artifact twin; report
+  // each drifted sys_id ONCE, preferring the business/L1 table (asdlc_sn_artifact is last
+  // in WB_PROVENANCE_TABLES, so the rich row wins).
+  const driftSeen = new Set();
   for (const t of WB_PROVENANCE_TABLES) {
     let rows = [];
     try {
@@ -167,7 +171,8 @@ function classifyArtifacts(artifacts, projectId) {
            AND (lifecycle_status IS NULL OR lifecycle_status != 'retired')`
       ).all(projectId);
     } catch { continue; }
-    for (const r of rows) if (!seen.has(r.source_sys_id)) {
+    for (const r of rows) if (!seen.has(r.source_sys_id) && !driftSeen.has(r.source_sys_id)) {
+      driftSeen.add(r.source_sys_id);
       res.drift.push({ wb_table: t.table, wb_type: t.type, wb_id: r.id, name: r.name, source_sys_id: r.source_sys_id });
     }
   }

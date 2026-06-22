@@ -1427,6 +1427,65 @@ function materializeRequirementLinks(entityType, entityId, data, projectId, uid)
  * Apply all items of an approved change packet to the real design tables.
  * @returns {{applied:number, updated:number, deleted:number, skipped:number, errors:Array}}
  */
+// ─── Generic ServiceNow artifact materializer (Phase 2) ───────────────────────
+// Writes asdlc_sn_artifact rows for Tier-B/C long-tail artifacts (and, later, Tier-A
+// twins). Coalesces by source_sys_id within the project so a re-sync updates the same
+// row (survives renames, never duplicates). parent_source_sys_id resolves to
+// parent_artifact_id via the run's artifactIdMap or a DB lookup — a parent created
+// earlier in the same packet is visible inside the surrounding transaction. SN is the
+// source of truth for these technical bodies, so an update replaces payload/provenance;
+// the non-destructive guard protects Workbench-AUTHORED content, not SN-owned L2.
+function upsertArtifact(rec, projectId, uid, artifactIdMap, item) {
+  let parent_artifact_id = null;
+  if (rec.parent_source_sys_id) {
+    parent_artifact_id = (artifactIdMap && artifactIdMap[rec.parent_source_sys_id]) || null;
+    if (!parent_artifact_id) {
+      const p = db.prepare("SELECT sn_artifact_id AS id FROM asdlc_sn_artifact WHERE source_sys_id=? AND project_id=? LIMIT 1").get(rec.parent_source_sys_id, projectId);
+      parent_artifact_id = p ? p.id : null;
+    }
+  }
+  const payloadJson  = JSON.stringify(rec.payload || {});
+  const overrideJson = JSON.stringify(rec.override_fields || {});
+
+  let existing = null;
+  if (rec.source_sys_id) {
+    existing = db.prepare("SELECT sn_artifact_id AS id FROM asdlc_sn_artifact WHERE source_sys_id=? AND project_id=? AND (lifecycle_status IS NULL OR lifecycle_status!='retired') LIMIT 1").get(rec.source_sys_id, projectId);
+  }
+
+  if (existing) {
+    const before = mtRow('asdlc_sn_artifact', 'sn_artifact_id', existing.id);
+    db.prepare(`UPDATE asdlc_sn_artifact SET sn_metadata_type=?, fluent_api_name=?, deploy_strategy=?, tier=?, name=?,
+        payload=?, override_fields=?, parent_artifact_id=COALESCE(?,parent_artifact_id), child_role=?, child_order=?,
+        projected_entity_type=COALESCE(?,projected_entity_type), source_table=?, source_scope=?, source_fluent=?,
+        source_hash=?, sdk_version=?, version=version+1, updated_by=?, updated_at=datetime('now') WHERE sn_artifact_id=?`)
+      .run(rec.sn_metadata_type, rec.fluent_api_name, rec.deploy_strategy, rec.tier, rec.name,
+        payloadJson, overrideJson, parent_artifact_id, rec.child_role, rec.child_order,
+        rec.projected_entity_type, rec.source_table, rec.source_scope, rec.source_fluent,
+        rec.source_hash, rec.sdk_version, uid, existing.id);
+    auditLog('asdlc_sn_artifact', existing.id, 'UPDATE', before, mtRow('asdlc_sn_artifact', 'sn_artifact_id', existing.id), uid);
+    if (artifactIdMap && rec.source_sys_id) artifactIdMap[rec.source_sys_id] = existing.id;
+    if (item) db.prepare("UPDATE asdlc_change_packet_item SET entity_id=? WHERE change_packet_item_id=?").run(existing.id, item.change_packet_item_id);
+    return { id: existing.id, created: false };
+  }
+
+  const id = generateId();
+  let slug = null;
+  try { slug = nextSlug('asdlc_sn_artifact', 'ART', projectId); } catch { slug = null; }
+  db.prepare(`INSERT INTO asdlc_sn_artifact (sn_artifact_id, project_id, slug, sn_metadata_type, fluent_api_name,
+      deploy_strategy, tier, name, payload, override_fields, parent_artifact_id, child_role, child_order,
+      projected_entity_type, projected_entity_id, source_system, source_sys_id, source_table, source_scope,
+      source_fluent, source_hash, sdk_version, created_by, updated_by)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(id, projectId, slug, rec.sn_metadata_type, rec.fluent_api_name,
+      rec.deploy_strategy, rec.tier, rec.name, payloadJson, overrideJson, parent_artifact_id, rec.child_role, rec.child_order,
+      rec.projected_entity_type, rec.projected_entity_id || null, rec.source_system || 'servicenow', rec.source_sys_id, rec.source_table, rec.source_scope,
+      rec.source_fluent, rec.source_hash, rec.sdk_version, uid, uid);
+  auditLog('asdlc_sn_artifact', id, 'INSERT', null, mtRow('asdlc_sn_artifact', 'sn_artifact_id', id), uid);
+  if (artifactIdMap && rec.source_sys_id) artifactIdMap[rec.source_sys_id] = id;
+  if (item) db.prepare("UPDATE asdlc_change_packet_item SET entity_id=? WHERE change_packet_item_id=?").run(id, item.change_packet_item_id);
+  return { id, created: true };
+}
+
 function applyChangePacket(cpId, uid) {
   const cp = db.prepare("SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?").get(cpId);
   const projectId = cp ? cp.project_id : null;
@@ -1438,6 +1497,7 @@ function applyChangePacket(cpId, uid) {
   );
 
   const idMap = {};
+  const artifactIdMap = {};              // source_sys_id → sn_artifact_id (generic-artifact parent linkage within this packet)
   const touchedWorkflows = new Set();   // workflows that gained/changed steps → derive swimlane + RASIC after
   const result = { applied: 0, updated: 0, deleted: 0, skipped: 0, evidence: 0, errors: [], createdTestable: [], touchedWorkflows };
 
@@ -1453,6 +1513,23 @@ function applyChangePacket(cpId, uid) {
     const fp = item.field_path || '';
     if (!new RegExp(`^${item.entity_type}\\.(new_record|create|update|delete)$`).test(fp)) {
       result.skipped++;
+      continue;
+    }
+
+    // Generic ServiceNow artifact (Phase 2): Tier-B/C long-tail + Tier-A twins live in
+    // asdlc_sn_artifact, NOT the 22-type business registry. Handled BEFORE the registry
+    // lookup so the business-design path below stays 100% unchanged.
+    if (item.entity_type === 'sn_artifact') {
+      let rec; try { rec = JSON.parse(item.new_value); } catch { rec = null; }
+      if (!rec) { result.skipped++; continue; }
+      try {
+        const r = upsertArtifact(rec, projectId, uid, artifactIdMap, item);
+        if (r.created) result.applied++; else result.updated++;
+        markItemApplied(item.change_packet_item_id, null);
+      } catch (err) {
+        if (err instanceof SoftSkip) { result.errors.push({ item: item.change_packet_item_id, entity_type: 'sn_artifact', reason: err.message }); continue; }
+        throw err;
+      }
       continue;
     }
 
