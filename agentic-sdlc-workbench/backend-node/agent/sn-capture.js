@@ -47,6 +47,19 @@ function genericSurfaces() {
   return out;
 }
 
+// Recursive CHILD surfaces (Phase 2 follow-up): sub-elements with their own sys_id that
+// belong to a captured parent. Each becomes a generic child artifact linked via
+// parent_source_sys_id (→ parent_artifact_id at materialize time) so it round-trips and
+// drifts independently. `parentKey` selects how the child query references the parent:
+// columns key off the parent table NAME (sys_dictionary.name = table name); flow actions
+// key off the parent flow SYS_ID (sys_hub_action_instance.flow = flow sys_id).
+const CHILD_SURFACES = [
+  { childTable: 'sys_dictionary',           parentTable: 'sys_db_object', role: 'column',
+    parentKey: 'name',  filter: p => `name=${p.name}^elementISNOTEMPTY`, nameField: 'element',      orderField: null },
+  { childTable: 'sys_hub_action_instance',  parentTable: 'sys_hub_flow',  role: 'action',
+    parentKey: 'sysId', filter: p => `flow=${p.sysId}`,                   nameField: 'display_text', orderField: 'order' },
+];
+
 // Workbench tables that carry Level-2 provenance (where SN-sourced records live).
 const WB_PROVENANCE_TABLES = [
   { table: 'asdlc_use_case',       pk: 'use_case_id',       type: 'use_case',       nameCol: 'title' },
@@ -126,6 +139,44 @@ async function captureScope({ scope, instance, user, pw, fetchImpl }) {
         name: row.name || row.short_description || row.label || payload.name || '(unnamed)',
         salient: payload, payload, hash: hashArtifact(payload),
       });
+    }
+  }
+
+  // ── Recursive CHILD capture: columns under tables, actions under flows ───────
+  // Link each child to its captured parent (by table name or flow sys_id) so it
+  // materializes under parent_artifact_id and round-trips with its own sys_id.
+  const parentsByTable = {};
+  for (const art of artifacts) {
+    if (art.__error || !art.source_sys_id) continue;
+    (parentsByTable[art.source_table] = parentsByTable[art.source_table] || [])
+      .push({ sysId: art.source_sys_id, name: (art.salient && art.salient.name) || art.name });
+  }
+  for (const cs of CHILD_SURFACES) {
+    for (const parent of (parentsByTable[cs.parentTable] || [])) {
+      if (cs.parentKey === 'name' && !parent.name) continue;
+      const u = `${base}/api/now/table/${cs.childTable}?sysparm_query=${encodeURIComponent(cs.filter(parent))}&sysparm_exclude_reference_link=true&sysparm_limit=1000`;
+      let rows = [];
+      try {
+        const r = await f(u, { headers: { Authorization: auth, Accept: 'application/json' } });
+        if (!r.ok) { artifacts.push({ __error: `${cs.childTable} -> HTTP ${r.status}` }); continue; }
+        rows = (await r.json()).result || [];
+      } catch (e) { artifacts.push({ __error: `${cs.childTable} -> ${e.message}` }); continue; }
+      for (const row of rows) {
+        const payload = {};
+        for (const [k, v] of Object.entries(row)) {
+          if (PAYLOAD_NOISE.has(k)) continue;
+          if (v === '' || v == null) continue;
+          payload[k] = v;
+        }
+        const ord = cs.orderField ? Number(row[cs.orderField]) : NaN;
+        artifacts.push({
+          source_table: cs.childTable, design_type: cs.role, sn_metadata_type: cs.role, tier: 'C',
+          generic: true, source_sys_id: row.sys_id, parent_source_sys_id: parent.sysId,
+          child_role: cs.role, child_order: Number.isFinite(ord) ? ord : null,
+          name: row[cs.nameField] || payload.name || '(unnamed)',
+          salient: payload, payload, hash: hashArtifact(payload),
+        });
+      }
     }
   }
   return artifacts;

@@ -1486,6 +1486,36 @@ function upsertArtifact(rec, projectId, uid, artifactIdMap, item) {
   return { id, created: true };
 }
 
+// After a Tier-A SN-sourced Level-1 row is materialized, mirror it into a generic
+// asdlc_sn_artifact twin (the plan's "projection + twin") and back-link the L1 row.
+// This also gives recursive children (e.g. a table's columns) a parent_artifact_id to
+// resolve to within the same packet. No-op for non-Tier-A types and non-SN rows.
+const L1_TWIN_TYPES = new Set(['data_model', 'form_design', 'business_logic', 'catalog_item', 'integration']);
+function syncL1Twin(entityType, entityId, projectId, uid, artifactIdMap) {
+  if (!L1_TWIN_TYPES.has(entityType)) return;
+  const { L1, buildPayload } = require('./backfill-sn-artifacts');
+  const reg2 = require('./agent/sn-type-registry');
+  const spec = L1.find(s => s.etype === entityType);
+  if (!spec) return;
+  const row = mtRow(spec.table, spec.pk, entityId);
+  if (!row || !row.source_sys_id) return;   // only ServiceNow-sourced rows get a twin
+  const entry = reg2.resolveType(row.source_table || entityType);
+  upsertArtifact({
+    sn_metadata_type: entry.sn_metadata_type, fluent_api_name: entry.fluent_api_name || null,
+    deploy_strategy: reg2.deployStrategyFor(entry, {}), tier: entry.tier,
+    name: row.name || '(unnamed)', payload: buildPayload(row, spec), override_fields: {},
+    projected_entity_type: entityType, projected_entity_id: entityId,
+    parent_source_sys_id: null, child_role: null, child_order: null,
+    source_system: row.source_system || 'servicenow', source_sys_id: row.source_sys_id,
+    source_table: row.source_table, source_scope: row.source_scope, source_fluent: row.source_fluent,
+    source_hash: row.source_hash, sdk_version: null,
+  }, projectId, uid, artifactIdMap, null);
+  const twinId = artifactIdMap && artifactIdMap[row.source_sys_id];
+  if (twinId && row.sn_artifact_id !== twinId) {
+    try { db.prepare(`UPDATE ${spec.table} SET sn_artifact_id=? WHERE ${spec.pk}=?`).run(twinId, entityId); } catch { /* column absent on old DB */ }
+  }
+}
+
 function applyChangePacket(cpId, uid) {
   const cp = db.prepare("SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?").get(cpId);
   const projectId = cp ? cp.project_id : null;
@@ -1559,10 +1589,12 @@ function applyChangePacket(cpId, uid) {
         }
         materializeRequirementLinks(entity.entity_type, item.entity_id, data, projectId, uid);
         recordTouchedWorkflow(entity.entity_type, item.entity_id, touchedWorkflows);
+        syncL1Twin(entity.entity_type, item.entity_id, projectId, uid, artifactIdMap);
       } else {
         const newId = mtCreate(entity, data, projectId, uid, idMap, item); result.applied++;
         materializeRequirementLinks(entity.entity_type, newId, data, projectId, uid);
         recordTouchedWorkflow(entity.entity_type, newId, touchedWorkflows);
+        syncL1Twin(entity.entity_type, newId, projectId, uid, artifactIdMap);
         // Record newly-created testable entities so the caller can auto-generate
         // test coverage AFTER the transaction commits (Claude calls must not run
         // inside the DB transaction).
@@ -7947,16 +7979,16 @@ function getEntityLabel(type, data) {
 // ──────────────────────────────────────────────
 app.get('/api/v1/ingest-documents', (req, res) => {
   const { project_id, status, include_cancelled, archived } = req.query;
+  if (!project_id) return res.status(400).json({ error: 'project_id is required' });
   let sql = `
     SELECT d.*, u.display_name AS uploaded_by_name, c.display_name AS cancelled_by_name, p.project_name
     FROM asdlc_ingest_document d
     LEFT JOIN asdlc_user u ON d.uploaded_by = u.user_id
     LEFT JOIN asdlc_user c ON d.cancelled_by = c.user_id
     LEFT JOIN asdlc_project p ON d.project_id = p.project_id
-    WHERE 1=1
+    WHERE d.project_id = ?
   `;
-  const params = [];
-  if (project_id) { sql += ' AND d.project_id = ?'; params.push(project_id); }
+  const params = [project_id];
   if (status)     { sql += ' AND d.ingest_status = ?'; params.push(status); }
   // Lifecycle filter: default = active only. ?archived=1 → cancelled only.
   // ?include_cancelled=1 → both (no lifecycle filter).
