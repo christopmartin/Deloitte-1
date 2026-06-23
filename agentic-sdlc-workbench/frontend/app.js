@@ -31,6 +31,7 @@ const MODULE_LOADERS = {
   admin_best_practices: () => import('./modules/admin_best_practices.js'),
   servicenow_sync: () => import('./modules/servicenow_sync.js'),
   servicenow_assessment: () => import('./modules/servicenow_assessment.js'),
+  sn_artifacts: () => import('./modules/sn_artifacts.js'),
 };
 
 // ============================================================

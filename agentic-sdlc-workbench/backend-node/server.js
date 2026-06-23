@@ -5147,6 +5147,100 @@ for (const [scope, spec] of Object.entries(RT_DESIGN)) {
   });
 }
 
+// ─── Generic ServiceNow artifact read/edit API (Phase 4b) ────────────────────
+// The polymorphic asdlc_sn_artifact substrate, mirroring the RT_DESIGN pattern.
+// EDITABLE: name + payload (the artifact's field values) + override_fields. Type
+// identity (sn_metadata_type/fluent_api_name/deploy_strategy/tier), parent linkage, and
+// Level-2 provenance (source_*) are READ-ONLY — managed by capture + the SDK registry.
+// Tier-A artifacts project onto a Level-1 row and must be edited via that L1 editor;
+// editing them here is refused so the two edit paths can't diverge.
+function snArtifactParse(row) {
+  if (!row) return row;
+  const out = { ...row };
+  try { out.payload = JSON.parse(out.payload || '{}'); } catch { out.payload = {}; }
+  try { out.override_fields = JSON.parse(out.override_fields || '{}'); } catch { out.override_fields = {}; }
+  return out;
+}
+
+// List — grouped client-side; provenance kept minimal here, full detail via single GET.
+app.get('/api/v1/projects/:id/sn-artifacts', (req, res) => {
+  const project = db.prepare('SELECT project_id, project_name, project_code FROM asdlc_project WHERE project_id = ?').get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  let rows = [];
+  try {
+    rows = db.prepare(
+      `SELECT a.sn_artifact_id, a.slug, a.name, a.sn_metadata_type, a.fluent_api_name, a.deploy_strategy,
+              a.tier, a.parent_artifact_id, a.child_role, a.child_order, a.projected_entity_type,
+              a.projected_entity_id, a.source_sys_id, a.source_table,
+              (r.field_schema IS NOT NULL) AS has_field_schema
+       FROM asdlc_sn_artifact a
+       LEFT JOIN asdlc_sn_type_registry r ON r.sn_metadata_type = a.sn_metadata_type
+       WHERE a.project_id = ? AND (a.lifecycle_status IS NULL OR a.lifecycle_status = 'active')
+       ORDER BY (a.parent_artifact_id IS NOT NULL), a.sn_metadata_type, a.name`
+    ).all(req.params.id);
+  } catch { rows = []; }   // table absent on an older DB — degrade to empty
+  const artifacts = rows.map(r => ({ ...r, editable: !r.projected_entity_type, has_field_schema: !!r.has_field_schema }));
+  res.json({ project, generated_at: new Date().toISOString(), artifacts });
+});
+
+// Single — full row + parsed payload/override + the type's field_schema + children.
+app.get('/api/v1/projects/:id/sn-artifacts/:aid', (req, res) => {
+  let row;
+  try {
+    row = db.prepare(
+      `SELECT a.*, r.field_schema AS registry_field_schema
+       FROM asdlc_sn_artifact a LEFT JOIN asdlc_sn_type_registry r ON r.sn_metadata_type = a.sn_metadata_type
+       WHERE a.sn_artifact_id = ? AND a.project_id = ?`
+    ).get(req.params.aid, req.params.id);
+  } catch { return res.status(404).json({ error: 'Generic artifact not found' }); }
+  if (!row) return res.status(404).json({ error: 'Generic artifact not found' });
+  const out = snArtifactParse(row);
+  try { out.field_schema = row.registry_field_schema ? JSON.parse(row.registry_field_schema) : null; } catch { out.field_schema = null; }
+  delete out.registry_field_schema;
+  out.editable = !row.projected_entity_type;
+  try {
+    out.children = db.prepare(
+      `SELECT sn_artifact_id, slug, name, sn_metadata_type, child_role, child_order, source_sys_id
+       FROM asdlc_sn_artifact WHERE parent_artifact_id = ? AND project_id = ? ORDER BY child_order, name`
+    ).all(req.params.aid, req.params.id);
+  } catch { out.children = []; }
+  res.json(out);
+});
+
+// Update — editable fields only; auto-approved history CP (field_path = column name, so
+// the sn_artifact materializer branch never re-applies it). Tier-A edits are refused.
+app.put('/api/v1/projects/:id/sn-artifacts/:aid', (req, res) => {
+  const uid = userId(req);
+  let existing;
+  try { existing = db.prepare('SELECT * FROM asdlc_sn_artifact WHERE sn_artifact_id = ? AND project_id = ?').get(req.params.aid, req.params.id); }
+  catch { return res.status(404).json({ error: 'Generic artifact not found' }); }
+  if (!existing) return res.status(404).json({ error: 'Generic artifact not found' });
+  if (existing.projected_entity_type) {
+    return res.status(409).json({ error: `This is a Tier-A artifact projected onto a ${existing.projected_entity_type}; edit it via the Level-1 design editor (Design Review), not here.` });
+  }
+  const b = req.body || {};
+  const raw = {};
+  if (typeof b.name === 'string' && b.name.trim()) raw.name = b.name.trim();
+  if (b.payload && typeof b.payload === 'object' && !Array.isArray(b.payload)) raw.payload = b.payload;
+  if (b.override_fields && typeof b.override_fields === 'object' && !Array.isArray(b.override_fields)) raw.override_fields = b.override_fields;
+  if (!Object.keys(raw).length) return res.status(400).json({ error: 'Provide name, payload, or override_fields to update.' });
+
+  const toWrite = { ...raw };
+  for (const c of ['payload', 'override_fields']) if (c in toWrite && typeof toWrite[c] !== 'string') toWrite[c] = JSON.stringify(toWrite[c]);
+  const setCols = Object.keys(toWrite);
+  db.prepare(
+    `UPDATE asdlc_sn_artifact SET ${setCols.map(c => `${c} = ?`).join(', ')}, version = version + 1,
+       updated_by = ?, updated_at = datetime('now') WHERE sn_artifact_id = ?`
+  ).run(...setCols.map(c => toWrite[c]), uid, req.params.aid);
+
+  const after = db.prepare('SELECT * FROM asdlc_sn_artifact WHERE sn_artifact_id = ?').get(req.params.aid);
+  auditLog('asdlc_sn_artifact', req.params.aid, 'UPDATE', existing, after, uid);
+  const diff = diffFields(existing, raw, ['payload', 'override_fields']);
+  let cpResult = null;
+  if (diff.length) cpResult = createAutoApprovedCP(req.params.id, 'sn_artifact', req.params.aid, existing.name || req.params.aid, diff, uid);
+  res.json({ ...snArtifactParse(after), _cp: cpResult });
+});
+
 /**
  * GET /api/v1/projects/:id/slug-map
  * Phase 5: lightweight project-wide slug → {scope, entity_id, label} index.
