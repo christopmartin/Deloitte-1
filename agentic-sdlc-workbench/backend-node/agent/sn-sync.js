@@ -338,6 +338,8 @@ async function runSyncPlan(opts = {}, ctx = {}) {
     unchanged: classified.unchanged,
     planned,
     errors: classified.errors,
+    warnings: classified.warnings || [],
+    surface_counts: classified.surface_counts || {},
     materiality: {
       elevated: newWithInf.length,
       captured_not_elevated,
