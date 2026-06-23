@@ -49,14 +49,16 @@ Add offset/cursor pagination and loop until exhausted; surface per-surface captu
 Add the remaining parent/child relationships needed for faithful reconstruction (CatalogItem→Variable,
 Form→Section, etc.), each captured with `parent_artifact_id` / `child_role` / `child_order`.
 
-**P3 — Stop persisting faked `source_fluent` (the real DB win + removes a misleading signal).**
-`source_fluent` is currently REST-derived (`JSON.stringify` of fields / raw script body in
-`server.js` `snArtifactBody`), not real SDK output — it roughly doubles each artifact row and
-*implies* deployability it doesn't have. Stop storing it. The delta-export already generates Fluent
-**on demand** from `payload` + the registry `field_schema` (`server.js` ~6082 / ~6347–6391), so this
-does **not** break export; it only removes the verbatim-`source_fluent` print in the Build Spec doc
-section (~7220 / ~7428–7481), which should fall back to the on-demand emission. This is the honest
-resolution of backlog #71's "or drop the path" option.
+**P3 — SKIPPED (premise was false; verified in code 2026-06-23).** The plan assumed
+`source_fluent` was stored on every artifact and "roughly doubles each row" → a real DB win by
+dropping it. Tracing the write paths disproved this: the long-tail generic substrate
+(`asdlc_sn_artifact`) **never stores `source_fluent`** (`captureScope` never sets it;
+`buildArtifactRecord` is called with no `sourceFluent`; live DB has 0 non-null rows). It exists only
+on the 5 low-volume Tier-A design tables (+ their twins) via `snArtifactBody`, where for
+`business_logic` it is the **real script body** (worth keeping) and for the other 4 types a small
+`JSON.stringify(salient)` snapshot emitted as ```typescript (mildly misleading, but tiny and
+harmless). No meaningful DB win exists, so P3 is dropped. The only latent improvement — not
+mislabeling the JSON snapshot as Fluent in the Build Spec — was judged not worth the change now.
 
 **P4 — From-scratch import + re-import conflict confirmation.** Confirm the sync route handles a
 wholly-empty Workbench end-to-end and produces a complete design (Tier A L1 rows stamped with
