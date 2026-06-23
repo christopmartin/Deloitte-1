@@ -31,7 +31,7 @@ let _client;
 function getClient() {
   if (!_client) {
     if (!process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not set in .env');
-    _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 4, timeout: 120_000 });
   }
   return _client;
 }
@@ -756,7 +756,12 @@ async function processDocument(ingestId) {
       { projectId: doc.project_id, ingestId, round, platform }
     );
   } catch (err) {
-    console.error('[claude-processor] API error:', err.message);
+    const cause1 = err.cause;
+    const cause2 = cause1 && cause1.cause;
+    console.error('[claude-processor] API error:', err.message,
+      cause1 ? `| cause: ${cause1.message || cause1}` : '',
+      cause2 ? `| root: ${cause2.message || cause2} (code=${cause2.code})` : ''
+    );
     db.prepare(
       "UPDATE asdlc_ingest_document SET ingest_status='failed', processing_notes=?, updated_at=datetime('now') WHERE ingest_id=?"
     ).run(`Claude API error: ${err.message}`, ingestId);

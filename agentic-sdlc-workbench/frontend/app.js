@@ -280,6 +280,14 @@ export async function apiFetch(path, options = {}) {
 export function getCurrentProjectId() { return currentProjectId; }
 export function getCurrentUserId() { return currentUserId; }
 
+export function setCurrentProject(projectId) {
+  currentProjectId = projectId;
+  const select = document.getElementById('project-select');
+  if (select) select.value = projectId;
+  if (projectId) localStorage.setItem('asdlc_project_id', projectId);
+  else localStorage.removeItem('asdlc_project_id');
+}
+
 // ============================================================
 // Drill-down state (for inter-module navigation with anchor)
 // ============================================================

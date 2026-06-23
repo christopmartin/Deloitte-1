@@ -15,7 +15,8 @@ const SECTION_GROUPS = [
       { id: 'form_designs',   label: 'Form Designs (SN)'   },
       { id: 'business_logic', label: 'Business Logic (SN)' },
       { id: 'catalog_items',  label: 'Catalog Items (SN)'  },
-      { id: 'integrations',   label: 'Integrations (SN)'   },
+      { id: 'integrations',        label: 'Integrations (SN)'        },
+      { id: 'sn_generic_artifacts', label: 'Generic Artifacts (SN)' },
     ],
   },
   {
@@ -569,6 +570,24 @@ async function loadSnDeltaInfo(projectId) {
         _snDeltaCpList.style.display = 'flex';
       }
     }
+
+    // Patch artifact tier counts into the preview card (populated after loadPreview finishes)
+    if (info.generics) {
+      const statsEl = document.getElementById('be-artifact-stats');
+      if (statsEl) {
+        const { tier_a = 0, tier_b = 0, tier_c = 0 } = info.generics;
+        const total = tier_a + tier_b + tier_c;
+        if (total > 0) {
+          statsEl.innerHTML = '';
+          const detailRow = el('div', { className: 'be-detail-grid', style: 'margin-top:8px' });
+          detailRow.appendChild(el('div', { className: 'be-detail-row' },
+            el('span', {}, 'Generic SN Artifacts'),
+            el('span', { className: 'be-detail-val' }, `${total}  (A:${tier_a}  B:${tier_b}  C:${tier_c})`)
+          ));
+          statsEl.appendChild(detailRow);
+        }
+      }
+    }
   } catch (err) {
     // Non-fatal — SN delta is optional; hide button silently
     console.warn('[build_export] delta-info fetch failed:', err.message);
@@ -666,6 +685,9 @@ async function loadPreview(projectId) {
       ));
     }
     _previewEl.appendChild(detail);
+
+    // Placeholder populated by loadSnDeltaInfo if the project is SN-linked
+    _previewEl.appendChild(el('div', { id: 'be-artifact-stats' }));
 
     _previewEl.appendChild(el('p', { className: 'be-evidence-note' },
       'Guardrails, data sources, test scenarios, user stories, and governance controls are included when an ingested document is available for this application.'

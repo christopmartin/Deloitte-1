@@ -5432,7 +5432,7 @@ app.get('/api/v1/projects/:id/build-export', async (req, res) => {
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
   const allSections = ['use_cases','workflows','agents','tools','guardrails','data_sources','test_scenarios','user_stories','governance','relationships','cost_summary',
-    'data_models','form_designs','business_logic','catalog_items','integrations'];
+    'data_models','form_designs','business_logic','catalog_items','integrations','sn_generic_artifacts'];
   const sectionsParam = req.query.sections || 'all';
   const sections = sectionsParam === 'all' ? allSections : sectionsParam.split(',').map(s => s.trim()).filter(s => allSections.includes(s));
 
@@ -5637,6 +5637,55 @@ app.get('/api/v1/projects/:id/build-export', async (req, res) => {
     }
   }
 
+  // ── ServiceNow Generic Artifacts (Phase 1-3 substrate) ──────────────────────
+  if (sections.includes('sn_generic_artifacts')) {
+    try {
+      const rootArtifacts = db.prepare(`
+        SELECT a.*,
+               r.explain_topic AS registry_explain_topic,
+               r.sdk_version   AS registry_sdk_version
+        FROM asdlc_sn_artifact a
+        LEFT JOIN asdlc_sn_type_registry r ON r.sn_metadata_type = a.sn_metadata_type
+        WHERE a.project_id = ?
+          AND a.parent_artifact_id IS NULL
+          AND (a.lifecycle_status IS NULL OR a.lifecycle_status = 'active')
+        ORDER BY a.sn_metadata_type, a.name
+      `).all(req.params.id);
+
+      const childrenStmt = db.prepare(`
+        SELECT * FROM asdlc_sn_artifact
+        WHERE parent_artifact_id = ?
+          AND (lifecycle_status IS NULL OR lifecycle_status = 'active')
+        ORDER BY child_order, name
+      `);
+
+      data.sn_generic_artifacts = rootArtifacts.map(art => ({
+        ...art,
+        payload:         parseJson(art.payload)         || {},
+        override_fields: parseJson(art.override_fields) || {},
+        children: childrenStmt.all(art.sn_artifact_id).map(ch => ({
+          ...ch,
+          payload:         parseJson(ch.payload)         || {},
+          override_fields: parseJson(ch.override_fields) || {},
+        })),
+      }));
+    } catch { data.sn_generic_artifacts = []; }
+
+    try {
+      data.sn_type_registry_summary = {
+        by_tier: db.prepare(
+          "SELECT tier, COUNT(*) AS cnt FROM asdlc_sn_type_registry GROUP BY tier"
+        ).all(),
+        by_strategy: db.prepare(
+          "SELECT deploy_strategy, COUNT(*) AS cnt FROM asdlc_sn_type_registry GROUP BY deploy_strategy"
+        ).all(),
+        sdk_version: (db.prepare(
+          "SELECT sdk_version FROM asdlc_sn_type_registry WHERE sdk_version IS NOT NULL ORDER BY updated_at DESC LIMIT 1"
+        ).get() || {}).sdk_version || null,
+      };
+    } catch { data.sn_type_registry_summary = null; }
+  }
+
   // ── Materialized BRD design elements (guardrails, data sources) ─────────────
   // These now have real design tables, so read the canonical rows. Fall back to the
   // latest ingest's extractions for older projects whose items predate materialization
@@ -5818,9 +5867,24 @@ app.get('/api/v1/projects/:id/servicenow/delta-info', (req, res) => {
     ).all(req.params.id);
   }
 
+  // Artifact tier counts for the Build Export preview card (computed before any early return)
+  let genericCounts = null;
+  try {
+    const tierRows = db.prepare(
+      "SELECT tier, COUNT(*) AS cnt FROM asdlc_sn_artifact WHERE project_id = ? AND (lifecycle_status IS NULL OR lifecycle_status = 'active') GROUP BY tier"
+    ).all(req.params.id);
+    genericCounts = { tier_a: 0, tier_b: 0, tier_c: 0 };
+    for (const r of tierRows) {
+      if (r.tier === 'A') genericCounts.tier_a = r.cnt;
+      else if (r.tier === 'B') genericCounts.tier_b = r.cnt;
+      else if (r.tier === 'C') genericCounts.tier_c = r.cnt;
+    }
+  } catch { /* asdlc_sn_artifact absent on older DB — degrade silently */ }
+
   if (!deltaCps.length) {
     return res.json({ enabled: true, has_last_sync: !!sinceTs, sn_last_synced_at: sinceTs,
-      delta_cp_count: 0, update_count: 0, create_count: 0, has_changes: false, pending_cps: [] });
+      delta_cp_count: 0, update_count: 0, create_count: 0, has_changes: false, pending_cps: [],
+      generics: genericCounts });
   }
 
   const cpIds = deltaCps.map(c => c.change_packet_id);
@@ -5864,6 +5928,7 @@ app.get('/api/v1/projects/:id/servicenow/delta-info', (req, res) => {
     create_count: createCount,
     has_changes: (updateCount + createCount) > 0,
     pending_cps: pendingCps,
+    generics: genericCounts,
   });
 });
 
@@ -6428,6 +6493,7 @@ function buildExportMarkdown(project, baseline, sections, data) {
   lines.push('- Don\'t remove or edit the `[[wb:...]]` tag once deployed — it is the durable identity key that lets a re-sync match even before sys_ids are registered.');
   lines.push('- Don\'t split one Workbench artifact into multiple ServiceNow records without tagging **each** — an untagged extra record is classified NEW on the next sync (a duplicate candidate).');
   lines.push('- Don\'t invent slugs or alter the Project ID. If a needed artifact has no slug here, leave it untagged and flag the design owner.');
+  lines.push('- Don\'t use `ART-###` slugs for Level-1 design entities (Data Models, Business Logic, etc.) — each L1 type has its own slug namespace (`DM-###`, `BL-###`, etc.). `ART-###` slugs belong exclusively to rows in the generic artifact substrate (`asdlc_sn_artifact`).');
   lines.push('');
   // Concrete, copy-paste-exact identity tags for every in-scope artifact (built from the same data
   // the sections below render). Globally unique because each is qualified with the Project ID.
@@ -6441,6 +6507,21 @@ function buildExportMarkdown(project, baseline, sections, data) {
     lines.push('| Artifact | Identity tag to embed |');
     lines.push('|---|---|');
     for (const [label, slug] of tagRows) lines.push(`| ${mdCell(label)} | \`[[wb:${project.project_id}/${slug}]]\` |`);
+    lines.push('');
+  }
+
+  // Generic artifact identity tags (ART-### slugs)
+  const artTagRows = (data.sn_generic_artifacts || []).filter(a => a.slug);
+  if (artTagRows.length) {
+    lines.push('**Generic Artifact identity tags** (embed in the SN artifact\'s `description` field on its own trailing line):');
+    lines.push('');
+    lines.push('| Artifact | Type | Identity tag to embed |');
+    lines.push('|---|---|---|');
+    for (const art of artTagRows) {
+      lines.push(`| ${mdCell(art.name)} | \`${art.sn_metadata_type}\` | \`[[wb:${project.project_id}/${art.slug}]]\` |`);
+    }
+    lines.push('');
+    lines.push('> **Note:** Tier-B and Tier-C artifacts use `Record()` with `sys_id` coalescing — when `source_sys_id` is set the SDK PATCHes the existing record; when absent it POSTs a new one. Child artifacts (columns, variables, actions) carry their own identity tag and are tracked independently.');
     lines.push('');
   }
 
@@ -6474,6 +6555,33 @@ function buildExportMarkdown(project, baseline, sections, data) {
   lines.push('```');
   lines.push('');
 
+  lines.push('### Generic Artifact Deployment (`Record()` pattern)');
+  lines.push('');
+  lines.push('Generic artifacts (ACLs, roles, SLAs, properties, widgets, flow actions, etc.) are deployed via the Fluent `Record()` constructor when no typed API exists, or via a dedicated typed constructor (e.g. `Acl`, `Sla`) when the `asdlc_sn_type_registry` shows `deploy_strategy: \'typed\'`.');
+  lines.push('');
+  lines.push('```typescript');
+  lines.push('import { Record } from \'@servicenow/sdk/core\'');
+  lines.push('');
+  lines.push('// deploy_strategy: \'record\'  (Tier B/C long-tail — generic fallback)');
+  lines.push('Record({');
+  lines.push('  $id: Now.ID[\'ART-042\'],          // slug from asdlc_sn_artifact.slug');
+  lines.push('  table: \'sys_security_acl\',        // source_table from the artifact row');
+  lines.push('  data: { /* payload + override_fields merged */ },');
+  lines.push('})');
+  lines.push('');
+  lines.push('// deploy_strategy: \'typed\'  (Tier A/B with a dedicated Fluent constructor)');
+  lines.push('// import { Acl } from \'@servicenow/sdk/core\'   // fluent_api_name from the registry row');
+  lines.push('// new Acl({ $id: Now.ID[\'ART-007\'], ...typedFields })');
+  lines.push('');
+  lines.push('// PATCH vs POST: when source_sys_id is set on the artifact row, wire the $id');
+  lines.push('// through keys.ts coalescing so the SDK PATCHes rather than creating a duplicate.');
+  lines.push('// Each child artifact (column, variable, action) has its own $id + source_sys_id');
+  lines.push('// and is tracked + deployed independently of its parent.');
+  lines.push('```');
+  lines.push('');
+  lines.push('> ⚠ **Tier-A twin rule:** Tier-A generic artifacts project onto a Level-1 row (Data Model, Form Design, etc.). Deploy the L1 row and its generic twin together as a single SDK artifact install — never deploy the generic twin independently. The Delta Export handles this pairing automatically.');
+  lines.push('');
+
   lines.push('### Common Mistakes to Avoid');
   lines.push('');
   lines.push('- [ ] Using `versionDetails` on workflows (use `versions` — different field name)');
@@ -6485,6 +6593,7 @@ function buildExportMarkdown(project, baseline, sections, data) {
   lines.push('- [ ] Referencing "triggering record" in instructions — use "from the task" or "from the context"');
   lines.push('- [ ] Using `GlideRecord` in script tools — always use `GlideRecordSecure`');
   lines.push('- [ ] Script tool inputs defined as object (must be **array**); omit `inputSchema` (auto-generated)');
+  lines.push('- [ ] Deploying a Tier-A generic artifact independently from its Level-1 row — they form a single SDK artifact; use the Delta Export which handles the pairing, or deploy both in the same install pass');
   lines.push('');
 
   // ── ServiceNow Pre-flight Checklist ────────────────────────────────────────
@@ -7086,6 +7195,182 @@ function buildExportMarkdown(project, baseline, sections, data) {
     }
   }
 
+  // ── ServiceNow Generic Artifacts (Phase 1-3 substrate) ─────────────────────
+  if (sections.includes('sn_generic_artifacts') && data.sn_generic_artifacts !== undefined) {
+    lines.push('---'); lines.push('');
+    lines.push('## ServiceNow Generic Artifacts'); lines.push('');
+
+    const arts = data.sn_generic_artifacts || [];
+
+    if (!arts.length) {
+      lines.push('*No generic artifacts found for this project. Run the ServiceNow Sync → Capture, or run `node backfill-sn-artifacts.js` from the `backend-node/` directory to create generic twins for existing Level-1 SN entities.*');
+      lines.push('');
+      lines.push('> **Tip:** If this project has Data Models, Form Designs, or other Level-1 SN entities already synced,');
+      lines.push('> run `node backfill-sn-artifacts.js` to populate the generic substrate without disturbing any existing Level-1 views.');
+      lines.push('');
+    } else {
+      // Registry capability status
+      const reg = data.sn_type_registry_summary;
+      if (reg) {
+        lines.push('### Registry Capability Status'); lines.push('');
+        if (reg.sdk_version) {
+          lines.push(`> **SDK version at last type-registry scan:** \`${reg.sdk_version}\``);
+          lines.push('');
+        }
+        const tierMap = {}; for (const r of (reg.by_tier || [])) tierMap[r.tier] = r.cnt;
+        const stratMap = {}; for (const r of (reg.by_strategy || [])) stratMap[r.deploy_strategy] = r.cnt;
+        const totalReg = Object.values(tierMap).reduce((s, n) => s + n, 0);
+        if (totalReg) {
+          lines.push('| Tier | Types in Registry | Description |');
+          lines.push('|---|---|---|');
+          lines.push(`| A | ${tierMap['A'] || 0} | SN types that have a clean L1 projection AND a generic twin |`);
+          lines.push(`| B | ${tierMap['B'] || 0} | SN types with curated field schema; not yet L1-projected |`);
+          lines.push(`| C | ${tierMap['C'] || 0} | Generic long-tail — deployed via \`Record()\` fallback |`);
+          lines.push('');
+          lines.push('| Deploy Strategy | Registry Count |');
+          lines.push('|---|---|');
+          lines.push(`| typed (dedicated Fluent constructor) | ${stratMap['typed'] || 0} |`);
+          lines.push(`| record (generic \`Record()\`) | ${stratMap['record'] || 0} |`);
+          lines.push(`| override (\`Record()\` + custom x\\_/u\\_ fields) | ${stratMap['override'] || 0} |`);
+          lines.push('');
+        }
+      }
+
+      // Project-level artifact summary
+      lines.push('### Artifact Summary'); lines.push('');
+      const artsByTier = { A: 0, B: 0, C: 0 };
+      const artsByStrategy = {};
+      for (const art of arts) {
+        artsByTier[art.tier || 'C'] = (artsByTier[art.tier || 'C'] || 0) + 1;
+        const s = art.deploy_strategy || 'record';
+        artsByStrategy[s] = (artsByStrategy[s] || 0) + 1;
+      }
+      lines.push('| Tier | Count | Description |');
+      lines.push('|---|---|---|');
+      lines.push(`| A | ${artsByTier['A']} | Projected onto a Level-1 row AND has a generic twin |`);
+      lines.push(`| B | ${artsByTier['B']} | Curated field schema; not yet L1-projected |`);
+      lines.push(`| C | ${artsByTier['C']} | Generic long-tail (ACLs, roles, SLAs, properties, widgets, flow actions) |`);
+      lines.push(`| **Total** | **${arts.length}** | |`);
+      lines.push('');
+      lines.push('| Deploy Strategy | Count |');
+      lines.push('|---|---|');
+      lines.push(`| typed | ${artsByStrategy['typed'] || 0} |`);
+      lines.push(`| record | ${artsByStrategy['record'] || 0} |`);
+      lines.push(`| override | ${artsByStrategy['override'] || 0} |`);
+      lines.push('');
+
+      lines.push(`> **Deployment:** Generic artifacts are deployed via \`now-sdk\` using the Fluent \`Record()\` constructor (or a typed constructor when available). The **SN Delta Export** contains auto-generated Fluent code blocks for all artifacts in approved Change Packets and is the deployable artifact.`);
+      lines.push(`> Delta Export endpoint: \`GET /api/v1/projects/${project.project_id}/servicenow/delta-export\``);
+      lines.push('');
+
+      // Artifacts grouped by sn_metadata_type
+      lines.push('### Artifacts by Type'); lines.push('');
+      const byType = {};
+      for (const art of arts) {
+        const t = art.sn_metadata_type || 'unknown';
+        (byType[t] = byType[t] || []).push(art);
+      }
+
+      for (const [metaType, typeArts] of Object.entries(byType).sort(([a], [b]) => a.localeCompare(b))) {
+        lines.push(`#### \`${metaType}\` (${typeArts.length})`); lines.push('');
+
+        for (const art of typeArts) {
+          const artHead = [art.name, art.slug].filter(Boolean).join(' — ');
+          const isUpdate = !!art.source_sys_id;
+
+          lines.push(`##### ${mdCell(artHead)}`); lines.push('');
+          lines.push('| Field | Value |');
+          lines.push('|---|---|');
+          lines.push(`| Slug | \`${art.slug || '—'}\` |`);
+          lines.push(`| Tier | ${art.tier || '—'} |`);
+          lines.push(`| Deploy Strategy | \`${art.deploy_strategy || 'record'}\` |`);
+          if (art.fluent_api_name) lines.push(`| Fluent Constructor | \`${art.fluent_api_name}\` |`);
+          lines.push(`| Round-Trip Status | ${isUpdate ? `PATCH — existing SN record (\`${art.source_sys_id}\`)` : 'POST — not yet deployed to SN'} |`);
+          if (art.source_table) lines.push(`| SN Table | \`${art.source_table}\` |`);
+          if (art.source_scope) lines.push(`| SN Scope | \`${art.source_scope}\` |`);
+          lines.push('');
+
+          // Tier-A cross-reference
+          if (art.tier === 'A' && art.projected_entity_type && art.projected_entity_id) {
+            lines.push(`> **Tier-A twin:** Projects onto Level-1 entity \`${art.projected_entity_type}\` / \`${art.projected_entity_id}\`. Deploy the L1 row and this generic twin together — the L1 row carries human-readable design intent; this twin carries the Fluent construct and round-trip identity.`);
+            lines.push('');
+          }
+
+          // Fluent construct
+          if (art.source_fluent) {
+            lines.push('<details><summary>Fluent construct (captured from live SDK)</summary>');
+            lines.push(''); lines.push('```typescript');
+            lines.push(art.source_fluent);
+            lines.push('```'); lines.push('</details>'); lines.push('');
+          } else {
+            const payloadKeys = Object.keys(art.payload || {});
+            const overrideKeys = Object.keys(art.override_fields || {});
+            if (payloadKeys.length || overrideKeys.length) {
+              const fluentKey = (art.slug || `${art.sn_metadata_type || 'art'}_${(art.sn_artifact_id || '').slice(0, 8)}`).replace(/[^A-Za-z0-9_-]/g, '-');
+              const dataObj = { ...art.payload, ...art.override_fields };
+              lines.push('<details><summary>Fluent construct (auto-generated Record())</summary>');
+              lines.push(''); lines.push('```typescript');
+              lines.push(`import { Record } from '@servicenow/sdk/core'`);
+              lines.push('');
+              lines.push('Record({');
+              lines.push(`  $id: Now.ID['${fluentKey}'],`);
+              lines.push(`  table: '${art.source_table || '(unknown)'}',`);
+              const dataStr = JSON.stringify(dataObj, null, 2).replace(/\n/g, '\n  ');
+              lines.push(`  data: ${dataStr},`);
+              lines.push('})');
+              lines.push('```'); lines.push('</details>'); lines.push('');
+            }
+          }
+
+          // Round-trip provenance
+          if (art.source_sys_id || art.source_hash) {
+            lines.push('<details><summary>Round-trip provenance</summary>'); lines.push('');
+            if (art.source_sys_id) lines.push(`- **source_sys_id:** \`${art.source_sys_id}\``);
+            if (art.source_table)  lines.push(`- **source_table:** \`${art.source_table}\``);
+            if (art.source_scope)  lines.push(`- **source_scope:** \`${art.source_scope}\``);
+            if (art.source_hash)   lines.push(`- **source_hash:** \`${art.source_hash}\` *(drift detection — changes trigger re-sync)*`);
+            if (art.sdk_version)   lines.push(`- **sdk_version:** \`${art.sdk_version}\``);
+            lines.push('</details>'); lines.push('');
+          }
+
+          // Children
+          if (art.children && art.children.length) {
+            lines.push(`**Child artifacts** (${art.children.length}):`); lines.push('');
+            lines.push('| Role | Name | Strategy | SN sys_id |');
+            lines.push('|---|---|---|---|');
+            for (const ch of art.children) {
+              const chSysId = ch.source_sys_id ? `\`${ch.source_sys_id}\`` : '*(not yet deployed)*';
+              lines.push(`| ${mdCell(ch.child_role || '—')} | ${mdCell(ch.name)} | \`${ch.deploy_strategy || 'record'}\` | ${chSysId} |`);
+            }
+            lines.push('');
+
+            for (const ch of art.children) {
+              const hasFluentData = ch.source_fluent || Object.keys(ch.payload || {}).length;
+              if (!hasFluentData) continue;
+              const chHead = [ch.name, ch.child_role].filter(Boolean).join(' — ');
+              lines.push(`<details><summary>Child: ${mdCell(chHead)}</summary>`);
+              lines.push(''); lines.push('```typescript');
+              if (ch.source_fluent) {
+                lines.push(ch.source_fluent);
+              } else {
+                const chKey = (ch.slug || `${ch.sn_metadata_type || 'child'}_${(ch.sn_artifact_id || '').slice(0, 8)}`).replace(/[^A-Za-z0-9_-]/g, '-');
+                const chData = { ...ch.payload, ...ch.override_fields };
+                lines.push(`import { Record } from '@servicenow/sdk/core'`);
+                lines.push('Record({');
+                lines.push(`  $id: Now.ID['${chKey}'],`);
+                lines.push(`  table: '${ch.source_table || art.source_table || '(unknown)'}',`);
+                const chDataStr = JSON.stringify(chData, null, 2).replace(/\n/g, '\n  ');
+                lines.push(`  data: ${chDataStr},`);
+                lines.push('})');
+              }
+              lines.push('```'); lines.push('</details>'); lines.push('');
+            }
+          }
+        }
+      }
+    }
+  }
+
   // ── 5. Guardrails ─────────────────────────────────────────────────────────────
   if (sections.includes('guardrails') && data.guardrails) {
     lines.push('---'); lines.push('');
@@ -7281,11 +7566,23 @@ function buildExportMarkdown(project, baseline, sections, data) {
   for (const a of (data.agents || []))    if (a.slug) regRows.push({ entity_type: 'agent_spec', slug: a.slug, sys_id: '', source_table: 'sn_aia_agent' });
   for (const w of (data.workflows || [])) if (w.slug) regRows.push({ entity_type: 'workflow',   slug: w.slug, sys_id: '', source_table: 'sn_aia_usecase' });
   for (const t of (data.tools || []))     if (t.slug) regRows.push({ entity_type: 'tool',       slug: t.slug, sys_id: '', source_table: 'sn_aia_tool' });
+  // Generic artifacts (new records only — those with source_sys_id are already registered)
+  for (const art of (data.sn_generic_artifacts || [])) {
+    if (art.slug && !art.source_sys_id)
+      regRows.push({ entity_type: 'sn_artifact', slug: art.slug, sys_id: '', source_table: art.source_table || '' });
+    for (const ch of (art.children || []))
+      if (ch.slug && !ch.source_sys_id)
+        regRows.push({ entity_type: 'sn_artifact', slug: ch.slug, sys_id: '', source_table: ch.source_table || art.source_table || '' });
+  }
   if (regRows.length) {
     lines.push('---'); lines.push('');
     lines.push('## Post-Deploy: Register sys_ids');
     lines.push('');
-    lines.push('After `now-sdk install`, look up each artifact\'s `sys_id` on the instance (query `sn_aia_agent` / `sn_aia_tool` / `sn_aia_usecase` by name), paste it into the matching row below, then POST the whole body to:');
+    lines.push('After `now-sdk install`, look up each artifact\'s `sys_id` on the instance and paste it into the matching row below, then POST the whole body to the endpoint below.');
+    lines.push('');
+    lines.push('- **L1 design entities:** query `sn_aia_agent` / `sn_aia_tool` / `sn_aia_usecase` by name');
+    lines.push('- **Generic artifacts (`sn_artifact`):** query the `source_table` column value (e.g. `sys_security_acl`) by name, or use the `sys_id` returned directly in the SDK deploy output');
+    lines.push('');
     lines.push('');
     lines.push(`\`POST /api/v1/projects/${project.project_id}/servicenow/register-sysid\``);
     lines.push('');

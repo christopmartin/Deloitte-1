@@ -1,7 +1,7 @@
 /**
  * modules/projects.js — Application Registry
  */
-import { apiFetch, tag, statusTag, formatDate, renderTable, el, escHtml, showToast, getCurrentProjectId } from '../app.js';
+import { apiFetch, tag, statusTag, formatDate, renderTable, el, escHtml, showToast, getCurrentProjectId, setCurrentProject } from '../app.js';
 
 let allProjects = [];
 let selectedProject = null;
@@ -650,6 +650,16 @@ async function openNewProject(pane) {
         body: JSON.stringify({ client_id, project_name, project_code, stage: inputs.stage.value.trim() || 'draft', target_platform: platformInput.value }),
       });
       allProjects.push(created);
+      // Switch global context to the new application so navigating to any other
+      // module (e.g. Ingest) scopes itself to this new, empty project.
+      const sel = document.getElementById('project-select');
+      if (sel && ![...sel.options].some(o => o.value === created.project_id)) {
+        const opt = document.createElement('option');
+        opt.value = created.project_id;
+        opt.textContent = `${created.client_name ? created.client_name + ' — ' : ''}${created.project_name}`;
+        sel.appendChild(opt);
+      }
+      setCurrentProject(created.project_id);
       showToast('Application created.', 'success');
       loadDetail(created, pane);
     } catch (err) {
