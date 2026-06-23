@@ -5985,16 +5985,21 @@ app.get('/api/v1/projects/:id/servicenow/delta-export', (req, res) => {
       let row = null;
       try { row = db.prepare('SELECT * FROM asdlc_sn_artifact WHERE sn_artifact_id = ?').get(item.entity_id); } catch { /* ignore */ }
       if (!row) continue;
-      let payload = {}, override = {};
+      let payload = {}, override = {}, field_schema = null;
       try { payload = JSON.parse(row.payload || '{}'); } catch { /* keep {} */ }
       try { override = JSON.parse(row.override_fields || '{}'); } catch { /* keep {} */ }
+      // Curated field_schema (Phase 4) drives idiomatic typed Fluent emission; absent → Record().
+      try {
+        const fs = db.prepare('SELECT field_schema FROM asdlc_sn_type_registry WHERE sn_metadata_type = ?').get(row.sn_metadata_type);
+        if (fs && fs.field_schema) field_schema = JSON.parse(fs.field_schema);
+      } catch { /* registry absent / bad JSON — fall back to Record() */ }
       generics.push({
         entity_id: item.entity_id, slug: row.slug, name: row.name,
         sn_metadata_type: row.sn_metadata_type, fluent_api_name: row.fluent_api_name,
         deploy_strategy: row.deploy_strategy, tier: row.tier, source_table: row.source_table,
         source_sys_id: row.source_sys_id, source_scope: row.source_scope,
         parent_artifact_id: row.parent_artifact_id, child_role: row.child_role, child_order: row.child_order,
-        payload, override, cp_ref: item.cp_ref, cp_title: item.cp_title,
+        payload, override, field_schema, cp_ref: item.cp_ref, cp_title: item.cp_title,
       });
       continue;
     }
@@ -6239,32 +6244,60 @@ function buildSNDeltaMarkdown(project, deltaCps, updates, creates, sinceTs, gene
   } else {
     lines.push('Auto-generated Fluent (now-sdk) for artifacts on the generic substrate. Records carrying a');
     lines.push('`sys_id` are **updates** — coalesce on that `sys_id` (via `keys.ts`) so they PATCH rather than');
-    lines.push('duplicate; records without are **creates**. The long tail deploys via the generic `Record()`;');
-    lines.push('where a dedicated constructor exists it is noted (use it for higher fidelity once a typed field');
-    lines.push('map is curated). Child artifacts (e.g. a table\'s columns) are listed under their parent.');
+    lines.push('duplicate; records without are **creates**. Types with a curated field map emit their native');
+    lines.push('typed constructor (`new Acl({...})`, `new Property({...})`); the long tail deploys via the generic');
+    lines.push('`Record()`. Child artifacts (e.g. a table\'s columns) are listed under their parent.');
     lines.push('');
 
     const fluentKey = (g) => (g.slug || `${g.sn_metadata_type}_${(g.source_sys_id || 'new').slice(0, 14)}`).replace(/[^A-Za-z0-9_-]/g, '-');
+    // Render a payload value as a Fluent literal per its curated type.
+    const fmtVal = (v, type) => {
+      if (type === 'boolean') return (v === true || v === 'true' || v === 1 || v === '1') ? 'true' : 'false';
+      if (type === 'number')  { const n = Number(v); return Number.isFinite(n) ? String(n) : '0'; }
+      if (type === 'string[]') {
+        const arr = Array.isArray(v) ? v : String(v).split(',').map(s => s.trim()).filter(Boolean);
+        return JSON.stringify(arr);
+      }
+      return JSON.stringify(v == null ? '' : String(v));   // string | text
+    };
     const emitFluent = (g) => {
       const isUpdate = !!g.source_sys_id;
+      const typed = g.deploy_strategy === 'typed' && g.fluent_api_name &&
+        g.field_schema && Array.isArray(g.field_schema.fields) && g.field_schema.fields.length;
       lines.push(`### ${g.sn_metadata_type}: ${mdCell(g.name)}${g.child_role ? ` _(child: ${g.child_role})_` : ''} — ${isUpdate ? '🔄 UPDATE' : '✨ CREATE'}`);
       lines.push('');
       lines.push(`- Tier ${g.tier} · deploy strategy \`${g.deploy_strategy}\`${g.fluent_api_name ? ` · constructor \`${g.fluent_api_name}\`` : ''}`);
       if (isUpdate) lines.push(`- Existing ServiceNow \`sys_id\`: \`${g.source_sys_id}\` — coalesce on this so it PATCHes (no duplicate)`);
       lines.push(`- From CP ${mdCell(g.cp_ref)}`);
-      if (g.fluent_api_name && g.deploy_strategy === 'typed') {
+      if (g.fluent_api_name && g.deploy_strategy === 'typed' && !typed) {
         lines.push(`- A dedicated Fluent API \`new ${g.fluent_api_name}({...})\` exists; the raw field map below deploys reliably via \`Record()\` until a typed field map is curated.`);
       }
       lines.push('');
       lines.push('```typescript');
-      lines.push(`import { Record } from '@servicenow/sdk/core'`);
-      lines.push('');
-      lines.push('Record({');
-      lines.push(`  $id: Now.ID['${fluentKey(g)}'],`);
-      lines.push(`  table: '${g.source_table || '(unknown)'}',`);
-      const dataStr = JSON.stringify({ ...g.payload, ...g.override }, null, 2).split('\n').join('\n  ');
-      lines.push(`  data: ${dataStr},`);
-      lines.push('})');
+      if (typed) {
+        // Idiomatic typed constructor (Phase 4): map curated SN columns → Fluent props.
+        lines.push(`import { ${g.fluent_api_name} } from '@servicenow/sdk/core'`);
+        lines.push('');
+        lines.push(`${g.fluent_api_name}({`);
+        lines.push(`  $id: Now.ID['${fluentKey(g)}'],`);
+        for (const f of g.field_schema.fields) {
+          if (!(f.col in g.payload)) continue;
+          lines.push(`  ${f.prop}: ${fmtVal(g.payload[f.col], f.type)},`);
+        }
+        lines.push('})');
+        const extra = Object.keys(g.override || {});
+        if (extra.length) lines.push(`// + ${extra.length} override field(s) not in the typed surface: ${extra.join(', ')} — set via $override`);
+      } else {
+        // Generic fallback: faithful raw replay via Record().
+        lines.push(`import { Record } from '@servicenow/sdk/core'`);
+        lines.push('');
+        lines.push('Record({');
+        lines.push(`  $id: Now.ID['${fluentKey(g)}'],`);
+        lines.push(`  table: '${g.source_table || '(unknown)'}',`);
+        const dataStr = JSON.stringify({ ...g.payload, ...g.override }, null, 2).split('\n').join('\n  ');
+        lines.push(`  data: ${dataStr},`);
+        lines.push('})');
+      }
       lines.push('```');
       lines.push('');
     };

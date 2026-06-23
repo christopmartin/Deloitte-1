@@ -51,6 +51,30 @@ const CURATED = {
   alias:          { tier: 'A', projected_entity_type: 'integration' },
   // ── Parent→child structures (children round-trip with their own sys_id) ──
   // Column + Variable subtypes are detected generically below; these name the parents.
+
+  // ── Tier-B field_schema curation (Phase 4): SN column → Fluent constructor prop, so
+  // these types emit idiomatic `new Property({...})` / `new Role({...})` on export instead
+  // of the generic Record() fallback. Maps verified against `now-sdk explain <type>`.
+  // type ∈ string | text | boolean | number | string[]. Only cleanly-mapping types are
+  // curated; intricate ones (e.g. acl's name→table) stay on the faithful Record() path.
+  property: { tier: 'C', field_schema: { fields: [
+    { col: 'name', prop: 'name', type: 'string', required: true },
+    { col: 'type', prop: 'type', type: 'string' },
+    { col: 'value', prop: 'value', type: 'string' },
+    { col: 'description', prop: 'description', type: 'text' },
+    { col: 'choices', prop: 'choices', type: 'string[]' },
+    { col: 'ignore_cache', prop: 'ignoreCache', type: 'boolean' },
+    { col: 'is_private', prop: 'isPrivate', type: 'boolean' },
+  ] } },
+  role: { tier: 'C', field_schema: { fields: [
+    { col: 'name', prop: 'name', type: 'string', required: true },
+    { col: 'description', prop: 'description', type: 'text' },
+    { col: 'assignable_by', prop: 'assignableBy', type: 'string' },
+    { col: 'can_delegate', prop: 'canDelegate', type: 'boolean' },
+    { col: 'elevated_privilege', prop: 'elevatedPrivilege', type: 'boolean' },
+    { col: 'grantable', prop: 'grantable', type: 'boolean' },
+    { col: 'scoped_admin', prop: 'scopedAdmin', type: 'boolean' },
+  ] } },
 };
 
 // SN backing-table heuristic: among a topic's tags, the primary backing table is the
@@ -108,9 +132,9 @@ function defaultExec(cmd) {
 const UPSERT_SQL = `
   INSERT INTO asdlc_sn_type_registry
     (sn_metadata_type, fluent_api_name, source_table, explain_topic, deploy_strategy, tier,
-     projected_entity_type, parent_type, child_role, tags, sdk_version, curated, discovered_at, updated_at)
+     projected_entity_type, parent_type, child_role, field_schema, tags, sdk_version, curated, discovered_at, updated_at)
   VALUES (@sn_metadata_type, @fluent_api_name, @source_table, @explain_topic, @deploy_strategy, @tier,
-     @projected_entity_type, @parent_type, @child_role, @tags, @sdk_version, @curated, datetime('now'), datetime('now'))
+     @projected_entity_type, @parent_type, @child_role, @field_schema, @tags, @sdk_version, @curated, datetime('now'), datetime('now'))
   ON CONFLICT(sn_metadata_type) DO UPDATE SET
     -- Derived facts always refresh (this is how a type tracks the installed SDK):
     fluent_api_name = excluded.fluent_api_name,
@@ -126,6 +150,8 @@ const UPSERT_SQL = `
     projected_entity_type = CASE WHEN asdlc_sn_type_registry.curated = 1 THEN asdlc_sn_type_registry.projected_entity_type ELSE excluded.projected_entity_type END,
     parent_type           = CASE WHEN asdlc_sn_type_registry.curated = 1 THEN asdlc_sn_type_registry.parent_type ELSE excluded.parent_type END,
     child_role            = CASE WHEN asdlc_sn_type_registry.curated = 1 THEN asdlc_sn_type_registry.child_role ELSE excluded.child_role END,
+    -- field_schema: code-provided curation wins when present; an SDK-only re-scan (no schema) preserves the existing one.
+    field_schema          = COALESCE(excluded.field_schema, asdlc_sn_type_registry.field_schema),
     updated_at      = datetime('now')
 `;
 
@@ -141,10 +167,11 @@ function toRow(entry, sdkVersion) {
     // ABSENT from the catalog never get a row here — resolveType() returns the Tier-C
     // Record() default for them, which is the generic fallback.
     deploy_strategy: entry.fluent_api_name ? 'typed' : 'record',
-    tier: curated ? curated.tier : 'C',
+    tier: curated ? (curated.tier || 'C') : 'C',
     projected_entity_type: curated ? (curated.projected_entity_type || null) : null,
     parent_type: entry.parent_type,
     child_role: entry.child_role,
+    field_schema: (curated && curated.field_schema) ? JSON.stringify(curated.field_schema) : null,
     tags: JSON.stringify(entry.tags || []),
     sdk_version: sdkVersion || null,
     curated: curated ? 1 : 0,
@@ -201,7 +228,12 @@ function seedFromBaseline() {
   let baseline;
   try { baseline = JSON.parse(fs.readFileSync(BASELINE_PATH, 'utf8')); } catch { return { seeded: 0, reason: 'no baseline' }; }
   const stmt = db.prepare(UPSERT_SQL);
-  for (const r of baseline.rows || []) stmt.run({ ...r, tags: typeof r.tags === 'string' ? r.tags : JSON.stringify(r.tags || []) });
+  for (const r of baseline.rows || []) stmt.run({
+    field_schema: null,                                   // default for pre-Phase-4 baselines
+    ...r,
+    field_schema: (r.field_schema == null) ? null : (typeof r.field_schema === 'string' ? r.field_schema : JSON.stringify(r.field_schema)),
+    tags: typeof r.tags === 'string' ? r.tags : JSON.stringify(r.tags || []),
+  });
   return { seeded: (baseline.rows || []).length, sdkVersion: baseline.sdkVersion || null };
 }
 

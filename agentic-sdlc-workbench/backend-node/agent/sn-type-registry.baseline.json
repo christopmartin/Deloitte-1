@@ -12,6 +12,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"Acl\",\"acl\",\"access control\",\"security\",\"permission\",\"sys_security_acl\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -26,6 +27,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"Action\",\"action\",\"flow-action\",\"wfa.action\",\"action.core\",\"built-in-action\",\"OOB-action\",\"sys_hub_action_type_definition\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -40,6 +42,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"AiAgent\",\"ai agent\",\"artificial intelligence\",\"sn_aia_agent\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -54,6 +57,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"AiAgenticWorkflow\",\"ai agentic workflow\",\"artificial intelligence\",\"ai agent\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -68,6 +72,7 @@
       "projected_entity_type": "integration",
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"Alias\",\"connection alias\",\"credential alias\",\"sys_alias\",\"integration\",\"connection\",\"credential\"]",
       "sdk_version": "4.8.0",
       "curated": 1
@@ -82,6 +87,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"AliasTemplate\",\"alias template\",\"sys_alias_templates\",\"connection alias\",\"connection credential\",\"dynamic data schema\",\"credential template\",\"connection template\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -96,6 +102,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"Applicability\",\"applicability\",\"workspace\",\"ux\",\"sys_ux_applicability\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -110,6 +117,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"ApplicationMenu\",\"application menu\",\"navigation\",\"module\",\"sys_app_application\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -124,6 +132,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"ApprovalRulesColumn\",\"column\",\"table\",\"approval rules\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -138,6 +147,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"AttachmentVariable\",\"variable\",\"service catalog\",\"attachment\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -152,6 +162,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"BasicDateTimeColumn\",\"column\",\"table\",\"basic datetime\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -166,6 +177,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"BasicImageColumn\",\"column\",\"table\",\"basic image\",\"image\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -180,6 +192,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"BooleanColumn\",\"column\",\"table\",\"boolean\",\"true false\",\"checkbox\",\"toggle\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -194,6 +207,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"BreakVariable\",\"variable\",\"service catalog\",\"break\",\"separator\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -208,6 +222,7 @@
       "projected_entity_type": "business_logic",
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"BusinessRule\",\"business rule\",\"server script\",\"sys_script\",\"automation\",\"trigger\",\"before\",\"after\",\"async\"]",
       "sdk_version": "4.8.0",
       "curated": 1
@@ -222,6 +237,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"CalendarDateTimeColumn\",\"column\",\"table\",\"calendar datetime\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -236,6 +252,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"CatalogClientScript\",\"catalog client script\",\"service catalog\",\"catalog_script_client\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -250,6 +267,7 @@
       "projected_entity_type": "catalog_item",
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"CatalogItem\",\"catalog item\",\"service catalog\",\"request\",\"sc_cat_item\"]",
       "sdk_version": "4.8.0",
       "curated": 1
@@ -264,6 +282,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"CatalogItemRecordProducer\",\"record producer\",\"service catalog\",\"sc_cat_item_producer\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -278,6 +297,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"CatalogUiPolicy\",\"catalog ui policy\",\"service catalog\",\"catalog_ui_policy\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -292,6 +312,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"CheckboxVariable\",\"variable\",\"service catalog\",\"checkbox\",\"boolean\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -306,6 +327,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"ChoiceColumn\",\"column\",\"table\",\"choice\",\"dropdown\",\"select\",\"picklist\",\"enum\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -320,6 +342,7 @@
       "projected_entity_type": "business_logic",
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"ClientScript\",\"client script\",\"browser script\",\"sys_script_client\",\"onLoad\",\"onChange\",\"onSubmit\",\"onCellEdit\",\"form script\",\"g_form\"]",
       "sdk_version": "4.8.0",
       "curated": 1
@@ -334,6 +357,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"ColumnTypeCheck\",\"instance scan\",\"column type check\",\"health scan\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -348,6 +372,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"ConditionsColumn\",\"column\",\"table\",\"conditions\",\"filter\",\"encoded query\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -362,6 +387,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"ContainerEndVariable\",\"variable\",\"service catalog\",\"container\",\"layout\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -376,6 +402,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"ContainerSplitVariable\",\"variable\",\"service catalog\",\"container\",\"layout\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -390,6 +417,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"ContainerStartVariable\",\"variable\",\"service catalog\",\"container\",\"layout\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -404,6 +432,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"CrossScopePrivilege\",\"cross scope privilege\",\"scope\",\"access\",\"sys_scope_privilege\",\"permission\",\"cross-scope\",\"application scope\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -418,6 +447,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"Action\",\"custom action\",\"action definition\",\"actionStep\",\"wfa.actionStep\",\"reusable action\",\"sys_hub_action_type_definition\",\"assignActionOutputs\",\"wfa.assignActionOutputs\",\"action outputs\",\"output assignment\",\"errorEvaluation\",\"wfa.errorEvaluation\",\"error evaluation\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -432,6 +462,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"CustomVariable\",\"variable\",\"service catalog\",\"custom\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -446,6 +477,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"CustomWithLabelVariable\",\"variable\",\"service catalog\",\"custom\",\"label\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -460,6 +492,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"Dashboard\",\"dashboard\",\"workspace\",\"par_dashboard\",\"widget\",\"tab\",\"visualization\",\"report\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -474,6 +507,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"DataLookup\",\"data lookup\",\"dl_definition\",\"dl_definition_rel_match\",\"dl_definition_rel_set\",\"dl_matcher\",\"matcher rule\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -488,6 +522,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"DataPolicy\",\"data policy\",\"server side data policy\",\"sys_data_policy2\",\"sys_data_policy_rule\",\"mandatory\",\"read-only\",\"field enforcement\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -502,6 +537,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"DateColumn\",\"column\",\"table\",\"date\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -516,6 +552,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"DateTimeColumn\",\"column\",\"table\",\"datetime\",\"timestamp\",\"calendar\",\"date time\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -530,6 +567,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"DateTimeVariable\",\"variable\",\"service catalog\",\"date\",\"datetime\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -544,6 +582,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"DateVariable\",\"variable\",\"service catalog\",\"date\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -558,6 +597,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"DayOfWeekColumn\",\"column\",\"table\",\"day of week\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -572,6 +612,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"DaysOfWeekColumn\",\"column\",\"table\",\"days of week\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -586,6 +627,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"DecimalColumn\",\"column\",\"table\",\"decimal\",\"number\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -600,6 +642,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"DocumentIdColumn\",\"column\",\"table\",\"document id\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -614,6 +657,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"DomainIdColumn\",\"column\",\"table\",\"domain\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -628,6 +672,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"DomainPathColumn\",\"column\",\"table\",\"domain path\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -642,6 +687,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"DueDateColumn\",\"column\",\"table\",\"due date\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -656,6 +702,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"DurationColumn\",\"column\",\"table\",\"duration\",\"time\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -670,6 +717,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"DurationVariable\",\"variable\",\"service catalog\",\"duration\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -684,6 +732,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"EmailColumn\",\"column\",\"table\",\"email\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -698,6 +747,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"EmailNotification\",\"email notification\",\"email\",\"alert\",\"sysevent_email_action\",\"notification\",\"recipient\",\"digest\",\"trigger\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -712,6 +762,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"EmailVariable\",\"variable\",\"service catalog\",\"email\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -726,6 +777,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"FieldListColumn\",\"column\",\"table\",\"field list\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -740,6 +792,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"FieldNameColumn\",\"column\",\"table\",\"field name\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -754,6 +807,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"FloatColumn\",\"column\",\"table\",\"float\",\"number\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -768,6 +822,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"Flow\",\"flow\",\"Flow()\",\"wfa\",\"workflow-automation\",\"flow-designer\",\"automation\",\"sys_hub_flow\",\"process-automation\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -782,6 +837,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"FlowStage\",\"flow stage\",\"stage\",\"wfa.stage\",\"sys_hub_flow_stage\",\"flow tracker\",\"stage tracker\",\"flow phases\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -796,6 +852,7 @@
       "projected_entity_type": "form_design",
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"Form\",\"form\",\"form layout\",\"sys_ui_form\",\"ui section\",\"sys_ui_section\",\"ui element\",\"sys_ui_element\",\"sys_ui_form_section\",\"sys_ui_annotation\",\"view\",\"sections\",\"layout\",\"annotation\",\"formatter\"]",
       "sdk_version": "4.8.0",
       "curated": 1
@@ -810,6 +867,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"GenericColumn\",\"column\",\"table\",\"generic\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -824,6 +882,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"GuidColumn\",\"column\",\"table\",\"guid\",\"sys_id\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -838,6 +897,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"HtmlColumn\",\"column\",\"table\",\"html\",\"rich text\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -852,6 +912,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"HtmlVariable\",\"variable\",\"service catalog\",\"html\",\"rich text\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -866,6 +927,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"ImportSet\",\"import set\",\"transform map\",\"data import\",\"sys_transform_map\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -880,6 +942,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"InboundEmailAction\",\"inbound email\",\"email action\",\"sys_email_action\",\"email processing\",\"email automation\",\"email trigger\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -894,6 +957,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"IntegerColumn\",\"column\",\"table\",\"integer\",\"number\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -908,6 +972,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"IntegerDateColumn\",\"column\",\"table\",\"integer date\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -922,6 +987,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"IpAddressVariable\",\"variable\",\"service catalog\",\"ip address\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -936,6 +1002,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"JsonColumn\",\"column\",\"table\",\"json\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -950,6 +1017,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"LabelVariable\",\"variable\",\"service catalog\",\"label\",\"display\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -964,6 +1032,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"LinterCheck\",\"instance scan\",\"linter check\",\"health scan\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -978,6 +1047,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"List\",\"list\",\"list layout\",\"sys_ui_list\",\"columns\",\"view\",\"layout\",\"related list\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -992,6 +1062,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"ListCollectorVariable\",\"variable\",\"service catalog\",\"list collector\",\"multi-select\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1006,6 +1077,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"ListColumn\",\"column\",\"table\",\"list\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1020,6 +1092,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"LookupMultipleChoiceVariable\",\"variable\",\"service catalog\",\"lookup\",\"multiple choice\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1034,6 +1107,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"LookupSelectBoxVariable\",\"variable\",\"service catalog\",\"lookup\",\"select\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1048,6 +1122,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"MaskedVariable\",\"variable\",\"service catalog\",\"masked\",\"password\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1062,6 +1137,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"MultiLineTextColumn\",\"column\",\"table\",\"multi-line text\",\"textarea\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1076,6 +1152,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"MultiLineTextVariable\",\"variable\",\"service catalog\",\"multi-line text\",\"textarea\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1090,6 +1167,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"MultipleChoiceVariable\",\"variable\",\"service catalog\",\"multiple choice\",\"radio\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1104,6 +1182,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"NameValuePairsColumn\",\"column\",\"table\",\"name value pairs\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1118,6 +1197,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"NowAssistSkillConfig\",\"now assist\",\"skill\",\"ai\",\"generative ai\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1132,6 +1212,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"NumericScaleVariable\",\"variable\",\"service catalog\",\"numeric scale\",\"rating\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1146,6 +1227,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"OtherDateColumn\",\"column\",\"table\",\"other date\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1160,6 +1242,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"OverrideColumn\",\"dictionary override\",\"column override\",\"table\",\"sys_dictionary_override\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1174,6 +1257,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"Password2Column\",\"column\",\"table\",\"password\",\"encrypted\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1188,6 +1272,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"PlaybookDefinition\",\"playbook\",\"wfa.playbook\",\"lane\",\"activity\",\"trigger\",\"dataPill\",\"sys_pd_process_definition\",\"automation\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1202,9 +1287,10 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": "{\"fields\":[{\"col\":\"name\",\"prop\":\"name\",\"type\":\"string\",\"required\":true},{\"col\":\"type\",\"prop\":\"type\",\"type\":\"string\"},{\"col\":\"value\",\"prop\":\"value\",\"type\":\"string\"},{\"col\":\"description\",\"prop\":\"description\",\"type\":\"text\"},{\"col\":\"choices\",\"prop\":\"choices\",\"type\":\"string[]\"},{\"col\":\"ignore_cache\",\"prop\":\"ignoreCache\",\"type\":\"boolean\"},{\"col\":\"is_private\",\"prop\":\"isPrivate\",\"type\":\"boolean\"}]}",
       "tags": "[\"Property\",\"property\",\"system property\",\"configuration\",\"sys_properties\",\"settings\",\"feature flag\",\"gs.getProperty\",\"config\"]",
       "sdk_version": "4.8.0",
-      "curated": 0
+      "curated": 1
     },
     {
       "sn_metadata_type": "radiocolumn",
@@ -1216,6 +1302,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"RadioColumn\",\"column\",\"table\",\"radio\",\"choice\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1230,6 +1317,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"RecordsColumn\",\"column\",\"table\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1244,6 +1332,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"ReferenceColumn\",\"column\",\"table\",\"reference\",\"foreign key\",\"lookup\",\"relationship\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1258,6 +1347,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"ReferenceVariable\",\"variable\",\"service catalog\",\"reference\",\"lookup\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1272,6 +1362,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"RequestedForVariable\",\"variable\",\"service catalog\",\"requested for\",\"user\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1286,6 +1377,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"RestApi\",\"rest api\",\"api\",\"endpoint\",\"web service\",\"scripted rest\",\"sys_ws_definition\",\"sys_ws_operation\",\"sys_ws_version\",\"HTTP\",\"route\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1300,6 +1392,7 @@
       "projected_entity_type": "integration",
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"RestMessage\",\"RestMessageFn\",\"sys_rest_message\",\"sys_rest_message_fn\",\"outbound rest\",\"rest message function\",\"header\",\"variable substitution\",\"query param\",\"http method\",\"authentication type\",\"mid server\",\"ecc_agent\"]",
       "sdk_version": "4.8.0",
       "curated": 1
@@ -1314,6 +1407,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"RetryPolicy\",\"retry policy\",\"sys_retry_policy\",\"retry\",\"outbound integration\",\"http retry\",\"exponential backoff\",\"retry_after\",\"fixed_time_interval\",\"connection type\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1328,6 +1422,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"RichTextLabelVariable\",\"variable\",\"service catalog\",\"rich text\",\"label\",\"html\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1342,9 +1437,10 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": "{\"fields\":[{\"col\":\"name\",\"prop\":\"name\",\"type\":\"string\",\"required\":true},{\"col\":\"description\",\"prop\":\"description\",\"type\":\"text\"},{\"col\":\"assignable_by\",\"prop\":\"assignableBy\",\"type\":\"string\"},{\"col\":\"can_delegate\",\"prop\":\"canDelegate\",\"type\":\"boolean\"},{\"col\":\"elevated_privilege\",\"prop\":\"elevatedPrivilege\",\"type\":\"boolean\"},{\"col\":\"grantable\",\"prop\":\"grantable\",\"type\":\"boolean\"},{\"col\":\"scoped_admin\",\"prop\":\"scopedAdmin\",\"type\":\"boolean\"}]}",
       "tags": "[\"Role\",\"role\",\"user role\",\"sys_user_role\",\"permission\",\"access\",\"security\",\"authorization\"]",
       "sdk_version": "4.8.0",
-      "curated": 0
+      "curated": 1
     },
     {
       "sn_metadata_type": "scheduledatetimecolumn",
@@ -1356,6 +1452,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"ScheduleDateTimeColumn\",\"column\",\"table\",\"schedule datetime\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1370,6 +1467,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"ScheduledScript\",\"scheduled script\",\"scheduled job\",\"cron\",\"sysauto_script\",\"timer\",\"recurring\",\"periodic\",\"automation\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1384,6 +1482,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"ScriptAction\",\"script action\",\"event\",\"sysevent_script_action\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1398,6 +1497,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"ScriptColumn\",\"column\",\"table\",\"script\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1412,6 +1512,7 @@
       "projected_entity_type": "business_logic",
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"ScriptInclude\",\"script include\",\"server script\",\"library\",\"sys_script_include\"]",
       "sdk_version": "4.8.0",
       "curated": 1
@@ -1426,6 +1527,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"ScriptOnlyCheck\",\"instance scan\",\"script only check\",\"health scan\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1440,6 +1542,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"SelectBoxVariable\",\"variable\",\"service catalog\",\"select box\",\"dropdown\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1454,6 +1557,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"ServicePortal\",\"service portal\",\"portal\",\"sp_portal\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1468,6 +1572,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"SingleLineTextVariable\",\"variable\",\"service catalog\",\"single line text\",\"text input\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1482,6 +1587,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"Sla\",\"sla\",\"service level agreement\",\"contract_sla\",\"duration\",\"schedule\",\"conditions\",\"timer\",\"response time\",\"resolution time\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1496,6 +1602,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"SlushBucketColumn\",\"column\",\"table\",\"slush bucket\",\"multi-select\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1510,6 +1617,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"SPAngularProvider\",\"service portal\",\"angular provider\",\"sp_angular_provider\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1524,6 +1632,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"SPHeaderFooter\",\"service portal\",\"header\",\"footer\",\"sp_header_footer\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1538,6 +1647,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"SPMenu\",\"service portal\",\"menu\",\"navigation\",\"sp_instance_menu\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1552,6 +1662,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"SPPage\",\"service portal\",\"page\",\"sp_page\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1566,6 +1677,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"SPPageRouteMap\",\"service portal\",\"page route map\",\"redirect\",\"sp_page_route_map\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1580,6 +1692,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"SPTheme\",\"service portal\",\"theme\",\"sp_theme\",\"css\",\"styling\",\"branding\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1594,6 +1707,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"SPWidget\",\"service portal\",\"widget\",\"sp_widget\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1608,6 +1722,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"SPWidgetDependency\",\"service portal\",\"widget dependency\",\"sp_dependency\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1622,6 +1737,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"StringColumn\",\"column\",\"table\",\"string\",\"text\",\"varchar\",\"maxlength\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1636,6 +1752,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"subflow\",\"flow\",\"automation\",\"reusable\",\"wfa.subflow\",\"assignSubflowOutputs\",\"FlowObject\",\"FlowArray\",\"flowVariables\",\"runAs\",\"runWithRoles\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1650,6 +1767,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"SystemClassNameColumn\",\"column\",\"table\",\"sys_class_name\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1664,6 +1782,7 @@
       "projected_entity_type": "data_model",
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"Table\",\"table\",\"database\",\"schema\",\"sys_db_object\",\"data\",\"column\",\"field\",\"extend\",\"schema definition\",\"sys_dictionary\",\"sys_dictionary_override\"]",
       "sdk_version": "4.8.0",
       "curated": 1
@@ -1678,6 +1797,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"TableCheck\",\"instance scan\",\"table check\",\"health scan\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1692,6 +1812,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"TableNameColumn\",\"column\",\"table\",\"table name\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1706,6 +1827,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"TemplateValueColumn\",\"column\",\"table\",\"template value\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1720,6 +1842,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"Test\",\"test\",\"atf\",\"automated test framework\",\"sys_atf_test\",\"testing\",\"QA\",\"test step\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1734,6 +1857,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"TimeColumn\",\"column\",\"table\",\"time\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1748,6 +1872,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"TranslatedFieldColumn\",\"column\",\"table\",\"translated field\",\"i18n\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1762,6 +1887,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"TranslatedTextColumn\",\"column\",\"table\",\"translated text\",\"i18n\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1776,6 +1902,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"trigger\",\"flow-trigger\",\"wfa.trigger\",\"sys_hub_trigger_definition\",\"record-trigger\",\"scheduled-trigger\",\"application-trigger\",\"inbound-email\",\"service-catalog\",\"sla-task\",\"knowledge-management\",\"remote-table-query\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1790,6 +1917,7 @@
       "projected_entity_type": "business_logic",
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"UiAction\",\"ui action\",\"button\",\"form button\",\"server script\",\"list action\",\"form action\",\"sys_ui_action\"]",
       "sdk_version": "4.8.0",
       "curated": 1
@@ -1804,6 +1932,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"UiPage\",\"ui page\",\"jelly\",\"html\",\"endpoint\",\"processing script\",\"React\",\"standalone page\",\"sys_ui_page\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1818,6 +1947,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"UIPageVariable\",\"variable\",\"service catalog\",\"ui page\",\"macro\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1832,6 +1962,7 @@
       "projected_entity_type": "form_design",
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"UiPolicy\",\"ui policy\",\"form policy\",\"sys_ui_policy\"]",
       "sdk_version": "4.8.0",
       "curated": 1
@@ -1846,6 +1977,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"UrlColumn\",\"column\",\"table\",\"url\",\"link\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1860,6 +1992,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"UrlVariable\",\"variable\",\"service catalog\",\"url\",\"link\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1874,6 +2007,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"UserCriteria\",\"user criteria\",\"user_criteria\",\"visibility\",\"content access\",\"catalog access\",\"knowledge access\",\"service portal access\",\"audience\",\"access conditions\",\"availableFor\",\"notAvailableFor\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1888,6 +2022,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"UserImageColumn\",\"column\",\"table\",\"user image\",\"avatar\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1902,6 +2037,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"UserPreference\",\"user preference\",\"setting\",\"sys_user_preference\",\"config\",\"toggle\",\"setting\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1916,6 +2052,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"UserRolesColumn\",\"column\",\"table\",\"user roles\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1930,6 +2067,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"UxListMenuConfig\",\"ux list menu\",\"workspace\",\"list config\",\"navigation\",\"list view\",\"sys_ux_list_menu_config\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1944,6 +2082,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"VariableSet\",\"variable set\",\"service catalog\",\"item_option_new_set\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1958,6 +2097,7 @@
       "projected_entity_type": null,
       "parent_type": "table",
       "child_role": "column",
+      "field_schema": null,
       "tags": "[\"VersionColumn\",\"column\",\"table\",\"version\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1972,6 +2112,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"wfa\",\"workflow\",\"workflow automation\",\"flow\",\"automation\",\"action\",\"trigger\",\"dataPill\",\"subflow\",\"doInParallel\",\"tryCatch\",\"appendToFlowVariables\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -1986,6 +2127,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"flow-logic\",\"wfa\",\"workflow-automation\",\"flow-designer\",\"conditional\",\"loop\",\"if-else\",\"forEach\",\"exit-loop\",\"skip-iteration\",\"end-flow\",\"condition-syntax\",\"doInParallel\",\"parallel-execution\",\"tryCatch\",\"try-catch\",\"error-handling\",\"appendToFlowVariables\",\"append-flow-variables\",\"array-manipulation\",\"setFlowVariables\",\"set-flow-variables\",\"flow-variables\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -2000,6 +2142,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"WideSingleLineTextVariable\",\"variable\",\"service catalog\",\"wide text\",\"text input\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -2014,6 +2157,7 @@
       "projected_entity_type": null,
       "parent_type": null,
       "child_role": null,
+      "field_schema": null,
       "tags": "[\"Workspace\",\"workspace\",\"ux\",\"sys_ux_page_registry\"]",
       "sdk_version": "4.8.0",
       "curated": 0
@@ -2028,6 +2172,7 @@
       "projected_entity_type": null,
       "parent_type": "catalogitem",
       "child_role": "variable",
+      "field_schema": null,
       "tags": "[\"YesNoVariable\",\"variable\",\"service catalog\",\"yes no\",\"boolean\"]",
       "sdk_version": "4.8.0",
       "curated": 0
