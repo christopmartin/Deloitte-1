@@ -5305,7 +5305,7 @@ app.get('/api/v1/projects/:id/design-report/relationships', (req, res) => {
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
   const ucRows = db.prepare(
-    "SELECT use_case_id, title, readiness FROM asdlc_use_case WHERE project_id = ? AND lifecycle_status != 'deleted' ORDER BY title"
+    "SELECT use_case_id, slug, title, readiness FROM asdlc_use_case WHERE project_id = ? AND lifecycle_status != 'deleted' ORDER BY title"
   ).all(req.params.id);
 
   const wfByUC    = db.prepare("SELECT * FROM asdlc_workflow WHERE use_case_id = ? AND lifecycle_status != 'deleted' ORDER BY name");
@@ -5319,24 +5319,59 @@ app.get('/api/v1/projects/:id/design-report/relationships', (req, res) => {
     "SELECT tool_id, name, execution_mode FROM asdlc_tool WHERE project_id = ? AND lifecycle_status = 'active' ORDER BY name"
   ).all(req.params.id);
 
-  const use_cases = ucRows.map(uc => {
-    const workflows = wfByUC.all(uc.use_case_id).map(wf => ({
-      workflow_id: wf.workflow_id,
-      name:        wf.name,
-      step_count:  (stepCount.get(wf.workflow_id) || {}).cnt || 0,
-      agents:      agByWF.all(wf.workflow_id).map(a => ({
-        agent_spec_id: a.agent_spec_id,
-        name:          a.name,
-        tools:         project_tools,   // fallback; switch to per-agent join when populated
-      })),
-      hitl_roles:  hitlByWF.all(wf.workflow_id).map(h => ({
-        owner_role: h.owner_role,
-        gate_type:  h.gate_type,
-        sla:        h.sla,
-      })),
-    }));
-    return { use_case_id: uc.use_case_id, title: uc.title, readiness: uc.readiness, workflows };
+  const buildWorkflowShape = (wf) => ({
+    workflow_id: wf.workflow_id,
+    name:        wf.name,
+    step_count:  (stepCount.get(wf.workflow_id) || {}).cnt || 0,
+    agents:      agByWF.all(wf.workflow_id).map(a => ({
+      agent_spec_id: a.agent_spec_id,
+      name:          a.name,
+      tools:         project_tools,   // fallback; switch to per-agent join when populated
+    })),
+    hitl_roles:  hitlByWF.all(wf.workflow_id).map(h => ({
+      owner_role: h.owner_role,
+      gate_type:  h.gate_type,
+      sla:        h.sla,
+    })),
   });
+
+  const use_cases = ucRows.map(uc => ({
+    use_case_id: uc.use_case_id, title: uc.title, readiness: uc.readiness,
+    workflows: wfByUC.all(uc.use_case_id).map(buildWorkflowShape),
+  }));
+
+  // Workflows not linked to any use case — returned separately so the frontend
+  // can surface them in a "No Use Case" bucket instead of silently dropping them.
+  const orphaned_workflows = db.prepare(
+    "SELECT * FROM asdlc_workflow WHERE project_id = ? AND (use_case_id IS NULL OR use_case_id = '') AND lifecycle_status != 'deleted' ORDER BY name"
+  ).all(req.params.id).map(buildWorkflowShape);
+
+  // SN platform entities ─────────────────────────────────────────────────────
+  const dmRows    = db.prepare("SELECT data_model_id, slug, name, purpose, physical_name FROM asdlc_data_model WHERE project_id = ? AND lifecycle_status != 'deleted' ORDER BY name").all(req.params.id);
+  const formsByDM = db.prepare("SELECT form_design_id, slug, name, view_name FROM asdlc_form_design WHERE data_model_id = ? AND lifecycle_status != 'deleted'");
+  const logicByDM = db.prepare("SELECT business_logic_id, slug, name, logic_type, plain_english FROM asdlc_business_logic WHERE data_model_id = ? AND lifecycle_status != 'deleted'");
+
+  const data_models = dmRows.map(dm => ({
+    data_model_id: dm.data_model_id,
+    slug:          dm.slug,
+    name:          dm.name,
+    purpose:       dm.purpose,
+    physical_name: dm.physical_name,
+    forms:         formsByDM.all(dm.data_model_id),
+    logic:         logicByDM.all(dm.data_model_id),
+  }));
+
+  const catalog_items = db.prepare(`
+    SELECT ci.catalog_item_id, ci.slug, ci.name, ci.short_description, ci.category,
+           ci.workflow_id, wf.name AS workflow_name
+    FROM asdlc_catalog_item ci
+    LEFT JOIN asdlc_workflow wf ON ci.workflow_id = wf.workflow_id
+    WHERE ci.project_id = ? AND ci.lifecycle_status != 'deleted' ORDER BY ci.name
+  `).all(req.params.id);
+
+  const integrations = db.prepare(
+    "SELECT integration_id, slug, name, integration_type, description, endpoint, auth_type, alias_type, connection_type FROM asdlc_integration WHERE project_id = ? AND lifecycle_status != 'deleted' ORDER BY integration_type, name"
+  ).all(req.params.id);
 
   const frs = db.prepare(`
     SELECT fr.*, uc.slug AS use_case_slug, uc.title AS use_case_title
@@ -5365,9 +5400,13 @@ app.get('/api/v1/projects/:id/design-report/relationships', (req, res) => {
     generated_at: new Date().toISOString(),
     relationships: {
       use_cases,
+      orphaned_workflows,
       project_tools,
       tools_are_project_wide: true,
     },
+    data_models,
+    catalog_items,
+    integrations,
     functional_reqs: frs,
     nonfunctional_reqs: nfrs,
     use_case_map,

@@ -867,6 +867,10 @@ function buildReport(data) {
     wrap.appendChild(buildUserStoriesSection(data.user_stories, data.ingest_document));
   } else if (data.governance_controls) {
     wrap.appendChild(buildGovernanceSection(data.governance_controls, data.ingest_document));
+  } else if (data.relationships) {
+    // Check for relationships first — this response now includes data_models/catalog_items/integrations
+    // as supplementary data; those individual-tab checks below must not fire for this combined response.
+    wrap.appendChild(buildRelationshipsSection(data.relationships, data.functional_reqs || [], data.nonfunctional_reqs || [], data.use_case_map || {}, data.data_models || [], data.catalog_items || [], data.integrations || []));
   } else if (data.data_models) {
     wrap.appendChild(buildDataModelsSection(data.data_models));
   } else if (data.form_designs) {
@@ -877,8 +881,6 @@ function buildReport(data) {
     wrap.appendChild(buildCatalogItemsSection(data.catalog_items));
   } else if (data.integrations) {
     wrap.appendChild(buildIntegrationsSection(data.integrations));
-  } else if (data.relationships) {
-    wrap.appendChild(buildRelationshipsSection(data.relationships, data.functional_reqs || [], data.nonfunctional_reqs || [], data.use_case_map || {}));
   } else if (data.functional_reqs !== undefined || data.nonfunctional_reqs !== undefined) {
     wrap.appendChild(buildRequirementsSection(data.functional_reqs || [], data.nonfunctional_reqs || [], data.use_case_map || {}));
   }
@@ -3182,12 +3184,16 @@ function buildIntegrationsSection(items) {
   return wrap;
 }
 
-function buildRelationshipsSection(relationships, functionalReqs = [], nonfunctionalReqs = [], useCaseMap = {}) {
+function buildRelationshipsSection(relationships, functionalReqs = [], nonfunctionalReqs = [], useCaseMap = {}, dataMdls = [], catalogItems = [], integrations = []) {
   const wrap = el('div', { className: 'dr-agent' });
 
-  const { use_cases = [], tools_are_project_wide = false } = relationships;
+  const { use_cases = [], orphaned_workflows = [], tools_are_project_wide = false } = relationships;
 
-  if (!use_cases.length) {
+  const hasWorkflowLayer = use_cases.length > 0 || orphaned_workflows.length > 0;
+  const hasPlatformLayer = dataMdls.length > 0;
+  const hasIntegLayer    = catalogItems.length > 0 || integrations.length > 0;
+
+  if (!hasWorkflowLayer && !hasPlatformLayer && !hasIntegLayer) {
     wrap.appendChild(el('div', { className: 'empty-state', style: { margin: '20px 0' } },
       el('p', {}, 'No relationships found for this application.')));
     return wrap;
@@ -3196,93 +3202,234 @@ function buildRelationshipsSection(relationships, functionalReqs = [], nonfuncti
   wrap.appendChild(el('p', { className: 'purpose-text', style: { marginBottom: '14px' } },
     'Click an item to see what it contains. Use the arrow link to jump to the entity\'s detail tab.'));
 
-  const mc = el('div', { className: 'dr-mc' });
+  // ── Section 1: Workflow Design ─────────────────────────────────
+  if (hasWorkflowLayer) {
+    wrap.appendChild(el('div', { className: 'dr-section-header', style: { marginBottom: '12px' } },
+      el('span', { className: 'dr-section-title' }, 'Workflow Design')));
 
-  // Build all four columns up front; populate columns 2–4 reactively.
-  const col1 = buildMcColumn('Use Cases');
-  const col2 = buildMcColumn('Workflows');
-  const col3 = buildMcColumn('Agents');
-  const col4 = buildMcColumn(tools_are_project_wide ? 'Tools (project-wide)' : 'Tools');
-  mc.appendChild(col1.wrap);
-  mc.appendChild(col2.wrap);
-  mc.appendChild(col3.wrap);
-  mc.appendChild(col4.wrap);
-  wrap.appendChild(mc);
+    const mc = el('div', { className: 'dr-mc' });
+    const col1 = buildMcColumn('Use Cases');
+    const col2 = buildMcColumn('Workflows');
+    const col3 = buildMcColumn('Agents');
+    const col4 = buildMcColumn(tools_are_project_wide ? 'Tools (project-wide)' : 'Tools');
+    mc.appendChild(col1.wrap);
+    mc.appendChild(col2.wrap);
+    mc.appendChild(col3.wrap);
+    mc.appendChild(col4.wrap);
+    wrap.appendChild(mc);
 
-  // ── selection state + render ──────────────────────────────────
-  let selUC = null, selWF = null, selAG = null;
-
-  function renderCol1() {
-    col1.body.innerHTML = '';
-    use_cases.forEach(uc => {
-      const item = mcItem(uc.title, 'use-cases', `dr-entity-${uc.use_case_id}`, {
-        active: selUC && selUC.use_case_id === uc.use_case_id,
-        secondary: uc.workflows?.length
-          ? `${uc.workflows.length} workflow${uc.workflows.length !== 1 ? 's' : ''}`
-          : 'no workflows',
-        onSelect: () => { selUC = uc; selWF = null; selAG = null; renderAll(); },
+    // Build the UC list for the miller, appending an orphan pseudo-entry when needed.
+    const ORPHAN_ID = '__orphaned__';
+    const ucListForMiller = [...use_cases];
+    if (orphaned_workflows.length > 0) {
+      ucListForMiller.push({
+        use_case_id: ORPHAN_ID,
+        title: 'No Use Case',
+        readiness: null,
+        workflows: orphaned_workflows,
+        _isOrphan: true,
       });
-      col1.body.appendChild(item);
-    });
-  }
-  function renderCol2() {
-    col2.body.innerHTML = '';
-    if (!selUC) {
-      col2.body.appendChild(emptyHint('Select a use case →'));
-      return;
     }
-    const wfs = selUC.workflows || [];
-    if (!wfs.length) { col2.body.appendChild(emptyHint('No workflows linked')); return; }
-    wfs.forEach(wf => {
-      col2.body.appendChild(mcItem(wf.name, 'workflows', `dr-entity-${wf.workflow_id}`, {
-        active: selWF && selWF.workflow_id === wf.workflow_id,
-        secondary: `${wf.step_count || 0} step${(wf.step_count || 0) !== 1 ? 's' : ''}`,
-        onSelect: () => { selWF = wf; selAG = null; renderAll(); },
-      }));
-    });
-  }
-  function renderCol3() {
-    col3.body.innerHTML = '';
-    if (!selWF) {
-      col3.body.appendChild(emptyHint('Select a workflow →'));
-      return;
-    }
-    const ags = selWF.agents || [];
-    if (!ags.length) { col3.body.appendChild(emptyHint('No agents linked')); return; }
-    ags.forEach(ag => {
-      col3.body.appendChild(mcItem(ag.name, 'agents', `dr-entity-${ag.agent_spec_id}`, {
-        active: selAG && selAG.agent_spec_id === ag.agent_spec_id,
-        onSelect: () => { selAG = ag; renderAll(); },
-      }));
-    });
-  }
-  function renderCol4() {
-    col4.body.innerHTML = '';
-    if (!selAG) {
-      col4.body.appendChild(emptyHint('Select an agent →'));
-      return;
-    }
-    const tools = selAG.tools || [];
-    if (!tools.length) { col4.body.appendChild(emptyHint('No tools linked')); return; }
-    if (tools_are_project_wide) {
-      col4.body.appendChild(el('div', { className: 'dr-mc-note' },
-        'Agent-tool relationships are not yet captured — showing all project tools.'));
-    }
-    tools.forEach(t => {
-      col4.body.appendChild(mcItem(t.name, 'tools', `dr-entity-${t.tool_id}`, {
-        secondary: t.execution_mode ? capitalise(t.execution_mode) : '',
-      }));
-    });
-  }
-  function renderAll() { renderCol1(); renderCol2(); renderCol3(); renderCol4(); }
 
-  // Auto-select the first use case so the user sees the chain populated.
-  if (use_cases.length) selUC = use_cases[0];
-  if (selUC && selUC.workflows?.length) selWF = selUC.workflows[0];
-  if (selWF && selWF.agents?.length)    selAG = selWF.agents[0];
-  renderAll();
+    let selUC = null, selWF = null, selAG = null;
 
-  // ── Requirements traceability ──────────────────────────────────
+    function renderCol1() {
+      col1.body.innerHTML = '';
+      ucListForMiller.forEach(uc => {
+        const wfCount = uc.workflows?.length || 0;
+        const item = mcItem(
+          uc._isOrphan ? '⚠ No Use Case' : uc.title,
+          uc._isOrphan ? null : 'use-cases',
+          uc._isOrphan ? null : `dr-entity-${uc.use_case_id}`,
+          {
+            active: selUC && selUC.use_case_id === uc.use_case_id,
+            secondary: wfCount ? `${wfCount} workflow${wfCount !== 1 ? 's' : ''}` : 'no workflows',
+            onSelect: () => { selUC = uc; selWF = null; selAG = null; renderAll(); },
+          });
+        if (uc._isOrphan) item.style.cssText += ';border-top:1px solid var(--border,#e0e0e0);margin-top:4px;padding-top:4px;';
+        col1.body.appendChild(item);
+      });
+    }
+    function renderCol2() {
+      col2.body.innerHTML = '';
+      if (!selUC) { col2.body.appendChild(emptyHint('Select a use case →')); return; }
+      const wfs = selUC.workflows || [];
+      if (!wfs.length) { col2.body.appendChild(emptyHint('No workflows linked')); return; }
+      wfs.forEach(wf => {
+        col2.body.appendChild(mcItem(wf.name, 'workflows', `dr-entity-${wf.workflow_id}`, {
+          active: selWF && selWF.workflow_id === wf.workflow_id,
+          secondary: `${wf.step_count || 0} step${(wf.step_count || 0) !== 1 ? 's' : ''}`,
+          onSelect: () => { selWF = wf; selAG = null; renderAll(); },
+        }));
+      });
+    }
+    function renderCol3() {
+      col3.body.innerHTML = '';
+      if (!selWF) { col3.body.appendChild(emptyHint('Select a workflow →')); return; }
+      const ags = selWF.agents || [];
+      if (!ags.length) { col3.body.appendChild(emptyHint('No agents linked')); return; }
+      ags.forEach(ag => {
+        col3.body.appendChild(mcItem(ag.name, 'agents', `dr-entity-${ag.agent_spec_id}`, {
+          active: selAG && selAG.agent_spec_id === ag.agent_spec_id,
+          onSelect: () => { selAG = ag; renderAll(); },
+        }));
+      });
+    }
+    function renderCol4() {
+      col4.body.innerHTML = '';
+      if (!selAG) { col4.body.appendChild(emptyHint('Select an agent →')); return; }
+      const tools = selAG.tools || [];
+      if (!tools.length) { col4.body.appendChild(emptyHint('No tools linked')); return; }
+      if (tools_are_project_wide) {
+        col4.body.appendChild(el('div', { className: 'dr-mc-note' },
+          'Agent-tool relationships are not yet captured — showing all project tools.'));
+      }
+      tools.forEach(t => {
+        col4.body.appendChild(mcItem(t.name, 'tools', `dr-entity-${t.tool_id}`, {
+          secondary: t.execution_mode ? capitalise(t.execution_mode) : '',
+        }));
+      });
+    }
+    function renderAll() { renderCol1(); renderCol2(); renderCol3(); renderCol4(); }
+
+    // Auto-select first UC with workflows, fall back to first UC.
+    selUC = ucListForMiller.find(uc => uc.workflows?.length) || ucListForMiller[0] || null;
+    if (selUC?.workflows?.length) selWF = selUC.workflows[0];
+    if (selWF?.agents?.length)    selAG = selWF.agents[0];
+    renderAll();
+  }
+
+  // ── Section 2: Platform Design (Data Models) ───────────────────
+  if (hasPlatformLayer) {
+    const pdWrap = el('div', { style: { marginTop: '32px' } });
+    pdWrap.appendChild(el('div', { className: 'dr-section-header', style: { marginBottom: '12px' } },
+      el('span', { className: 'dr-section-title' }, 'Platform Design')));
+
+    const mc2    = el('div', { className: 'dr-mc' });
+    const dmCol  = buildMcColumn('Data Models');
+    const chCol  = buildMcColumn('Forms & Business Logic');
+    const detCol = buildMcColumn('Details');
+    mc2.appendChild(dmCol.wrap);
+    mc2.appendChild(chCol.wrap);
+    mc2.appendChild(detCol.wrap);
+    pdWrap.appendChild(mc2);
+    wrap.appendChild(pdWrap);
+
+    let selDM = null, selChild = null;
+
+    const toChildShape = (f, type) => type === 'form'
+      ? { ...f, _type: 'form',  _id: f.form_design_id,    _label: f.name, _secondary: f.view_name || 'Form' }
+      : { ...f, _type: 'logic', _id: f.business_logic_id, _label: f.name, _secondary: (f.logic_type || 'logic').replace(/_/g, ' ') };
+
+    function renderDmCol() {
+      dmCol.body.innerHTML = '';
+      dataMdls.forEach(dm => {
+        const childCount = (dm.forms?.length || 0) + (dm.logic?.length || 0);
+        dmCol.body.appendChild(mcItem(dm.name, 'data-models', `dr-entity-${dm.data_model_id}`, {
+          active: selDM && selDM.data_model_id === dm.data_model_id,
+          secondary: dm.physical_name || (childCount ? `${childCount} child${childCount !== 1 ? 'ren' : ''}` : ''),
+          onSelect: () => { selDM = dm; selChild = null; renderDmAll(); },
+        }));
+      });
+    }
+    function renderChCol() {
+      chCol.body.innerHTML = '';
+      if (!selDM) { chCol.body.appendChild(emptyHint('Select a data model →')); return; }
+      const children = [
+        ...(selDM.forms || []).map(f => toChildShape(f, 'form')),
+        ...(selDM.logic || []).map(l => toChildShape(l, 'logic')),
+      ];
+      if (!children.length) { chCol.body.appendChild(emptyHint('No forms or logic')); return; }
+      children.forEach(c => {
+        const scope = c._type === 'form' ? 'form-designs' : 'business-logic';
+        chCol.body.appendChild(mcItem(c._label, scope, `dr-entity-${c._id}`, {
+          active: selChild && selChild._id === c._id,
+          secondary: c._secondary,
+          onSelect: () => { selChild = c; renderDmAll(); },
+        }));
+      });
+    }
+    function renderDetCol() {
+      detCol.body.innerHTML = '';
+      if (!selChild) { detCol.body.appendChild(emptyHint('Select a form or logic item →')); return; }
+      const lines = [];
+      if (selChild._type === 'form' && selChild.view_name)       lines.push({ label: 'View',        val: selChild.view_name });
+      if (selChild._type === 'logic' && selChild.logic_type)     lines.push({ label: 'Type',        val: selChild.logic_type.replace(/_/g, ' ') });
+      if (selChild._type === 'logic' && selChild.plain_english)  lines.push({ label: 'What it does', val: selChild.plain_english });
+      if (!lines.length) { detCol.body.appendChild(emptyHint('No details available')); return; }
+      lines.forEach(({ label, val }) => {
+        const row = el('div', { style: 'padding:6px 10px;border-bottom:1px solid var(--border,#e0e0e0);font-size:12px' });
+        row.appendChild(el('div', { style: 'color:#888;font-size:10px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:2px' }, label));
+        row.appendChild(el('div', {}, val));
+        detCol.body.appendChild(row);
+      });
+    }
+    function renderDmAll() { renderDmCol(); renderChCol(); renderDetCol(); }
+
+    selDM = dataMdls[0] || null;
+    if (selDM) {
+      const allChildren = [...(selDM.forms || []).map(f => toChildShape(f, 'form')), ...(selDM.logic || []).map(l => toChildShape(l, 'logic'))];
+      selChild = allChildren[0] || null;
+    }
+    renderDmAll();
+  }
+
+  // ── Section 3: Integrations ────────────────────────────────────
+  if (hasIntegLayer) {
+    const intWrap = el('div', { style: { marginTop: '32px' } });
+    intWrap.appendChild(el('div', { className: 'dr-section-header', style: { marginBottom: '12px' } },
+      el('span', { className: 'dr-section-title' }, 'Integrations')));
+
+    const grid = el('div', { style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px' });
+
+    if (catalogItems.length > 0) {
+      const col = el('div');
+      col.appendChild(el('div', { style: 'font-weight:600;font-size:13px;color:#444;margin-bottom:8px' }, `Catalog Items (${catalogItems.length})`));
+      catalogItems.forEach(ci => {
+        const card = el('div', { style: 'border:1px solid var(--border,#e0e0e0);border-radius:6px;padding:8px 10px;margin-bottom:6px;font-size:12px' });
+        const titleRow = el('div', { style: 'display:flex;align-items:center;gap:6px;margin-bottom:3px' });
+        titleRow.appendChild(drillLink(ci.name, 'catalog-items', `dr-entity-${ci.catalog_item_id}`));
+        if (ci.category) titleRow.appendChild(el('span', { style: 'color:#888;font-size:11px' }, ci.category));
+        card.appendChild(titleRow);
+        if (ci.short_description) card.appendChild(el('div', { style: 'color:#666;font-size:11px;margin-bottom:3px' }, ci.short_description));
+        if (ci.workflow_name) card.appendChild(el('div', { style: 'font-size:11px;color:#1565c0' }, `→ Workflow: ${ci.workflow_name}`));
+        col.appendChild(card);
+      });
+      grid.appendChild(col);
+    }
+
+    if (integrations.length > 0) {
+      const restItems  = integrations.filter(i => i.integration_type === 'rest_message');
+      const aliasItems = integrations.filter(i => i.integration_type === 'connection_alias');
+      const PILL_META  = {
+        rest_message:     { label: 'REST',  bg: '#e8f5e9', fg: '#2e7d32' },
+        connection_alias: { label: 'ALIAS', bg: '#f3e5f5', fg: '#6a1b9a' },
+      };
+      [[restItems, 'REST Messages'], [aliasItems, 'Connection Aliases']].forEach(([items, groupLabel]) => {
+        if (!items.length) return;
+        const col = el('div');
+        col.appendChild(el('div', { style: 'font-weight:600;font-size:13px;color:#444;margin-bottom:8px' }, `${groupLabel} (${items.length})`));
+        items.forEach(intg => {
+          const meta = PILL_META[intg.integration_type] || {};
+          const card = el('div', { style: 'border:1px solid var(--border,#e0e0e0);border-radius:6px;padding:8px 10px;margin-bottom:6px;font-size:12px' });
+          const titleRow = el('div', { style: 'display:flex;align-items:center;gap:6px;margin-bottom:3px' });
+          titleRow.appendChild(el('span', { style: `background:${meta.bg};color:${meta.fg};border-radius:4px;padding:0 5px;font-size:10px;font-weight:600` }, meta.label));
+          titleRow.appendChild(el('span', { style: 'font-weight:500' }, intg.name));
+          card.appendChild(titleRow);
+          if (intg.endpoint)        card.appendChild(el('div', { style: 'color:#888;font-size:11px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, intg.endpoint));
+          if (intg.alias_type || intg.connection_type) card.appendChild(el('div', { style: 'color:#666;font-size:11px' }, intg.alias_type || intg.connection_type));
+          if (intg.description)     card.appendChild(el('div', { style: 'color:#666;font-size:11px;margin-top:2px' }, intg.description));
+          col.appendChild(card);
+        });
+        grid.appendChild(col);
+      });
+    }
+
+    intWrap.appendChild(grid);
+    wrap.appendChild(intWrap);
+  }
+
+  // ── Section 4: Requirements traceability ──────────────────────
   if (functionalReqs.length > 0 || nonfunctionalReqs.length > 0) {
     const reqDiv = el('div', { style: { marginTop: '32px' } });
     reqDiv.appendChild(el('div', { className: 'dr-section-header', style: { marginBottom: '12px' } },
