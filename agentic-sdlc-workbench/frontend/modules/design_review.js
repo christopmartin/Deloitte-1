@@ -334,9 +334,17 @@ export async function render(container) {
   const printBtn = el('button', { className: 'btn btn-ghost btn-sm dr-print-btn' }, '🖨 Print / Save PDF');
   printBtn.addEventListener('click', () => window.print());
 
+  const reportBtn = el('button', { className: 'btn btn-ghost btn-sm', title: 'Open a complete, print-ready design report in a new tab' }, '📄 Full Design Report');
+  reportBtn.addEventListener('click', () => {
+    const pid = getCurrentProjectId();
+    if (!pid) { showToast('Choose an application first.', 'warning'); return; }
+    window.open(`/api/v1/projects/${pid}/design-review-report`, '_blank');
+  });
+
   bar.appendChild(scopeNav);
   bar.appendChild(auditAllBtn);
   bar.appendChild(printBtn);
+  bar.appendChild(reportBtn);
   container.appendChild(bar);
 
   // ── findings panel (Feature #9) ───────────────────────────────

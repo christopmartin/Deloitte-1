@@ -14,6 +14,7 @@ const { relinkOrphanRequirements, repairProjectDesign } = require('./agent/desig
 const aiConfig = require('./agent/ai-config');
 const reviewQueue = require('./agent/review-queue');
 const { withWiki } = require('./agent/wiki-context');
+const { buildDesignReviewHtml } = require('./report-html');
 
 // Strip the encrypted password from a project row before sending to the client.
 // Returns sn_user (plaintext) and has_sn_password (boolean) instead.
@@ -9116,6 +9117,22 @@ app.get('/api/v1/projects/:id/design-report/requirements', (req, res) => {
     nonfunctional_reqs: nfrs,
     use_case_map,
   });
+});
+
+// ──────────────────────────────────────────────
+// UNIFIED DESIGN REVIEW REPORT
+// ──────────────────────────────────────────────
+app.get('/api/v1/projects/:id/design-review-report', (req, res) => {
+  const ok = db.prepare('SELECT 1 FROM asdlc_project WHERE project_id = ?').get(req.params.id);
+  if (!ok) return res.status(404).json({ error: 'Project not found' });
+  try {
+    const html = buildDesignReviewHtml(db, req.params.id);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch (err) {
+    console.error('[design-review-report]', err);
+    res.status(500).send(`<pre>Report generation error: ${String(err.message).replace(/&/g,'&amp;').replace(/</g,'&lt;')}</pre>`);
+  }
 });
 
 // ──────────────────────────────────────────────
