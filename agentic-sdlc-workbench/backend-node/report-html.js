@@ -786,19 +786,22 @@ function renderDataModels({ dataModels }) {
     let fieldsHtml = '';
     const fields = Array.isArray(dm.fields) ? dm.fields : [];
     if (fields.length) {
-      const hasType = fields.some(f => f.type || f.field_type);
-      const hasMandatory = fields.some(f => f.mandatory !== undefined);
-      const headerCols = ['Field Name', hasType ? 'Type' : null, hasMandatory ? 'Mandatory' : null, 'Notes'].filter(Boolean);
+      const hasType      = fields.some(f => f.type || f.field_type || f.type_business);
+      const hasMandatory = fields.some(f => f.mandatory !== undefined && f.mandatory !== null);
+      const headerCols   = ['Field', hasType ? 'Type' : null, hasMandatory ? 'Req.' : null, 'Description / Choices'].filter(Boolean);
       const fRows = fields.map(f => {
-        const name = f.name || f.column_name || f.field_name || JSON.stringify(f);
-        const type = f.type || f.field_type || '';
-        const mandatory = f.mandatory !== undefined ? (f.mandatory ? 'Yes' : 'No') : null;
-        const notes = f.notes || f.description || '';
+        const name      = f.label || f.name || f.column_name || f.field_name || JSON.stringify(f);
+        const type      = f.type_business || f.type || f.field_type || '';
+        const mandatory = f.mandatory != null ? (f.mandatory ? 'Yes' : '') : null;
+        const desc      = f.meaning || f.notes || f.description || '';
+        const choices   = Array.isArray(f.choices) && f.choices.length
+          ? `<br><span class="small-text muted">${f.choices.map(c => esc(String(c))).join(' · ')}</span>`
+          : '';
         return `<tr>
           <td>${esc(name)}</td>
-          ${hasType ? `<td>${esc(type)}</td>` : ''}
-          ${hasMandatory ? `<td>${esc(mandatory)}</td>` : ''}
-          <td class="small-text">${esc(notes)}</td>
+          ${hasType ? `<td class="small-text">${esc(type)}</td>` : ''}
+          ${hasMandatory ? `<td style="text-align:center">${esc(mandatory ?? '')}</td>` : ''}
+          <td class="small-text">${esc(desc)}${choices}</td>
         </tr>`;
       }).join('');
       fieldsHtml = `
@@ -1394,6 +1397,7 @@ pre { font-family: 'Cascadia Code', 'Consolas', monospace; }
 .data-table tr:hover td { background: #f0f7ff; }
 .data-table .num { text-align: right; white-space: nowrap; }
 .data-table .small-text { font-size: 0.85em; }
+.muted { color: #64748b; }
 .req-table { margin-bottom: 1.5em; }
 .total-row td { background: #eff6ff !important; font-weight: 600; }
 .mini-table { margin: 0.25em 0; }
