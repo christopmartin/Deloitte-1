@@ -59,6 +59,45 @@ const CONN = { scope: 'x', instance: 'https://t', user: 'u', pw: 'p' };
   ok(cls.surface_counts && cls.surface_counts['sn_aia_agent'] === agents2.length, 'surface_counts reports per-surface captured count');
   ok(!cls.new.some(a => a.__warn) && !cls.changed.some(a => a.__warn), '__warn markers never classified as artifacts');
 
+  console.log('--- generic (Tier-B/C) surface multi-page pagination ---');
+  process.env.SN_CAPTURE_PAGE_SIZE = '100';
+  delete process.env.SN_CAPTURE_MAX_ROWS;
+  const GEN_TOTAL = 1500;
+  const arts3 = await captureScope({ ...CONN, fetchImpl: makeMockFetch('sys_security_acl', GEN_TOTAL) });
+  const genArts = arts3.filter(a => !a.__error && !a.__warn && a.source_table === 'sys_security_acl');
+  console.log('  captured sys_security_acl:', genArts.length);
+  ok(genArts.length === GEN_TOTAL, `generic surface: captured all ${GEN_TOTAL} rows across pages (got ${genArts.length})`);
+  ok(new Set(genArts.map(a => a.source_sys_id)).size === GEN_TOTAL, 'generic surface: no duplicate / skipped rows across page boundaries');
+
+  console.log('--- child surface multi-page pagination (sys_dictionary > 1 page of columns) ---');
+  process.env.SN_CAPTURE_PAGE_SIZE = '100';
+  delete process.env.SN_CAPTURE_MAX_ROWS;
+  const PARENT_SYS_ID = 'TABLE_SYS_001';
+  const PARENT_NAME   = 'x_myapp_tbl';
+  const CHILD_TOTAL   = 250;
+  function makeChildMockFetch() {
+    return async function(url) {
+      const tbl    = (url.match(/\/api\/now\/table\/([^?]+)/) || [])[1];
+      const limit  = parseInt((url.match(/sysparm_limit=(\d+)/)  || [])[1] || '0', 10);
+      const offset = parseInt((url.match(/sysparm_offset=(\d+)/) || [])[1] || '0', 10);
+      const query  = decodeURIComponent((url.match(/sysparm_query=([^&]+)/) || [])[1] || '');
+      let all = [];
+      if (tbl === 'sys_db_object') {
+        all = [{ sys_id: PARENT_SYS_ID, name: PARENT_NAME, label: 'My App Table', super_class: '' }];
+      } else if (tbl === 'sys_dictionary' && query.includes('name=' + PARENT_NAME)) {
+        for (let i = 0; i < CHILD_TOTAL; i++) all.push({ sys_id: 'COL' + i, element: 'col_' + i });
+      }
+      const result = all.slice(offset, offset + (limit || all.length));
+      return { ok: true, status: 200, json: async () => ({ result }) };
+    };
+  }
+  const arts4 = await captureScope({ ...CONN, fetchImpl: makeChildMockFetch() });
+  const cols = arts4.filter(a => !a.__error && !a.__warn && a.source_table === 'sys_dictionary');
+  console.log('  captured sys_dictionary (columns):', cols.length);
+  ok(cols.length === CHILD_TOTAL, `child pagination: captured all ${CHILD_TOTAL} columns across multiple pages (got ${cols.length})`);
+  ok(cols.every(c => c.parent_source_sys_id === PARENT_SYS_ID), 'child pagination: all children linked to correct parent_source_sys_id');
+  ok(new Set(cols.map(c => c.source_sys_id)).size === CHILD_TOTAL, 'child pagination: no duplicate / skipped child rows across page boundaries');
+
   delete process.env.SN_CAPTURE_PAGE_SIZE;
   delete process.env.SN_CAPTURE_MAX_ROWS;
   console.log(`\n=== RESULT: ${passed} passed, ${failed} failed ===`);
