@@ -237,6 +237,41 @@ function summarize(planned, classified) {
 }
 
 /**
+ * Human-readable pre-flight summary for the dry-run preview ("what would this import do?").
+ * Pure — derived from the gated plan + tier-0 classification. Splits new/changed into rich
+ * "design" (Tier-A → L1 rows) vs generic "platform artifacts" (Tier-B/C → asdlc_sn_artifact),
+ * and counts how many auto-apply vs need human review. Surface warnings (P1 pagination cap)
+ * flag a potentially PARTIAL import so completeness is never silently assumed.
+ */
+function buildPreflight(planned, classified) {
+  const cs = classified.summary || {};
+  let auto = 0, hitl = 0, newRich = 0, newGen = 0, chgRich = 0, chgGen = 0;
+  for (const pl of planned) {
+    const gen = !!pl.generic;
+    if (pl.classification === 'new')     { gen ? newGen++ : newRich++; }
+    if (pl.classification === 'changed') { gen ? chgGen++ : chgRich++; }
+    if (pl.decision && pl.decision.target === 'auto') auto++;
+    else if (pl.decision && pl.decision.target === 'hitl') hitl++;
+  }
+  const seg = (n, r, g) => n ? `${n} (${r} design, ${g} platform artifacts)` : '0';
+  const parts = [
+    `${seg(cs.new || 0, newRich, newGen)} new`,
+    `${seg(cs.changed || 0, chgRich, chgGen)} changed`,
+    `${cs.unchanged || 0} unchanged (skipped)`,
+  ];
+  if (cs.drift) parts.push(`${cs.drift} drift (flagged, never deleted)`);
+  const tail = [`${auto} to auto-apply`, `${hitl} to review`];
+  if (cs.errors)   tail.push(`${cs.errors} capture error(s)`);
+  if (cs.warnings) tail.push(`${cs.warnings} surface warning(s) — import may be PARTIAL`);
+  return {
+    new: cs.new || 0, changed: cs.changed || 0, unchanged: cs.unchanged || 0, drift: cs.drift || 0,
+    auto, hitl, conflicts_to_review: hitl, errors: cs.errors || 0, warnings: cs.warnings || 0,
+    new_design: newRich, new_artifacts: newGen, changed_design: chgRich, changed_artifacts: chgGen,
+    text: `Would import: ${parts.join('; ')}. Plan: ${tail.join(', ')}.`,
+  };
+}
+
+/**
  * Run the full sync pipeline for one ServiceNow-linked project and return a gated PLAN.
  * Makes NO database writes (pure planner). Pass `artifacts` to skip the live capture
  * (used by offline tests and dry-runs).
@@ -338,6 +373,9 @@ async function runSyncPlan(opts = {}, ctx = {}) {
     unchanged: classified.unchanged,
     planned,
     errors: classified.errors,
+    warnings: classified.warnings || [],
+    surface_counts: classified.surface_counts || {},
+    preflight: buildPreflight(planned, classified),
     materiality: {
       elevated: newWithInf.length,
       captured_not_elevated,
@@ -356,6 +394,7 @@ module.exports = {
   passesMaterialityGate,
   isSignificant,
   summarize,
+  buildPreflight,
   TYPE_BY_WB_TABLE,
   MATERIALITY_LOGIC_TYPES,
   DEFAULT_THRESHOLD,

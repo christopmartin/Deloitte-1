@@ -27,10 +27,18 @@ const WBH = { 'Content-Type': 'application/json', 'X-User-ID': 'sn-extract' };
 const SCOPE = 'x_dnllp_p1', SYSAPP = 'b9c3fc870aa5463c9ec9fee91b1fe9d7';
 
 async function snGet(table, q, fields) {
-  const u = `${SN}/api/now/table/${table}?sysparm_query=${encodeURIComponent(q)}&sysparm_fields=${encodeURIComponent(fields)}&sysparm_display_value=true&sysparm_exclude_reference_link=true&sysparm_limit=200`;
-  const r = await fetch(u, { headers: { Authorization: snAuth, Accept: 'application/json' } });
-  if (!r.ok) throw new Error(`SN ${table} -> ${r.status}`);
-  return (await r.json()).result;
+  const limit = 1000;
+  const rows = [];
+  let offset = 0;
+  for (;;) {
+    const u = `${SN}/api/now/table/${table}?sysparm_query=${encodeURIComponent(q + '^ORDERBYsys_id')}&sysparm_fields=${encodeURIComponent(fields)}&sysparm_display_value=true&sysparm_exclude_reference_link=true&sysparm_limit=${limit}&sysparm_offset=${offset}`;
+    const r = await fetch(u, { headers: { Authorization: snAuth, Accept: 'application/json' } });
+    if (!r.ok) throw new Error(`SN ${table} -> ${r.status}`);
+    const page = (await r.json()).result || [];
+    rows.push(...page);
+    if (page.length < limit) return rows;
+    offset += limit;
+  }
 }
 async function wb(method, p, body) {
   const r = await fetch(WB + p, { method, headers: WBH, body: body ? JSON.stringify(body) : undefined });
