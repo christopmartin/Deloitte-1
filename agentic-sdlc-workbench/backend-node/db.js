@@ -271,6 +271,26 @@ const MIGRATIONS = [
    )`,
   "CREATE INDEX IF NOT EXISTS idx_sn_assessment_project ON asdlc_sn_assessment(project_id, created_at)",
 
+  // ── ServiceNow whole-instance catalog (read-only awareness sweep) ─────────────
+  // One row per cross-scope identity-only sweep. catalog_json holds the full snapshot
+  // ({surfaces:{table:[{sys_id,name,scope,…}]}, warnings}); summary_json the per-surface
+  // counts (always returned; catalog_json gated behind ?full=1). capturing_user records
+  // WHO swept it (ACL-completeness context). status: running|complete|failed. History kept.
+  `CREATE TABLE IF NOT EXISTS asdlc_sn_catalog_run (
+     catalog_run_id TEXT PRIMARY KEY,
+     project_id     TEXT REFERENCES asdlc_project(project_id),
+     instance_url   TEXT,
+     capturing_user TEXT,
+     status         TEXT NOT NULL DEFAULT 'running',
+     catalog_json   TEXT,
+     summary_json   TEXT,
+     error          TEXT,
+     created_by     TEXT,
+     created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+   )`,
+  "CREATE INDEX IF NOT EXISTS idx_sn_catalog_project ON asdlc_sn_catalog_run(project_id, created_at)",
+
   // ── Materialize core design elements from BRD ingest ─────────────────────────
   // Guardrails + data sources become first-class design rows; user stories get a
   // thin traceability home (narrative + requirement_refs slugs, no duplicated AC
@@ -329,6 +349,55 @@ const MIGRATIONS = [
      updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')),
      version INTEGER NOT NULL DEFAULT 1
    )`,
+  // ── Config-driven Tier-A design entities (Information Layer + NL rules) ───────
+  // Mirror the CREATE TABLEs in schema.sql so existing DBs get them too. No CHECK
+  // constraints on enum columns — never crash materialization on model output.
+  `CREATE TABLE IF NOT EXISTS asdlc_dashboard (
+     dashboard_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL, purpose TEXT, audience TEXT,
+     widgets TEXT NOT NULL DEFAULT '[]', refresh TEXT,
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_report (
+     report_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL, purpose TEXT, reported_table TEXT,
+     report_columns TEXT NOT NULL DEFAULT '[]', filters TEXT, format TEXT,
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_kpi (
+     kpi_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL, metric TEXT, unit TEXT, target TEXT,
+     direction TEXT, frequency TEXT, data_source TEXT,
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_nl_rule (
+     nl_rule_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, rule_kind TEXT NOT NULL DEFAULT 'business', name TEXT NOT NULL,
+     rule_text TEXT, linked_table TEXT, linked_field TEXT, linked_workflow TEXT,
+     status TEXT NOT NULL DEFAULT 'authored', rationale TEXT, confidence REAL,
+     source_system TEXT NOT NULL DEFAULT 'workbench',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+
   // Tool-call audit log
   `CREATE TABLE IF NOT EXISTS asdlc_tool_call_log (
      call_id TEXT PRIMARY KEY, source TEXT NOT NULL, tool_name TEXT NOT NULL,
@@ -377,6 +446,11 @@ const SLUG_INDEXES = [
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_gr_slug  ON asdlc_guardrail(project_id, slug)    WHERE slug IS NOT NULL",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_ds_slug  ON asdlc_data_source(project_id, slug)  WHERE slug IS NOT NULL",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_us_slug  ON asdlc_user_story(project_id, slug)   WHERE slug IS NOT NULL",
+  // Config-driven Tier-A entities (Information Layer + NL rules)
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_dash_slug ON asdlc_dashboard(project_id, slug)   WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_rpt_slug  ON asdlc_report(project_id, slug)      WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_kpi_slug  ON asdlc_kpi(project_id, slug)         WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_nlr_slug  ON asdlc_nl_rule(project_id, slug)     WHERE slug IS NOT NULL",
 ];
 for (const idx of SLUG_INDEXES) {
   try { db.exec(idx); } catch (err) { console.error('[db] slug index failed:', err.message); }
@@ -457,6 +531,11 @@ const SLUG_TABLES = [
   { table: 'asdlc_guardrail',         pk: 'guardrail_id',      prefix: 'GR'   },
   { table: 'asdlc_data_source',       pk: 'data_source_id',    prefix: 'DS'   },
   { table: 'asdlc_user_story',        pk: 'user_story_id',     prefix: 'US'   },
+  // Config-driven Tier-A entities (Information Layer + NL rules)
+  { table: 'asdlc_dashboard',         pk: 'dashboard_id',      prefix: 'DASH' },
+  { table: 'asdlc_report',            pk: 'report_id',         prefix: 'RPT'  },
+  { table: 'asdlc_kpi',               pk: 'kpi_id',            prefix: 'KPI'  },
+  { table: 'asdlc_nl_rule',           pk: 'nl_rule_id',        prefix: 'NLR'  },
 ];
 
 function backfillSlugsFor(tableSpec) {

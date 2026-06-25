@@ -903,6 +903,258 @@ const REGISTRY = [
     parentLinks: [],
   },
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CONFIG-DRIVEN Tier-A design entities (2026-06-25). Each carries a `display`
+  // block — the single declaration that projects to RT_DESIGN (auto CRUD + audit),
+  // the build spec, the /design-entity-catalog endpoint (frontend renders generically),
+  // and Deployment Guidance. Adding another Tier-A entity = one entry like these + one
+  // table. `display.fields[].type` is constrained to the edit-modal vocabulary
+  // (text|textarea|number|select|json-list|json); json-list ⇄ fieldMap json:true.
+  // ═══════════════════════════════════════════════════════════════════════════
+  {
+    entity_type: 'dashboard',
+    order: 15,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_dashboard',
+    pk: 'dashboard_id',
+    slugPrefix: 'DASH',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'dashboards', data_key: 'dashboards', label: 'Dashboard', group: 'information',
+      sdk_deployable: true, source_table: 'par_dashboard',
+      id_key: 'dashboard_id', name_key: 'name', rest_path: 'dashboards',
+      fields: [
+        { key: 'name',     label: 'Name',                   type: 'text' },
+        { key: 'purpose',  label: 'Purpose',                type: 'textarea' },
+        { key: 'audience', label: 'Audience',               type: 'text' },
+        { key: 'widgets',  label: 'Widgets (one per line)', type: 'json-list' },
+        { key: 'refresh',  label: 'Refresh Cadence',        type: 'select', options: ['realtime','hourly','daily','weekly','monthly'] },
+      ],
+    },
+    tool: {
+      name: 'extract_dashboard',
+      description: 'Extract a dashboard — a curated set of visualizations/widgets for a defined audience. Design intent only (what it shows + for whom), not the implementation. Maps to asdlc_dashboard (ServiceNow par_dashboard).',
+      properties: {
+        name:     { type: 'string', description: 'Name of the dashboard' },
+        purpose:  { type: 'string', description: 'What decisions or questions this dashboard supports' },
+        audience: { type: 'string', description: 'Who uses it — role(s) or team(s)' },
+        widgets:  { type: 'array', items: { type: 'string' }, description: 'The visualizations/widgets shown, one per entry (business description)' },
+        refresh:  { type: 'string', description: 'How fresh the data must be: realtime, hourly, daily, weekly, monthly' },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:     { col: 'name' },
+      purpose:  { col: 'purpose' },
+      audience: { col: 'audience' },
+      widgets:  { col: 'widgets', json: true },
+      refresh:  { col: 'refresh' },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  {
+    entity_type: 'report',
+    order: 16,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_report',
+    pk: 'report_id',
+    slugPrefix: 'RPT',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'reports', data_key: 'reports', label: 'Report', group: 'information',
+      sdk_deployable: false, source_table: 'sys_report',
+      id_key: 'report_id', name_key: 'name', rest_path: 'reports',
+      fields: [
+        { key: 'name',           label: 'Name',                   type: 'text' },
+        { key: 'purpose',        label: 'Purpose',                type: 'textarea' },
+        { key: 'reported_table', label: 'Source Table',           type: 'text' },
+        { key: 'report_columns', label: 'Columns (one per line)', type: 'json-list' },
+        { key: 'filters',        label: 'Filters / Conditions',   type: 'textarea' },
+        { key: 'format',         label: 'Format',                 type: 'select', options: ['list','bar','pie','line','pivot','single_score','calendar','map'] },
+      ],
+    },
+    tool: {
+      name: 'extract_report',
+      description: 'Extract a report — a saved view over a table with chosen columns, filters and a presentation format. Design intent only. Maps to asdlc_report (ServiceNow sys_report). NOT deployable via now-sdk — requires Update Set or manual config.',
+      properties: {
+        name:           { type: 'string', description: 'Name of the report' },
+        purpose:        { type: 'string', description: 'What question this report answers' },
+        reported_table: { type: 'string', description: 'Business label or table name the report runs against' },
+        report_columns: { type: 'array', items: { type: 'string' }, description: 'Columns/fields displayed, one per entry' },
+        filters:        { type: 'string', description: 'Filter conditions in plain English' },
+        format:         { type: 'string', description: 'Presentation: list, bar, pie, line, pivot, single_score, calendar, map' },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:           { col: 'name' },
+      purpose:        { col: 'purpose' },
+      reported_table: { col: 'reported_table' },
+      report_columns: { col: 'report_columns', json: true },
+      filters:        { col: 'filters' },
+      format:         { col: 'format' },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  {
+    entity_type: 'kpi',
+    order: 17,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_kpi',
+    pk: 'kpi_id',
+    slugPrefix: 'KPI',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'kpis', data_key: 'kpis', label: 'KPI', group: 'information',
+      sdk_deployable: false, source_table: 'pa_indicator',
+      id_key: 'kpi_id', name_key: 'name', rest_path: 'kpis',
+      fields: [
+        { key: 'name',        label: 'Name',        type: 'text' },
+        { key: 'metric',      label: 'Metric',      type: 'textarea' },
+        { key: 'unit',        label: 'Unit',        type: 'text' },
+        { key: 'target',      label: 'Target',      type: 'text' },
+        { key: 'direction',   label: 'Direction',   type: 'select', options: ['increase','decrease','maintain'] },
+        { key: 'frequency',   label: 'Frequency',   type: 'select', options: ['realtime','daily','weekly','monthly','quarterly'] },
+        { key: 'data_source', label: 'Data Source', type: 'text' },
+      ],
+    },
+    tool: {
+      name: 'extract_kpi',
+      description: 'Extract a KPI / Performance Analytics indicator — a measurable metric with a target and direction. Design intent only. Maps to asdlc_kpi (ServiceNow pa_indicator). NOT deployable via now-sdk — requires manual config.',
+      properties: {
+        name:        { type: 'string', description: 'Name of the KPI/indicator' },
+        metric:      { type: 'string', description: 'What is being measured, in business terms' },
+        unit:        { type: 'string', description: 'Unit of measure — %, count, hours, GBP, score, etc.' },
+        target:      { type: 'string', description: 'Target value or threshold' },
+        direction:   { type: 'string', description: 'Whether good means increase, decrease, or maintain' },
+        frequency:   { type: 'string', description: 'Measurement cadence: realtime, daily, weekly, monthly, quarterly' },
+        data_source: { type: 'string', description: 'Where the underlying data comes from (table/source)' },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:        { col: 'name' },
+      metric:      { col: 'metric' },
+      unit:        { col: 'unit' },
+      target:      { col: 'target' },
+      direction:   { col: 'direction' },
+      frequency:   { col: 'frequency' },
+      data_source: { col: 'data_source' },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  // ── NL rules (Workbench-native differentiator). Two entity types share ONE table
+  //    (asdlc_nl_rule), discriminated by rule_kind via staticColumns. PO-authored AND
+  //    AI-reverse-engineered from sys_script (status='reverse_engineered'). Plain English
+  //    only — never code. sdk_deployable:false (they drive code, they are not code).
+  {
+    entity_type: 'nl_business_rule',
+    order: 18,
+    materializable: true,
+    summarizable: true,
+    staticColumns: { rule_kind: 'business' },
+    table: 'asdlc_nl_rule',
+    pk: 'nl_rule_id',
+    slugPrefix: 'NLR',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'nl-business-rules', data_key: 'nl_business_rules', label: 'NL Business Rule', group: 'logic',
+      sdk_deployable: false, source_table: null,
+      id_key: 'nl_rule_id', name_key: 'name', rest_path: 'nl-business-rules',
+      fields: [
+        { key: 'name',            label: 'Name',                 type: 'text' },
+        { key: 'rule_text',       label: 'Rule (plain English)', type: 'textarea' },
+        { key: 'linked_table',    label: 'Applies to Table',     type: 'text' },
+        { key: 'linked_workflow', label: 'Related Workflow',     type: 'text' },
+        { key: 'status',          label: 'Status',               type: 'select', options: ['authored','reverse_engineered','needs_review'] },
+        { key: 'rationale',       label: 'Rationale',            type: 'textarea' },
+      ],
+    },
+    tool: {
+      name: 'extract_nl_business_rule',
+      description: 'Extract a business rule stated in PLAIN ENGLISH (not code) — a "when X then Y" policy the system must enforce. Maps to asdlc_nl_rule (rule_kind=business). Capture the intent; do not write or restate any script.',
+      properties: {
+        name:            { type: 'string', description: 'Short name for the rule' },
+        rule_text:       { type: 'string', description: 'The full rule in plain English, e.g. "When an invoice exceeds £10,000 it must be approved by a manager before payment."' },
+        linked_table:    { type: 'string', description: 'Business label or table name the rule applies to, if stated' },
+        linked_workflow: { type: 'string', description: 'Workflow/process this rule governs, if stated' },
+        rationale:       { type: 'string', description: 'Why the rule exists (policy/regulation/business reason)' },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name', 'rule_text'],
+    },
+    fieldMap: {
+      name:            { col: 'name' },
+      rule_text:       { col: 'rule_text' },
+      linked_table:    { col: 'linked_table' },
+      linked_workflow: { col: 'linked_workflow' },
+      status:          { col: 'status' },
+      rationale:       { col: 'rationale' },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  {
+    entity_type: 'nl_validation_rule',
+    order: 19,
+    materializable: true,
+    summarizable: true,
+    staticColumns: { rule_kind: 'validation' },
+    table: 'asdlc_nl_rule',
+    pk: 'nl_rule_id',
+    slugPrefix: 'NLR',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'nl-validation-rules', data_key: 'nl_validation_rules', label: 'NL Validation Rule', group: 'logic',
+      sdk_deployable: false, source_table: null,
+      id_key: 'nl_rule_id', name_key: 'name', rest_path: 'nl-validation-rules',
+      fields: [
+        { key: 'name',         label: 'Name',                       type: 'text' },
+        { key: 'rule_text',    label: 'Validation (plain English)', type: 'textarea' },
+        { key: 'linked_table', label: 'Table',                      type: 'text' },
+        { key: 'linked_field', label: 'Field',                      type: 'text' },
+        { key: 'status',       label: 'Status',                     type: 'select', options: ['authored','reverse_engineered','needs_review'] },
+        { key: 'rationale',    label: 'Rationale',                  type: 'textarea' },
+      ],
+    },
+    tool: {
+      name: 'extract_nl_validation_rule',
+      description: 'Extract a field/data validation rule stated in PLAIN ENGLISH — a constraint on what values are allowed. Maps to asdlc_nl_rule (rule_kind=validation). Capture the intent; never write code.',
+      properties: {
+        name:         { type: 'string', description: 'Short name for the validation' },
+        rule_text:    { type: 'string', description: 'The validation in plain English, e.g. "Start date must be before end date."' },
+        linked_table: { type: 'string', description: 'Business label or table name, if stated' },
+        linked_field: { type: 'string', description: 'Field the validation applies to, if stated' },
+        rationale:    { type: 'string', description: 'Why the validation exists' },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name', 'rule_text'],
+    },
+    fieldMap: {
+      name:         { col: 'name' },
+      rule_text:    { col: 'rule_text' },
+      linked_table: { col: 'linked_table' },
+      linked_field: { col: 'linked_field' },
+      status:       { col: 'status' },
+      rationale:    { col: 'rationale' },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
   // ── Types WITHOUT a dedicated table (v1): extracted + promoted for review, but
   //    not materialized. Add a table + flip materializable to wire them in later.
   {
@@ -1132,6 +1384,49 @@ function entityName(entityType, data) {
   return parts.length ? parts.join(' :: ') : null;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CONFIG-DRIVEN DESIGN-ENTITY PROJECTIONS (2026-06-25)
+// A registry entry that carries a `display` block is the single declaration that
+// projects to: RT_DESIGN (auto CRUD + audit), the build spec, the frontend catalog,
+// and Deployment Guidance. These helpers derive each projection from that one block.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Registry entries that carry a display block AND have a real table. */
+function entitiesWithDisplay() {
+  return REGISTRY.filter(e => e.display && e.materializable && e.table);
+}
+
+/** Derive an RT_DESIGN spec ({table,pk,key,entity_type,json,allowed,enums}) from a
+ *  display-bearing entry, so server.js auto-generates list/get/PUT + audit CP for it. */
+function rtDesignSpec(e) {
+  const colOf   = (k) => (e.fieldMap[k] && e.fieldMap[k].col) || k;
+  const json    = Object.values(e.fieldMap).filter(m => m.json).map(m => m.col);
+  const allowed = e.display.fields.map(f => colOf(f.key));
+  const enums   = {};
+  for (const f of e.display.fields) {
+    if (f.type === 'select' && Array.isArray(f.options)) enums[colOf(f.key)] = f.options;
+  }
+  return { table: e.table, pk: e.pk, key: e.display.data_key, entity_type: e.entity_type, json, allowed, enums };
+}
+
+/** Frontend-facing catalog projection: everything design_review.js needs to render
+ *  and edit a new entity generically (no kebab/snake guessing — emitted explicitly). */
+function designEntityCatalog() {
+  return entitiesWithDisplay().map(e => ({
+    scope_id:       e.display.scope_id,
+    data_key:       e.display.data_key,
+    entity_type:    e.entity_type,
+    label:          e.display.label,
+    group:          e.display.group || 'design',
+    sdk_deployable: !!e.display.sdk_deployable,
+    source_table:   e.display.source_table || null,
+    id_key:         e.display.id_key || e.pk,
+    name_key:       e.display.name_key || 'name',
+    rest_path:      e.display.rest_path || e.display.scope_id,
+    fields:         e.display.fields.map(f => ({ key: f.key, label: f.label, type: f.type, options: f.options || undefined })),
+  }));
+}
+
 module.exports = {
   REGISTRY,
   COMMON_TOOL_FIELDS,
@@ -1142,4 +1437,7 @@ module.exports = {
   buildApiTools,
   toolToEntity,
   entityName,
+  entitiesWithDisplay,
+  rtDesignSpec,
+  designEntityCatalog,
 };

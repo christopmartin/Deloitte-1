@@ -535,6 +535,135 @@ CREATE INDEX IF NOT EXISTS idx_integration_project ON asdlc_integration(project_
 CREATE INDEX IF NOT EXISTS idx_integration_sysid   ON asdlc_integration(source_sys_id);
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- CONFIG-DRIVEN Tier-A design entities (2026-06-25 — Information Layer + NL rules)
+-- Each table backs a registry entry that carries a `display` block. No CHECK
+-- constraints on AI-written enum columns (validation lives on the RT_DESIGN edit
+-- path) so materialization never crashes on model output.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- Dashboard — a curated set of visualizations for an audience (SN par_dashboard).
+CREATE TABLE IF NOT EXISTS asdlc_dashboard (
+    dashboard_id      TEXT PRIMARY KEY,
+    project_id        TEXT REFERENCES asdlc_project(project_id),
+    slug              TEXT,                         -- DASH-### per project
+    name              TEXT NOT NULL,
+    purpose           TEXT,
+    audience          TEXT,
+    widgets           TEXT NOT NULL DEFAULT '[]',   -- JSON array of widget descriptions
+    refresh           TEXT,
+    -- ── Level-2 provenance (hidden) ──
+    source_system     TEXT NOT NULL DEFAULT 'servicenow',
+    source_sys_id     TEXT,
+    source_table      TEXT,
+    source_scope      TEXT,
+    source_fluent     TEXT,
+    source_hash       TEXT,
+    visibility_scope  TEXT NOT NULL DEFAULT 'PROJECT',
+    lifecycle_status  TEXT NOT NULL DEFAULT 'active',
+    created_by        TEXT,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by        TEXT,
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    version           INTEGER NOT NULL DEFAULT 1
+);
+
+-- Report — a saved view over a table (SN sys_report). NOT now-sdk deployable.
+CREATE TABLE IF NOT EXISTS asdlc_report (
+    report_id         TEXT PRIMARY KEY,
+    project_id        TEXT REFERENCES asdlc_project(project_id),
+    slug              TEXT,                         -- RPT-### per project
+    name              TEXT NOT NULL,
+    purpose           TEXT,
+    reported_table    TEXT,                         -- business column (NOT source_table, which is provenance)
+    report_columns    TEXT NOT NULL DEFAULT '[]',   -- JSON array of column labels
+    filters           TEXT,
+    format            TEXT,
+    -- ── Level-2 provenance (hidden) ──
+    source_system     TEXT NOT NULL DEFAULT 'servicenow',
+    source_sys_id     TEXT,
+    source_table      TEXT,
+    source_scope      TEXT,
+    source_fluent     TEXT,
+    source_hash       TEXT,
+    visibility_scope  TEXT NOT NULL DEFAULT 'PROJECT',
+    lifecycle_status  TEXT NOT NULL DEFAULT 'active',
+    created_by        TEXT,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by        TEXT,
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    version           INTEGER NOT NULL DEFAULT 1
+);
+
+-- KPI / PA indicator — a measurable metric with target + direction (SN pa_indicator). NOT now-sdk deployable.
+CREATE TABLE IF NOT EXISTS asdlc_kpi (
+    kpi_id            TEXT PRIMARY KEY,
+    project_id        TEXT REFERENCES asdlc_project(project_id),
+    slug              TEXT,                         -- KPI-### per project
+    name              TEXT NOT NULL,
+    metric            TEXT,
+    unit              TEXT,
+    target            TEXT,
+    direction         TEXT,
+    frequency         TEXT,
+    data_source       TEXT,
+    -- ── Level-2 provenance (hidden) ──
+    source_system     TEXT NOT NULL DEFAULT 'servicenow',
+    source_sys_id     TEXT,
+    source_table      TEXT,
+    source_scope      TEXT,
+    source_fluent     TEXT,
+    source_hash       TEXT,
+    visibility_scope  TEXT NOT NULL DEFAULT 'PROJECT',
+    lifecycle_status  TEXT NOT NULL DEFAULT 'active',
+    created_by        TEXT,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by        TEXT,
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    version           INTEGER NOT NULL DEFAULT 1
+);
+
+-- NL rules (Workbench-native) — plain-English business/validation rules. rule_kind
+-- discriminates the two registry entity types that share this table. status tracks
+-- authored | reverse_engineered | needs_review. Never code.
+CREATE TABLE IF NOT EXISTS asdlc_nl_rule (
+    nl_rule_id        TEXT PRIMARY KEY,
+    project_id        TEXT REFERENCES asdlc_project(project_id),
+    slug              TEXT,                         -- NLR-### per project (shared sequence)
+    rule_kind         TEXT NOT NULL DEFAULT 'business',  -- business | validation
+    name              TEXT NOT NULL,
+    rule_text         TEXT,                         -- the rule in plain English
+    linked_table      TEXT,                         -- data model / table it applies to (loose, by name)
+    linked_field      TEXT,                         -- field (validation rules)
+    linked_workflow   TEXT,                         -- workflow it governs (loose, by name)
+    status            TEXT NOT NULL DEFAULT 'authored',  -- authored | reverse_engineered | needs_review
+    rationale         TEXT,
+    confidence        REAL,                         -- set on AI reverse-engineering
+    -- ── Level-2 provenance (the sys_script a reverse-engineered rule derived from) ──
+    source_system     TEXT NOT NULL DEFAULT 'workbench',
+    source_sys_id     TEXT,
+    source_table      TEXT,
+    source_scope      TEXT,
+    source_fluent     TEXT,
+    source_hash       TEXT,
+    visibility_scope  TEXT NOT NULL DEFAULT 'PROJECT',
+    lifecycle_status  TEXT NOT NULL DEFAULT 'active',
+    created_by        TEXT,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by        TEXT,
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    version           INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_dashboard_project ON asdlc_dashboard(project_id);
+CREATE INDEX IF NOT EXISTS idx_report_project    ON asdlc_report(project_id);
+CREATE INDEX IF NOT EXISTS idx_kpi_project       ON asdlc_kpi(project_id);
+CREATE INDEX IF NOT EXISTS idx_nl_rule_project   ON asdlc_nl_rule(project_id, rule_kind);
+CREATE INDEX IF NOT EXISTS idx_dashboard_sysid   ON asdlc_dashboard(source_sys_id);
+CREATE INDEX IF NOT EXISTS idx_report_sysid       ON asdlc_report(source_sys_id);
+CREATE INDEX IF NOT EXISTS idx_kpi_sysid          ON asdlc_kpi(source_sys_id);
+CREATE INDEX IF NOT EXISTS idx_nl_rule_sysid      ON asdlc_nl_rule(source_sys_id);
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- GENERIC EXTENSIBLE ServiceNow ARTIFACT SUBSTRATE
 -- ─────────────────────────────────────────────────────────────────────────────
 -- The universal Level-2 store of record for ANY ServiceNow design artifact, so no
@@ -1300,3 +1429,20 @@ CREATE INDEX IF NOT EXISTS idx_bl_project ON asdlc_baseline(project_id);
 CREATE INDEX IF NOT EXISTS idx_ev_project ON asdlc_evidence_source(project_id);
 CREATE INDEX IF NOT EXISTS idx_audit_table ON asdlc_audit_log(table_name, record_id);
 CREATE INDEX IF NOT EXISTS idx_audit_time ON asdlc_audit_log(changed_at);
+
+-- ServiceNow whole-instance catalog (read-only awareness sweep). Mirrors the
+-- CREATE TABLE in db.js MIGRATIONS so fresh and migrated DBs both have it.
+CREATE TABLE IF NOT EXISTS asdlc_sn_catalog_run (
+  catalog_run_id TEXT PRIMARY KEY,
+  project_id     TEXT REFERENCES asdlc_project(project_id),
+  instance_url   TEXT,
+  capturing_user TEXT,
+  status         TEXT NOT NULL DEFAULT 'running',
+  catalog_json   TEXT,
+  summary_json   TEXT,
+  error          TEXT,
+  created_by     TEXT,
+  created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_sn_catalog_project ON asdlc_sn_catalog_run(project_id, created_at);

@@ -17,6 +17,13 @@
   business_logic    — a NAMED automation mechanism with a concrete trigger (business rule on a
                       record event, UI policy that toggles a field, scheduled job, client/server
                       script). See the mechanism guard below — do NOT restate a plain requirement.
+  dashboard         — a curated set of visualizations/widgets for a defined audience (what it shows + for whom)
+  report            — a saved view over a table: chosen columns, filters, and a presentation format
+  kpi               — a measurable performance indicator with a metric, unit, target, and direction
+  nl_business_rule  — a business policy stated in PLAIN ENGLISH ("when X then Y"). Capture the intent
+                      only — never write or restate any code. Distinct from business_logic (which is a
+                      named code mechanism); use this for the policy a stakeholder states in words.
+  nl_validation_rule — a field/data validation stated in PLAIN ENGLISH (e.g. "start date before end date")
   acceptance_criterion — ONE verifiable condition per call; ONLY when the parent Use Case is known
   test_case         — ONE test scenario per call; link requirement_refs to FR/NFR slugs
   guardrail         — any rule, constraint, limit, or boundary on agent behaviour

@@ -8,7 +8,7 @@
  */
 import {
   apiFetch, tag, statusTag, formatDateTime,
-  el, escHtml, showToast, getCurrentProjectId, getCurrentUserId,
+  el, escHtml, showToast, getCurrentProjectId, getCurrentUserId, loadCatalog,
 } from '../app.js';
 
 const DOC_TYPES = [
@@ -249,9 +249,16 @@ function buildSubmitPanel() {
     <option value="user_stories">User Stories</option>
     <option value="data_model">Data Model / Schema (ServiceNow)</option>
     <option value="form_design">Forms &amp; UI (ServiceNow)</option>
-    <option value="business_logic">Business Logic (ServiceNow)</option>
+    <option value="business_logic">Impl. Artifacts (ServiceNow — Tier C)</option>
     <option value="catalog_item">Catalog Items (ServiceNow)</option>
   `;
+  // Config-driven entities: append catalog options + labels (fail-soft, async).
+  loadCatalog().then(catalog => {
+    for (const c of (catalog || [])) {
+      ENTITY_LABELS[c.entity_type] = c.label;
+      scopeSelect.appendChild(el('option', { value: c.entity_type }, c.label));
+    }
+  }).catch(() => { /* degrade to hardcoded options */ });
   scopeGroup.appendChild(scopeSelect);
 
   const platformGroup = el('div', { className: 'form-group', style: { margin: 0 } });

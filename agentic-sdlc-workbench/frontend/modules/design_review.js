@@ -4,7 +4,30 @@
  * Human-readable, printable report of agent design content
  * aligned to a selected application.  Start scope: Agents.
  */
-import { apiFetch, el, escHtml, getCurrentProjectId, navigate, setDrillDown, consumeDrillDown, showToast } from '../app.js';
+import { apiFetch, el, escHtml, getCurrentProjectId, navigate, setDrillDown, consumeDrillDown, showToast, loadCatalog } from '../app.js';
+
+// ─── config-driven design-entity catalog (backend = single source of truth) ────
+// Populated in render() from /design-entity-catalog. Merged into EDIT_CONFIGS /
+// REPORT_META / SCOPES / detectTypeKey / DATA_KEY_MAP so new Tier-A entities are
+// viewable + editable with NO per-entity frontend code. Hardcoded entries always win.
+let _catalog = [];
+function registerCatalog(catalog) {
+  _catalog = catalog || [];
+  for (const c of _catalog) {
+    if (!EDIT_CONFIGS[c.entity_type]) {
+      EDIT_CONFIGS[c.entity_type] = {
+        endpoint: (pid, eid) => `/projects/${pid}/${c.rest_path}/${eid}`,
+        createEndpoint: (pid) => `/projects/${pid}/${c.rest_path}`,
+        idKey: c.id_key, nameKey: c.name_key, label: c.label,
+        fields: c.fields || [], _dynamic: true, _entityType: c.entity_type,
+      };
+    }
+    if (!REPORT_META[c.scope_id]) {
+      REPORT_META[c.scope_id] = { title: `${c.label}s`, noun: c.label.toLowerCase() };
+    }
+  }
+}
+function catalogByScope(scopeId) { return _catalog.find(c => c.scope_id === scopeId) || null; }
 
 // ─── module-level state ───────────────────────────────────────────────────────
 let _docDrawer = null;
@@ -125,7 +148,7 @@ const EDIT_CONFIGS = {
   },
   business_logic: {
     endpoint: (pid, eid) => `/projects/${pid}/business-logic/${eid}`,
-    idKey: 'business_logic_id', nameKey: 'name', label: 'Business Logic',
+    idKey: 'business_logic_id', nameKey: 'name', label: 'Implementation Artifacts',
     fields: [
       { key: 'logic_type',    label: 'Type', type: 'select',
         options: ['business_rule', 'client_script', 'script_include', 'ui_action', 'scheduled_job', 'ui_policy'] },
@@ -390,7 +413,11 @@ export async function render(container) {
   // Stash the panel on the module so loadReport can refresh it
   _qualityPanel = qualityPanel;
 
-  // ── build scope tabs (11 tabs, 3 visual groups) ──────────────
+  // ── Config-driven catalog: load once, merge into the entity registries. Fail-soft
+  //    (returns [] on error) so the hardcoded tabs below always render. ──────────
+  try { registerCatalog(await loadCatalog()); } catch { /* degrade to hardcoded */ }
+
+  // ── build scope tabs (hardcoded + catalog-driven, grouped) ──────────────
   const SCOPES = [
     { id: 'relationships',  label: 'Relationships',   group: 'design'   },
     { id: 'requirements',   label: 'Requirements',    group: 'design'   },
@@ -400,15 +427,18 @@ export async function render(container) {
     { id: 'tools',          label: 'Tools',           group: 'design'   },
     { id: 'data-models',    label: 'Data Model',      group: 'design'   },
     { id: 'form-designs',   label: 'Forms',           group: 'design'   },
-    { id: 'business-logic', label: 'Business Logic',  group: 'design'   },
+    { id: 'business-logic', label: 'Impl. Artifacts',  group: 'design'   },
     { id: 'catalog-items',  label: 'Catalog Items',   group: 'design'   },
+    // Catalog-driven tabs (grouped after the hardcoded design entities, before evidence).
+    // _catalog is ordered information×3 then logic×2, so groups stay contiguous for the nav loop.
+    ..._catalog.map(c => ({ id: c.scope_id, label: c.label, group: c.group || 'design' })),
     { id: 'guardrails',     label: 'Guardrails',      group: 'evidence' },
     { id: 'data-sources',   label: 'Data Sources',    group: 'evidence' },
     { id: 'test-scenarios', label: 'Test Scenarios',  group: 'evidence' },
     { id: 'user-stories',   label: 'User Stories',    group: 'evidence' },
     { id: 'governance',     label: 'Governance',      group: 'evidence' },
   ];
-  const GROUP_LABELS = { design: 'Design Entities', evidence: 'Supporting Evidence' };
+  const GROUP_LABELS = { design: 'Design Entities', information: 'Information Layer', logic: 'Business Logic (NL)', evidence: 'Supporting Evidence' };
   let activeScope = 'relationships';
 
   // Check for pending drill-down scope override
@@ -751,7 +781,7 @@ const REPORT_META = {
   requirements:    { title: 'Requirements',          noun: 'requirement'     },
   'data-models':    { title: 'Data Model',            noun: 'table'        },
   'form-designs':   { title: 'Form Designs',          noun: 'form'         },
-  'business-logic': { title: 'Business Logic',        noun: 'logic item'   },
+  'business-logic': { title: 'Implementation Artifacts (Tier C)', noun: 'artifact' },
   'catalog-items':  { title: 'Catalog Items',         noun: 'catalog item' },
   'integrations':   { title: 'Integrations',          noun: 'integration'  },
 };
@@ -773,6 +803,8 @@ function detectTypeKey(data) {
   if (data.governance_controls) return 'governance';
   if (data.relationships)     return 'relationships';
   if (data.functional_reqs !== undefined || data.nonfunctional_reqs !== undefined) return 'requirements';
+  // Catalog-driven entities (checked after all hardcoded shapes so they never shadow them).
+  for (const c of _catalog) if (data[c.data_key] !== undefined) return c.scope_id;
   return 'agents';
 }
 
@@ -797,6 +829,7 @@ function buildReport(data) {
     'catalog-items':  'catalog_items',
     'integrations':   'integrations',
   };
+  for (const c of _catalog) DATA_KEY_MAP[c.scope_id] = c.data_key;   // catalog-driven scope → data key
   const dataKey = DATA_KEY_MAP[typeKey] || typeKey;
   const items = data[dataKey] || [];
 
@@ -829,13 +862,16 @@ function buildReport(data) {
   const issuesBanner = buildDataIssuesSummary();
   if (issuesBanner) wrap.appendChild(issuesBanner);
 
-  // ── empty state (not for relationships) ───────────────────────
-  if (typeKey !== 'relationships' && typeKey !== 'requirements' && !Array.isArray(items)) {
+  // ── empty state (not for relationships, requirements, or catalog-driven entities,
+  //    which render their own empty state with an "+ Add" affordance) ──────────────
+  const isCatalogScope = _catalog.some(c => c.scope_id === typeKey);
+  const skipEmptyGuard = typeKey === 'relationships' || typeKey === 'requirements' || isCatalogScope;
+  if (!skipEmptyGuard && !Array.isArray(items)) {
     wrap.appendChild(el('div', { className: 'empty-state', style: { margin: '40px 0' } },
       el('p', {}, `No ${meta.noun}s found for this application.`)));
     return wrap;
   }
-  if (typeKey !== 'relationships' && typeKey !== 'requirements' && items.length === 0) {
+  if (!skipEmptyGuard && items.length === 0) {
     wrap.appendChild(el('div', { className: 'empty-state', style: { margin: '40px 0' } },
       el('p', {}, `No ${meta.noun}s found for this application.`)));
     return wrap;
@@ -891,9 +927,126 @@ function buildReport(data) {
     wrap.appendChild(buildIntegrationsSection(data.integrations));
   } else if (data.functional_reqs !== undefined || data.nonfunctional_reqs !== undefined) {
     wrap.appendChild(buildRequirementsSection(data.functional_reqs || [], data.nonfunctional_reqs || [], data.use_case_map || {}));
+  } else {
+    // Catalog-driven generic fallback — one renderer for every config-defined entity.
+    const c = _catalog.find(cc => Array.isArray(data[cc.data_key]));
+    if (c) wrap.appendChild(buildGenericDesignSection(data[c.data_key], c));
   }
 
   return wrap;
+}
+
+// ─── Generic, config-driven section renderer ─────────────────────────────────
+// Renders any catalog entity from its field metadata. Reuses rtHeader (slug + status
+// pill + Edit button → versioning/CP/audit for free), subSection, kvRow. For NL-rule
+// entities it also shows a status badge and a gap/reverse-engineer banner.
+function buildGenericDesignSection(items, cfg) {
+  const wrap = el('div', { className: 'dr-agent' });
+  const isNlRule = cfg.entity_type === 'nl_business_rule' || cfg.entity_type === 'nl_validation_rule';
+
+  // Toolbar: author a new one (+ gap-prompting for NL rules).
+  const toolbar = el('div', { style: 'display:flex;gap:8px;align-items:center;margin:0 0 12px 0;flex-wrap:wrap' });
+  const addBtn = el('button', { className: 'btn btn-secondary', style: 'font-size:13px' }, `+ Add ${cfg.label}`);
+  addBtn.addEventListener('click', () => openCreateModal(cfg.entity_type));
+  toolbar.appendChild(addBtn);
+  wrap.appendChild(toolbar);
+  if (isNlRule) appendNlGapBanner(wrap, cfg);
+
+  if (!items.length) {
+    wrap.appendChild(el('div', { className: 'empty-state', style: 'margin:24px 0' },
+      el('p', {}, `No ${cfg.label.toLowerCase()}s yet — use “+ Add ${cfg.label}”${isNlRule ? ' or reverse-engineer one from a captured script' : ''}.`)));
+    return wrap;
+  }
+
+  items.forEach((row, idx) => {
+    if (idx > 0) wrap.appendChild(el('div', { className: 'dr-page-break' }));
+    const section = el('div', { className: 'dr-agent' });
+    section.id = `dr-entity-${row[cfg.id_key] || idx}`;
+    rtHeader(section, cfg.entity_type, row);
+    if (isNlRule && row.status) {
+      const hdr = section.querySelector('.dr-agent-header > div:last-child');
+      if (hdr) hdr.insertBefore(nlRuleStatusBadge(row.status), hdr.firstChild);
+    }
+    const s = subSection('Overview');
+    const grid = el('div', { className: 'dr-kv-grid' });
+    for (const f of cfg.fields) {
+      if (f.key === cfg.name_key || f.key === 'name') continue;
+      if (f.key === 'status') continue;  // shown as a header badge for NL rules
+      let v = row[f.key];
+      if (f.type === 'json-list') v = asArray(v).join(', ');
+      else if (f.type === 'select' && typeof v === 'string') v = capitalise(v);
+      kvRow(grid, f.label.replace(/ \(one per line\)$/, ''), v == null || v === '' ? null : v);
+    }
+    s.appendChild(grid);
+    section.appendChild(s);
+    wrap.appendChild(section);
+  });
+  return wrap;
+}
+
+function nlRuleStatusBadge(status) {
+  const map = {
+    authored:           { label: 'Authored',           bg: '#e3f2fd', color: '#1565c0' },
+    reverse_engineered: { label: '✨ Reverse-engineered', bg: '#f3e5f5', color: '#6a1b9a' },
+    needs_review:       { label: 'Needs Review',        bg: '#fff3e0', color: '#e65100' },
+  };
+  const m = map[status] || { label: status || '—', bg: '#eceff1', color: '#455a64' };
+  return el('span', { style: `display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;background:${m.bg};color:${m.color}` }, m.label);
+}
+
+// Gap-prompting banner for NL-rule tabs: surfaces tables with no documented rule and
+// captured scripts not yet reverse-engineered, each with a one-click action.
+function appendNlGapBanner(wrap, cfg) {
+  const banner = el('div', { style: 'margin:0 0 14px 0;padding:12px 14px;background:var(--surface-alt,#f8fafc);border:1px solid var(--border,#e2e8f0);border-radius:8px;font-size:13px' });
+  banner.appendChild(el('div', { style: 'font-weight:600;margin-bottom:6px' }, '🧭 Coverage gaps'));
+  const body = el('div', {}, el('span', { style: 'color:var(--text-muted,#64748b)' }, 'Checking…'));
+  banner.appendChild(body);
+  wrap.appendChild(banner);
+
+  apiFetch(`/projects/${_currentProjectId}/nl-rules/gaps`).then(g => {
+    body.innerHTML = '';
+    const tables  = g.tables_without_rules || [];
+    const scripts = g.scripts_not_reverse_engineered || [];
+    if (!tables.length && !scripts.length) {
+      body.appendChild(el('span', { style: 'color:#2e7d32' }, '✓ Every data model has a documented rule and all captured scripts have been reverse-engineered.'));
+      return;
+    }
+    if (tables.length) {
+      const row = el('div', { style: 'margin-bottom:6px' },
+        el('span', {}, `${tables.length} data model${tables.length === 1 ? '' : 's'} with no documented rule: `));
+      tables.slice(0, 8).forEach(t => {
+        const b = el('button', { className: 'btn btn-ghost', style: 'font-size:12px;margin:2px 4px 2px 0' }, `+ ${t.name}`);
+        b.addEventListener('click', () => openCreateModal(cfg.entity_type, { linked_table: t.name }));
+        row.appendChild(b);
+      });
+      body.appendChild(row);
+    }
+    if (scripts.length) {
+      const row = el('div', {},
+        el('span', {}, `${scripts.length} captured script${scripts.length === 1 ? '' : 's'} not yet reverse-engineered: `));
+      scripts.slice(0, 8).forEach(s => {
+        const b = el('button', { className: 'btn btn-ghost', style: 'font-size:12px;margin:2px 4px 2px 0' }, `✨ ${s.name}`);
+        b.addEventListener('click', () => reverseEngineerNlRuleFromScript(s.sn_artifact_id, cfg.entity_type));
+        row.appendChild(b);
+      });
+      body.appendChild(row);
+    }
+  }).catch(() => { body.innerHTML = ''; body.appendChild(el('span', { style: 'color:var(--text-muted,#64748b)' }, 'Gap check unavailable.')); });
+}
+
+async function reverseEngineerNlRuleFromScript(artifactId, entityType) {
+  showToast('Reverse-engineering rule from script…', 'info');
+  try {
+    const kind = entityType === 'nl_validation_rule' ? 'validation' : 'business';
+    const r = await apiFetch(`/projects/${_currentProjectId}/nl-rules/reverse-engineer`, {
+      method: 'POST', body: JSON.stringify({ artifact_id: artifactId, rule_kind: kind }),
+    });
+    showToast(`Candidate rule created (${r.slug}) — review & confirm.`, 'success');
+    const pid = getCurrentProjectId();
+    if (pid && _currentReportArea) loadReport(_currentReportArea, pid, _currentScope);
+  } catch (err) {
+    showToast('Reverse-engineering failed: ' + err.message, 'error');
+  }
 }
 
 // ─── requirements section ────────────────────────────────────────────────────
@@ -3315,7 +3468,7 @@ function buildRelationshipsSection(relationships, functionalReqs = [], nonfuncti
 
     const mc2    = el('div', { className: 'dr-mc' });
     const dmCol  = buildMcColumn('Data Models');
-    const chCol  = buildMcColumn('Forms & Business Logic');
+    const chCol  = buildMcColumn('Forms & Impl. Artifacts');
     const detCol = buildMcColumn('Details');
     mc2.appendChild(dmCol.wrap);
     mc2.appendChild(chCol.wrap);
@@ -4344,6 +4497,99 @@ function openDraftPromptModal(agent, result, onSaved) {
   document.body.appendChild(overlay);
   // Close on backdrop click
   overlay.addEventListener('mousedown', e => { if (e.target === overlay) overlay.remove(); });
+}
+
+/**
+ * Open a modal to CREATE a new config-driven design entity (PO-authoring).
+ * Thin sibling of openEditModal: renders cfg.fields, POSTs to createEndpoint,
+ * shows the auto-approved CP code, and reloads. `seed` pre-fills fields.
+ */
+function openCreateModal(entityType, seed = {}) {
+  const cfg = EDIT_CONFIGS[entityType];
+  if (!cfg || !cfg.createEndpoint || !_currentProjectId) {
+    showToast('Authoring is not available for this entity.', 'warning');
+    return;
+  }
+  const overlay = el('div', { className: 'dr-edit-overlay' });
+  const modal   = el('div', { className: 'dr-edit-modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': `New ${cfg.label}` });
+  const mhdr = el('div', { className: 'dr-edit-modal-header' });
+  mhdr.appendChild(el('div', { className: 'dr-edit-modal-title' }, `New ${cfg.label}`));
+  const closeBtn = el('button', { className: 'dr-edit-close', title: 'Close' }, '✕');
+  mhdr.appendChild(closeBtn);
+  modal.appendChild(mhdr);
+  modal.appendChild(el('div', { className: 'dr-edit-banner' },
+    el('span', { className: 'dr-edit-banner-icon' }, 'ℹ️'),
+    'Saved as an auto-approved Change Packet with a full audit trail.'));
+
+  const body = el('div', { className: 'dr-edit-body' });
+  const inputs = {};
+  cfg.fields.forEach(field => {
+    if (field.key === 'status') return;   // status is system-managed (authored on create)
+    const group = el('div', { className: 'dr-edit-field-group' });
+    group.appendChild(el('label', { className: 'dr-edit-label' }, field.label));
+    let input;
+    const seedVal = seed[field.key];
+    if (field.type === 'textarea' || field.type === 'json-list') {
+      input = el('textarea', { className: 'dr-edit-input dr-edit-textarea', rows: '4' });
+      if (seedVal != null) input.value = Array.isArray(seedVal) ? seedVal.join('\n') : String(seedVal);
+      if (field.type === 'json-list') input.dataset.fieldType = 'json-list';
+    } else if (field.type === 'select') {
+      input = el('select', { className: 'dr-edit-input dr-edit-select' });
+      (field.options || []).forEach(opt => input.appendChild(el('option', { value: opt }, opt.replace(/_/g, ' '))));
+      if (seedVal != null) input.value = String(seedVal);
+    } else if (field.type === 'number') {
+      input = el('input', { type: 'number', className: 'dr-edit-input dr-edit-text', step: String(field.step ?? '1') });
+      if (seedVal != null) input.value = String(seedVal);
+    } else {
+      input = el('input', { type: 'text', className: 'dr-edit-input dr-edit-text' });
+      if (seedVal != null) input.value = String(seedVal);
+    }
+    inputs[field.key] = input;
+    group.appendChild(input);
+    body.appendChild(group);
+  });
+  modal.appendChild(body);
+
+  const errorArea = el('div', { className: 'dr-edit-error', style: { display: 'none' } });
+  modal.appendChild(errorArea);
+  const footer = el('div', { className: 'dr-edit-footer' });
+  const cancelBtn = el('button', { className: 'btn btn-ghost' }, 'Cancel');
+  const saveBtn   = el('button', { className: 'btn btn-primary' }, `Create ${cfg.label}`);
+  footer.appendChild(cancelBtn); footer.appendChild(saveBtn);
+  modal.appendChild(footer);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+  setTimeout(() => { const f = modal.querySelector('input,textarea,select'); if (f) f.focus(); }, 60);
+
+  const close = () => overlay.remove();
+  closeBtn.addEventListener('click', close);
+  cancelBtn.addEventListener('click', close);
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+
+  saveBtn.addEventListener('click', async () => {
+    const payload = {};
+    cfg.fields.forEach(field => {
+      const inp = inputs[field.key]; if (!inp) return;
+      if (field.type === 'json-list') payload[field.key] = inp.value.split('\n').map(l => l.trim()).filter(Boolean);
+      else if (field.type === 'number') { const v = inp.value.trim(); payload[field.key] = v === '' ? null : parseFloat(v); }
+      else payload[field.key] = inp.value;
+    });
+    const nameKey = cfg.nameKey || 'name';
+    if (!String(payload[nameKey] || payload.name || '').trim()) {
+      errorArea.textContent = 'Name is required.'; errorArea.style.display = 'block'; return;
+    }
+    saveBtn.disabled = true; saveBtn.textContent = 'Creating…';
+    try {
+      const result = await apiFetch(cfg.createEndpoint(_currentProjectId), { method: 'POST', body: JSON.stringify(payload) });
+      showToast(`${cfg.label} created${result._cp?.cpCode ? ` — ${result._cp.cpCode}` : ''}`, 'success');
+      close();
+      const pid = getCurrentProjectId();
+      if (pid && _currentReportArea) loadReport(_currentReportArea, pid, _currentScope);
+    } catch (err) {
+      errorArea.textContent = 'Create failed: ' + err.message; errorArea.style.display = 'block';
+      saveBtn.disabled = false; saveBtn.textContent = `Create ${cfg.label}`;
+    }
+  });
 }
 
 /**

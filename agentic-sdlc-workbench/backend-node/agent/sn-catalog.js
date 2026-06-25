@@ -35,21 +35,23 @@ const SN_CATALOG = [
   { table: 'sys_db_object',      captureType: 'data_model',     wbDesignType: 'data_model',     mappingStatus: 'mapped',
     fields: ['name', 'label', 'super_class'], complexityWeight: 2,
     featureNote: 'Tables/data models (column detail via sys_dictionary)' },
-  { table: 'sys_script',         captureType: 'business_rule',  wbDesignType: 'business_logic', mappingStatus: 'mapped',
+  // ── Tier C — implementation code. Captured for drift detection; NOT design intent. ────
+  // These demoted from Tier A (2026-06-25): edit directly in ServiceNow, not via Build Spec.
+  { table: 'sys_script',         captureType: 'business_rule',  wbDesignType: 'business_logic', mappingStatus: 'mapped',   tier: 'C',
     fields: ['name', 'collection', 'when', 'condition', 'script'], complexityWeight: 1.5,
-    featureNote: 'Server-side business rules' },
-  { table: 'sys_script_client',  captureType: 'client_script',  wbDesignType: 'business_logic', mappingStatus: 'partial', partialIntent: 'by-intent',
+    featureNote: 'Server-side business rules — implementation code; captured for drift, not design intent' },
+  { table: 'sys_script_client',  captureType: 'client_script',  wbDesignType: 'business_logic', mappingStatus: 'partial',  tier: 'C', partialIntent: 'by-intent',
     fields: ['name', 'table', 'type', 'script'], complexityWeight: 1,
-    featureNote: 'Client scripts — ServiceNow-owned implementation; business intent captured, cosmetic ones dropped by materiality (partial by intent)' },
-  { table: 'sys_script_include', captureType: 'script_include', wbDesignType: 'business_logic', mappingStatus: 'mapped',
+    featureNote: 'Client scripts — implementation code; business intent captured, cosmetic ones dropped by materiality' },
+  { table: 'sys_script_include', captureType: 'script_include', wbDesignType: 'business_logic', mappingStatus: 'mapped',   tier: 'C',
     fields: ['name', 'script'], complexityWeight: 1.5,
-    featureNote: 'Script includes (reusable server logic)' },
-  { table: 'sys_ui_action',      captureType: 'ui_action',      wbDesignType: 'business_logic', mappingStatus: 'partial', partialIntent: 'by-intent',
+    featureNote: 'Script includes (reusable server logic) — implementation code; captured for drift' },
+  { table: 'sys_ui_action',      captureType: 'ui_action',      wbDesignType: 'business_logic', mappingStatus: 'partial',  tier: 'C', partialIntent: 'by-intent',
     fields: ['name', 'table', 'script'], complexityWeight: 1,
-    featureNote: 'UI actions — ServiceNow-owned implementation; business intent captured, cosmetic ones dropped by materiality (partial by intent)' },
-  { table: 'sys_ui_policy',      captureType: 'ui_policy',      wbDesignType: 'form_design',    mappingStatus: 'partial', partialIntent: 'by-intent',
+    featureNote: 'UI actions — implementation code; business intent captured, cosmetic ones dropped by materiality' },
+  { table: 'sys_ui_policy',      captureType: 'ui_policy',      wbDesignType: 'form_design',    mappingStatus: 'partial',  tier: 'C', partialIntent: 'by-intent',
     fields: ['short_description', 'table'], complexityWeight: 1,
-    featureNote: 'UI policies — form behaviour authored in ServiceNow; captured as a plain-English summary (partial by intent)' },
+    featureNote: 'UI policies — form behaviour authored in ServiceNow; captured for drift, not design intent' },
   { table: 'sys_ui_form',        captureType: 'form',           wbDesignType: 'form_design',    mappingStatus: 'mapped',
     fields: ['name', 'view'], complexityWeight: 1,
     featureNote: 'Forms / views' },
@@ -89,4 +91,8 @@ function normalizeInstanceUrl(instance) {
   return base;
 }
 
-module.exports = { SN_CATALOG, SN_COMPLEXITY_PROBES, SN_SURFACES, normalizeInstanceUrl };
+// Set of SN tables demoted to Tier C (implementation artifacts, not design intent).
+// Used by Build Spec renderer and frontend to classify captured rows.
+const SN_TIER_C_TABLES = new Set(SN_CATALOG.filter(e => e.tier === 'C').map(e => e.table));
+
+module.exports = { SN_CATALOG, SN_COMPLEXITY_PROBES, SN_SURFACES, SN_TIER_C_TABLES, normalizeInstanceUrl };

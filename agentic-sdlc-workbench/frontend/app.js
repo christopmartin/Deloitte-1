@@ -31,6 +31,7 @@ const MODULE_LOADERS = {
   admin_best_practices: () => import('./modules/admin_best_practices.js'),
   servicenow_sync: () => import('./modules/servicenow_sync.js'),
   servicenow_assessment: () => import('./modules/servicenow_assessment.js'),
+  servicenow_catalog: () => import('./modules/servicenow_catalog.js'),
   sn_artifacts: () => import('./modules/sn_artifacts.js'),
 };
 
@@ -273,6 +274,25 @@ export async function apiFetch(path, options = {}) {
   if (res.status === 204) return null;
 
   return res.json();
+}
+
+// ============================================================
+// Design-entity catalog (config-driven engine)
+// ============================================================
+// The backend registry's `display` blocks, fetched once and cached. Modules
+// (design_review, build_export, ingest) merge these into their hardcoded entity
+// lists so new Tier-A entities are viewable/editable without per-entity code.
+// Fail-soft: on any error returns [] so the UI degrades to the hardcoded entities.
+let _designCatalog = null;
+let _designCatalogPromise = null;
+export function loadCatalog() {
+  if (_designCatalog) return Promise.resolve(_designCatalog);
+  if (!_designCatalogPromise) {
+    _designCatalogPromise = apiFetch('/design-entity-catalog')
+      .then(r => { _designCatalog = (r && r.entities) || []; return _designCatalog; })
+      .catch(err => { console.warn('design-entity-catalog unavailable:', err.message); _designCatalog = []; return _designCatalog; });
+  }
+  return _designCatalogPromise;
 }
 
 // ============================================================
