@@ -438,7 +438,7 @@ export async function render(container) {
     { id: 'user-stories',   label: 'User Stories',    group: 'evidence' },
     { id: 'governance',     label: 'Governance',      group: 'evidence' },
   ];
-  const GROUP_LABELS = { design: 'Design Entities', information: 'Information Layer', logic: 'Business Logic (NL)', process: 'Process & SLAs', configuration: 'Platform Configuration', evidence: 'Supporting Evidence' };
+  const GROUP_LABELS = { design: 'Design Entities', information: 'Information Layer', logic: 'Business Logic (NL)', process: 'Process & SLAs', configuration: 'Platform Configuration', ux: 'User Experience', integration: 'Integration', evidence: 'Supporting Evidence' };
   let activeScope = 'relationships';
 
   // Check for pending drill-down scope override
@@ -787,6 +787,10 @@ const REPORT_META = {
 };
 
 function detectTypeKey(data) {
+  // Relationships is uniquely identified by `relationships` and its payload also carries
+  // supplementary data_models/catalog_items/integrations — so it MUST be checked first,
+  // else a project with 0 data models falls through to an empty "data-models" state.
+  if (data.relationships)     return 'relationships';
   if (data.agents)            return 'agents';
   if (data.workflows)         return 'workflows';
   if (data.tools)             return 'tools';
@@ -801,7 +805,6 @@ function detectTypeKey(data) {
   if (data.test_scenarios)    return 'test-scenarios';
   if (data.user_stories)      return 'user-stories';
   if (data.governance_controls) return 'governance';
-  if (data.relationships)     return 'relationships';
   if (data.functional_reqs !== undefined || data.nonfunctional_reqs !== undefined) return 'requirements';
   // Catalog-driven entities (checked after all hardcoded shapes so they never shadow them).
   for (const c of _catalog) if (data[c.data_key] !== undefined) return c.scope_id;
@@ -914,7 +917,7 @@ function buildReport(data) {
   } else if (data.relationships) {
     // Check for relationships first — this response now includes data_models/catalog_items/integrations
     // as supplementary data; those individual-tab checks below must not fire for this combined response.
-    wrap.appendChild(buildRelationshipsSection(data.relationships, data.functional_reqs || [], data.nonfunctional_reqs || [], data.use_case_map || {}, data.data_models || [], data.catalog_items || [], data.integrations || []));
+    wrap.appendChild(buildRelationshipsSection(data.relationships, data.functional_reqs || [], data.nonfunctional_reqs || [], data.use_case_map || {}, data.data_models || [], data.catalog_items || [], data.integrations || [], data.tier_a_entities || {}));
   } else if (data.data_models) {
     wrap.appendChild(buildDataModelsSection(data.data_models));
   } else if (data.form_designs) {
@@ -969,9 +972,11 @@ function buildGenericDesignSection(items, cfg) {
     }
     const s = subSection('Overview');
     const grid = el('div', { className: 'dr-kv-grid' });
+    const childKey = cfg.children && cfg.children.key;
     for (const f of cfg.fields) {
       if (f.key === cfg.name_key || f.key === 'name') continue;
-      if (f.key === 'status') continue;  // shown as a header badge for NL rules
+      if (f.key === 'status') continue;          // shown as a header badge for NL rules
+      if (childKey && f.key === childKey) continue;  // rendered as a sub-table below
       let v = row[f.key];
       if (f.type === 'json-list') v = asArray(v).join(', ');
       else if (f.type === 'select' && typeof v === 'string') v = capitalise(v);
@@ -979,6 +984,25 @@ function buildGenericDesignSection(items, cfg) {
     }
     s.appendChild(grid);
     section.appendChild(s);
+    // Nested child collection → sub-table (mirrors the data-model fields table).
+    if (cfg.children) {
+      const rows = asArray(row[cfg.children.key]);
+      const cs = subSection(`${cfg.children.label} (${rows.length})`);
+      if (rows.length) {
+        const tbl = el('table', { className: 'dr-table' });
+        tbl.appendChild(el('thead', {}, el('tr', {}, ...cfg.children.columns.map(c => el('th', {}, c.label)))));
+        const tb = el('tbody');
+        rows.forEach(r => tb.appendChild(el('tr', {}, ...cfg.children.columns.map(c => {
+          const cv = r[c.key];
+          return el('td', { style: { fontSize: '12px' } }, cv == null || cv === '' ? '—' : (typeof cv === 'string' ? cv : JSON.stringify(cv)));
+        }))));
+        tbl.appendChild(tb);
+        cs.appendChild(tbl);
+      } else {
+        cs.appendChild(el('div', { style: 'color:var(--text-muted);font-style:italic;font-size:12px' }, `— (no ${cfg.children.label.toLowerCase()} recorded)`));
+      }
+      section.appendChild(cs);
+    }
     wrap.appendChild(section);
   });
   return wrap;
@@ -3345,7 +3369,7 @@ function buildIntegrationsSection(items) {
   return wrap;
 }
 
-function buildRelationshipsSection(relationships, functionalReqs = [], nonfunctionalReqs = [], useCaseMap = {}, dataMdls = [], catalogItems = [], integrations = []) {
+function buildRelationshipsSection(relationships, functionalReqs = [], nonfunctionalReqs = [], useCaseMap = {}, dataMdls = [], catalogItems = [], integrations = [], tierAEntities = {}) {
   const wrap = el('div', { className: 'dr-agent' });
 
   const { use_cases = [], orphaned_workflows = [], tools_are_project_wide = false } = relationships;
@@ -3641,6 +3665,87 @@ function buildRelationshipsSection(relationships, functionalReqs = [], nonfuncti
     reqSummaryTable(functionalReqs, 'Functional Requirements');
     reqSummaryTable(nonfunctionalReqs, 'Non-Functional Requirements');
     wrap.appendChild(reqDiv);
+  }
+
+  // ── Section 5: Tier-A Design (config-driven entities) ──────────
+  // Self-populating 3-column Miller: Group → Entities → Details. Driven entirely by
+  // the relationships endpoint's tier_a_entities map, so new entities appear by config.
+  const tierAKeys = Object.keys(tierAEntities);
+  if (tierAKeys.length) {
+    const GROUP_LABELS = { information: 'Information Layer', logic: 'Business Logic (NL)', process: 'Process & SLAs', configuration: 'Platform Configuration', ux: 'User Experience', integration: 'Integration' };
+    // Group entity-types by their display group.
+    const byGroup = {};
+    for (const dk of tierAKeys) {
+      const ent = tierAEntities[dk];
+      (byGroup[ent.group] ||= []).push(ent);
+    }
+    const groupKeys = Object.keys(byGroup);
+
+    const taWrap = el('div', { style: { marginTop: '32px' } });
+    taWrap.appendChild(el('div', { className: 'dr-section-header', style: { marginBottom: '12px' } },
+      el('span', { className: 'dr-section-title' }, 'Tier-A Design')));
+
+    const mc = el('div', { className: 'dr-mc' });
+    const grpCol = buildMcColumn('Category');
+    const entCol = buildMcColumn('Entities');
+    const detCol = buildMcColumn('Details');
+    mc.appendChild(grpCol.wrap); mc.appendChild(entCol.wrap); mc.appendChild(detCol.wrap);
+    taWrap.appendChild(mc);
+    wrap.appendChild(taWrap);
+
+    let selGroup = null, selRow = null, selEnt = null;
+
+    function renderGrp() {
+      grpCol.body.innerHTML = '';
+      groupKeys.forEach(g => {
+        const count = byGroup[g].reduce((n, e) => n + e.rows.length, 0);
+        grpCol.body.appendChild(mcItem(GROUP_LABELS[g] || g, null, null, {
+          active: selGroup === g, secondary: `${count} item${count !== 1 ? 's' : ''}`,
+          onSelect: () => { selGroup = g; selRow = null; selEnt = null; renderAll(); },
+        }));
+      });
+    }
+    function renderEnt() {
+      entCol.body.innerHTML = '';
+      if (!selGroup) { entCol.body.appendChild(emptyHint('Select a category →')); return; }
+      const ents = byGroup[selGroup];
+      let any = false;
+      ents.forEach(ent => {
+        ent.rows.forEach(r => {
+          any = true;
+          entCol.body.appendChild(mcItem(`${ent.label}: ${r.name}`, ent.scope_id, `dr-entity-${r.id}`, {
+            active: selRow && selRow.id === r.id,
+            secondary: r.slug || r.secondary || '',
+            onSelect: () => { selRow = r; selEnt = ent; renderAll(); },
+          }));
+        });
+      });
+      if (!any) entCol.body.appendChild(emptyHint('No entities'));
+    }
+    function renderDet() {
+      detCol.body.innerHTML = '';
+      if (!selRow) { detCol.body.appendChild(emptyHint('Select an entity →')); return; }
+      const lines = [
+        { label: 'Type', val: selEnt.label },
+        { label: 'Slug', val: selRow.slug || '—' },
+        { label: 'Name', val: selRow.name },
+      ];
+      if (selRow.secondary) lines.push({ label: 'Summary', val: selRow.secondary });
+      lines.forEach(({ label, val }) => {
+        const row = el('div', { style: 'padding:6px 10px;border-bottom:1px solid var(--border,#e0e0e0);font-size:12px' });
+        row.appendChild(el('div', { style: 'color:#888;font-size:10px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:2px' }, label));
+        row.appendChild(el('div', {}, val));
+        detCol.body.appendChild(row);
+      });
+      const dl = drillLink('Open on its tab →', selEnt.scope_id, `dr-entity-${selRow.id}`);
+      dl.style.cssText = 'margin:8px 10px;font-size:12px';
+      detCol.body.appendChild(dl);
+    }
+    function renderAll() { renderGrp(); renderEnt(); renderDet(); }
+
+    selGroup = groupKeys[0] || null;
+    if (selGroup) { const first = byGroup[selGroup][0]; selEnt = first; selRow = first.rows[0] || null; }
+    renderAll();
   }
 
   return wrap;
@@ -4533,6 +4638,11 @@ function openCreateModal(entityType, seed = {}) {
       input = el('textarea', { className: 'dr-edit-input dr-edit-textarea', rows: '4' });
       if (seedVal != null) input.value = Array.isArray(seedVal) ? seedVal.join('\n') : String(seedVal);
       if (field.type === 'json-list') input.dataset.fieldType = 'json-list';
+    } else if (field.type === 'json') {
+      input = el('textarea', { className: 'dr-edit-input dr-edit-textarea dr-edit-json', rows: '6', spellcheck: 'false' });
+      input.value = seedVal != null ? (typeof seedVal === 'string' ? seedVal : JSON.stringify(seedVal, null, 2)) : '';
+      if (field.help) {} // keep simple
+      input.placeholder = '[ { ... } ]';
     } else if (field.type === 'select') {
       input = el('select', { className: 'dr-edit-input dr-edit-select' });
       (field.options || []).forEach(opt => input.appendChild(el('option', { value: opt }, opt.replace(/_/g, ' '))));
@@ -4568,12 +4678,19 @@ function openCreateModal(entityType, seed = {}) {
 
   saveBtn.addEventListener('click', async () => {
     const payload = {};
+    let createParseError = null;
     cfg.fields.forEach(field => {
       const inp = inputs[field.key]; if (!inp) return;
       if (field.type === 'json-list') payload[field.key] = inp.value.split('\n').map(l => l.trim()).filter(Boolean);
+      else if (field.type === 'json') {
+        const txt = inp.value.trim();
+        if (txt === '') payload[field.key] = [];
+        else { try { payload[field.key] = JSON.parse(txt); } catch (e) { createParseError = `${field.label}: invalid JSON — ${e.message}`; } }
+      }
       else if (field.type === 'number') { const v = inp.value.trim(); payload[field.key] = v === '' ? null : parseFloat(v); }
       else payload[field.key] = inp.value;
     });
+    if (createParseError) { errorArea.textContent = createParseError; errorArea.style.display = 'block'; return; }
     const nameKey = cfg.nameKey || 'name';
     if (!String(payload[nameKey] || payload.name || '').trim()) {
       errorArea.textContent = 'Name is required.'; errorArea.style.display = 'block'; return;
@@ -4664,7 +4781,7 @@ function openEditModal(entityType, entity) {
         : []);
       input.value = arr.map(v => typeof v === 'string' ? v : JSON.stringify(v)).join('\n');
       input.dataset.fieldType = 'json-list';
-    } else if (field.type === 'json-raw') {
+    } else if (field.type === 'json-raw' || field.type === 'json') {
       input = el('textarea', { className: 'dr-edit-input dr-edit-textarea dr-edit-json',
         rows: String(field.rows || 8), spellcheck: 'false' });
       input.value = raw == null ? ''
@@ -4795,9 +4912,9 @@ function openEditModal(entityType, entity) {
       let value;
       if (field.type === 'json-list') {
         value = inp.value.split('\n').map(l => l.trim()).filter(Boolean);
-      } else if (field.type === 'json-raw') {
+      } else if (field.type === 'json-raw' || field.type === 'json') {
         const txt = inp.value.trim();
-        if (txt === '') { value = null; }
+        if (txt === '') { value = field.type === 'json' ? [] : null; }
         else {
           try { value = JSON.parse(txt); }
           catch (e) { parseError = `${field.label}: invalid JSON — ${e.message}`; return; }

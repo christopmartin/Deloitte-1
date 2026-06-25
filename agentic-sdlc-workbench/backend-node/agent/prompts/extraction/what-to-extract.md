@@ -29,6 +29,10 @@
   user_group        — a named group of users that grants roles and routes work
   catalog_category  — a grouping/category that organizes Service Catalog items
   choice_set        — the set of allowed values (picklist) for a field
+  service_portal    — a Service Portal: its theme/homepage and the pages it contains
+  workspace         — a Next Experience workspace: its primary table and the lists/tabs it shows
+  variable_set      — a reusable set of catalog variables shared across catalog items
+  inbound_rest_api  — a Scripted REST API the app EXPOSES (base path, auth, resource operations); NOT an outbound rest_message
   acceptance_criterion — ONE verifiable condition per call; ONLY when the parent Use Case is known
   test_case         — ONE test scenario per call; link requirement_refs to FR/NFR slugs
   guardrail         — any rule, constraint, limit, or boundary on agent behaviour

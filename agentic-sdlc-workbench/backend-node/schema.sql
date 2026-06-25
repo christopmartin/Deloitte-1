@@ -725,6 +725,61 @@ CREATE TABLE IF NOT EXISTS asdlc_choice_set (
     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
 );
 
+-- Nested config-driven Tier-A entities (children stored as JSON arrays, rendered as sub-tables).
+CREATE TABLE IF NOT EXISTS asdlc_service_portal (
+    service_portal_id TEXT PRIMARY KEY,
+    project_id        TEXT REFERENCES asdlc_project(project_id),
+    slug              TEXT, name TEXT NOT NULL, title TEXT, homepage TEXT, theme TEXT, purpose TEXT,
+    pages             TEXT NOT NULL DEFAULT '[]',
+    source_system     TEXT NOT NULL DEFAULT 'servicenow',
+    source_sys_id     TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+    visibility_scope  TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+    created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS asdlc_workspace (
+    workspace_id      TEXT PRIMARY KEY,
+    project_id        TEXT REFERENCES asdlc_project(project_id),
+    slug              TEXT, name TEXT NOT NULL, purpose TEXT, primary_table TEXT,
+    lists             TEXT NOT NULL DEFAULT '[]',
+    source_system     TEXT NOT NULL DEFAULT 'servicenow',
+    source_sys_id     TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+    visibility_scope  TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+    created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS asdlc_variable_set (
+    variable_set_id   TEXT PRIMARY KEY,
+    project_id        TEXT REFERENCES asdlc_project(project_id),
+    slug              TEXT, name TEXT NOT NULL, purpose TEXT, applies_to TEXT,
+    variables         TEXT NOT NULL DEFAULT '[]',
+    source_system     TEXT NOT NULL DEFAULT 'servicenow',
+    source_sys_id     TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+    visibility_scope  TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+    created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS asdlc_inbound_rest_api (
+    inbound_rest_api_id TEXT PRIMARY KEY,
+    project_id        TEXT REFERENCES asdlc_project(project_id),
+    slug              TEXT, name TEXT NOT NULL, base_path TEXT, auth TEXT, purpose TEXT,
+    resources         TEXT NOT NULL DEFAULT '[]',
+    source_system     TEXT NOT NULL DEFAULT 'servicenow',
+    source_sys_id     TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+    visibility_scope  TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+    created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_portal_project    ON asdlc_service_portal(project_id);
+CREATE INDEX IF NOT EXISTS idx_workspace_project ON asdlc_workspace(project_id);
+CREATE INDEX IF NOT EXISTS idx_vset_project      ON asdlc_variable_set(project_id);
+CREATE INDEX IF NOT EXISTS idx_api_project       ON asdlc_inbound_rest_api(project_id);
+CREATE INDEX IF NOT EXISTS idx_portal_sysid      ON asdlc_service_portal(source_sys_id);
+CREATE INDEX IF NOT EXISTS idx_workspace_sysid   ON asdlc_workspace(source_sys_id);
+CREATE INDEX IF NOT EXISTS idx_vset_sysid        ON asdlc_variable_set(source_sys_id);
+CREATE INDEX IF NOT EXISTS idx_api_sysid         ON asdlc_inbound_rest_api(source_sys_id);
+
 CREATE INDEX IF NOT EXISTS idx_dashboard_project ON asdlc_dashboard(project_id);
 CREATE INDEX IF NOT EXISTS idx_report_project    ON asdlc_report(project_id);
 CREATE INDEX IF NOT EXISTS idx_kpi_project       ON asdlc_kpi(project_id);

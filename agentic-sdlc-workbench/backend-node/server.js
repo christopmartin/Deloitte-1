@@ -5743,6 +5743,28 @@ app.get('/api/v1/projects/:id/design-report/relationships', (req, res) => {
   const use_case_map = {};
   ucRows.forEach(uc => { use_case_map[uc.use_case_id] = { slug: uc.slug, title: uc.title }; });
 
+  // Config-driven Tier-A entities for the Miller "Tier-A Design" section. Lightweight rows
+  // (id, slug, name + a 1-line secondary) grouped by display.group so the view self-populates.
+  const tier_a_entities = {};
+  for (const e of registry.entitiesWithDisplay()) {
+    let rows = [];
+    try {
+      rows = db.prepare(`SELECT * FROM ${e.table} WHERE project_id = ? AND lifecycle_status = 'active' ORDER BY slug`).all(req.params.id);
+    } catch { rows = []; }
+    if (!rows.length) continue;
+    // secondary = the first non-name flat field with a value (e.g. purpose, target, metric).
+    const secondaryKeys = e.display.fields.filter(f => f.key !== 'name' && f.type !== 'json' && f.type !== 'json-list').map(f => f.key);
+    tier_a_entities[e.display.data_key] = {
+      label: e.display.label, scope_id: e.display.scope_id, group: e.display.group || 'design',
+      id_key: e.pk,
+      rows: rows.map(r => {
+        let secondary = '';
+        for (const k of secondaryKeys) { if (r[k]) { secondary = String(r[k]); break; } }
+        return { id: r[e.pk], slug: r.slug, name: r.name, secondary };
+      }),
+    };
+  }
+
   res.json({
     project: {
       project_id: project.project_id, project_name: project.project_name,
@@ -5761,6 +5783,7 @@ app.get('/api/v1/projects/:id/design-report/relationships', (req, res) => {
     functional_reqs: frs,
     nonfunctional_reqs: nfrs,
     use_case_map,
+    tier_a_entities,
   });
 });
 
@@ -7763,6 +7786,7 @@ function buildExportMarkdown(project, baseline, sections, data) {
       const k = e.display.data_key;
       if (BESPOKE.has(k) || !sections.includes(k) || data[k] === undefined) continue;
       const colOf = (key) => (e.fieldMap[key] && e.fieldMap[key].col) || key;
+      const childCfg = e.display.children || null;   // nested collection → rendered as a sub-table
       lines.push('---'); lines.push('');
       lines.push(`## ${e.display.label}s`); lines.push('');
       if (!data[k].length) { lines.push(`*No ${e.display.label.toLowerCase()}s.*`); lines.push(''); continue; }
@@ -7771,6 +7795,7 @@ function buildExportMarkdown(project, baseline, sections, data) {
         if (rec.source_sys_id) lines.push(`> **Source:** ${e.display.source_table || rec.source_table || ''} \`${rec.source_sys_id}\``);
         for (const f of e.display.fields) {
           if (f.key === 'name') continue;
+          if (childCfg && f.key === childCfg.key) continue;   // children rendered as a table below
           let v = rec[colOf(f.key)];
           if (v == null || v === '') continue;
           if (Array.isArray(v)) v = v.map(x => (typeof x === 'string' ? x : JSON.stringify(x))).join(', ');
@@ -7778,6 +7803,19 @@ function buildExportMarkdown(project, baseline, sections, data) {
           lines.push(`**${label}:** ${mdCell(v)}`);
         }
         lines.push('');
+        // Nested child collection as a markdown table.
+        if (childCfg) {
+          const rows = Array.isArray(rec[colOf(childCfg.key)]) ? rec[colOf(childCfg.key)] : [];
+          lines.push(`#### ${childCfg.label} (${rows.length})`); lines.push('');
+          if (rows.length) {
+            lines.push('| ' + childCfg.columns.map(c => c.label).join(' | ') + ' |');
+            lines.push('|' + childCfg.columns.map(() => '---').join('|') + '|');
+            for (const r of rows) lines.push('| ' + childCfg.columns.map(c => mdCell(r[c.key])).join(' | ') + ' |');
+          } else {
+            lines.push(`*No ${childCfg.label.toLowerCase()} recorded.*`);
+          }
+          lines.push('');
+        }
         rtFluentDetails(rec);
       }
     }

@@ -452,6 +452,51 @@ const MIGRATIONS = [
      created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
      updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
    )`,
+  // Wave 3 nested entities (children stored as JSON arrays)
+  `CREATE TABLE IF NOT EXISTS asdlc_service_portal (
+     service_portal_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL, title TEXT, homepage TEXT, theme TEXT, purpose TEXT,
+     pages TEXT NOT NULL DEFAULT '[]',
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_workspace (
+     workspace_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL, purpose TEXT, primary_table TEXT,
+     lists TEXT NOT NULL DEFAULT '[]',
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_variable_set (
+     variable_set_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL, purpose TEXT, applies_to TEXT,
+     variables TEXT NOT NULL DEFAULT '[]',
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_inbound_rest_api (
+     inbound_rest_api_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL, base_path TEXT, auth TEXT, purpose TEXT,
+     resources TEXT NOT NULL DEFAULT '[]',
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
 
   // Tool-call audit log
   `CREATE TABLE IF NOT EXISTS asdlc_tool_call_log (
@@ -512,6 +557,11 @@ const SLUG_INDEXES = [
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_grp_slug   ON asdlc_user_group(project_id, slug)        WHERE slug IS NOT NULL",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_catg_slug  ON asdlc_catalog_category(project_id, slug)  WHERE slug IS NOT NULL",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_cho_slug   ON asdlc_choice_set(project_id, slug)        WHERE slug IS NOT NULL",
+  // Wave 3 nested entities
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_portal_slug ON asdlc_service_portal(project_id, slug)   WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_ws_slug2    ON asdlc_workspace(project_id, slug)        WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_vset_slug   ON asdlc_variable_set(project_id, slug)     WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_api_slug    ON asdlc_inbound_rest_api(project_id, slug) WHERE slug IS NOT NULL",
 ];
 for (const idx of SLUG_INDEXES) {
   try { db.exec(idx); } catch (err) { console.error('[db] slug index failed:', err.message); }
@@ -602,6 +652,10 @@ const SLUG_TABLES = [
   { table: 'asdlc_user_group',        pk: 'user_group_id',     prefix: 'GRP'  },
   { table: 'asdlc_catalog_category',  pk: 'catalog_category_id', prefix: 'CATG' },
   { table: 'asdlc_choice_set',        pk: 'choice_set_id',     prefix: 'CHO'  },
+  { table: 'asdlc_service_portal',    pk: 'service_portal_id', prefix: 'PORTAL' },
+  { table: 'asdlc_workspace',         pk: 'workspace_id',      prefix: 'WS'   },
+  { table: 'asdlc_variable_set',      pk: 'variable_set_id',   prefix: 'VSET' },
+  { table: 'asdlc_inbound_rest_api',  pk: 'inbound_rest_api_id', prefix: 'API' },
 ];
 
 function backfillSlugsFor(tableSpec) {

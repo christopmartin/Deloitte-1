@@ -1385,6 +1385,215 @@ const REGISTRY = [
     parentLinks: [],
   },
 
+  // ── Wave 3 (2026-06-25): four NESTED config-driven Tier-A entities. Each carries a
+  //    `display.children` descriptor — a JSON-array field rendered as a sub-table (same
+  //    pattern as data_model.fields / catalog_item.variables). All SDK-deployable. ─────
+  {
+    entity_type: 'service_portal',
+    order: 25,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_service_portal',
+    pk: 'service_portal_id',
+    slugPrefix: 'PORTAL',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'service-portals', data_key: 'service_portals', label: 'Service Portal', group: 'ux',
+      sdk_deployable: true, source_table: 'sp_portal',
+      id_key: 'service_portal_id', name_key: 'name', rest_path: 'service-portals',
+      fields: [
+        { key: 'name',     label: 'Name',     type: 'text' },
+        { key: 'title',    label: 'Title',    type: 'text' },
+        { key: 'homepage', label: 'Homepage', type: 'text' },
+        { key: 'theme',    label: 'Theme',    type: 'text' },
+        { key: 'purpose',  label: 'Purpose',  type: 'textarea' },
+        { key: 'pages',    label: 'Pages',    type: 'json' },
+      ],
+      children: { key: 'pages', label: 'Pages', columns: [
+        { key: 'title', label: 'Title' }, { key: 'route', label: 'Route' }, { key: 'purpose', label: 'Purpose' },
+      ] },
+    },
+    tool: {
+      name: 'extract_service_portal',
+      description: 'Extract a Service Portal — a public/employee-facing portal, its theme, homepage, and its pages. Maps to asdlc_service_portal (ServiceNow sp_portal).',
+      properties: {
+        name:     { type: 'string', description: 'Internal name of the portal' },
+        title:    { type: 'string', description: 'Display title shown to users' },
+        homepage: { type: 'string', description: 'Landing page / homepage route' },
+        theme:    { type: 'string', description: 'Theme / branding' },
+        purpose:  { type: 'string', description: 'What the portal is for and who uses it' },
+        pages:    { type: 'array', description: 'Pages in the portal', items: { type: 'object', properties: {
+          title:   { type: 'string', description: 'Page title' },
+          route:   { type: 'string', description: 'URL route / id' },
+          purpose: { type: 'string', description: 'What the page shows' },
+        } } },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:     { col: 'name' },
+      title:    { col: 'title' },
+      homepage: { col: 'homepage' },
+      theme:    { col: 'theme' },
+      purpose:  { col: 'purpose' },
+      pages:    { col: 'pages', json: true },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  {
+    entity_type: 'workspace',
+    order: 26,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_workspace',
+    pk: 'workspace_id',
+    slugPrefix: 'WS',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'workspaces', data_key: 'workspaces', label: 'Workspace', group: 'ux',
+      sdk_deployable: true, source_table: 'sys_ux_page_registry',
+      id_key: 'workspace_id', name_key: 'name', rest_path: 'workspaces',
+      fields: [
+        { key: 'name',          label: 'Name',                 type: 'text' },
+        { key: 'purpose',       label: 'Purpose',              type: 'textarea' },
+        { key: 'primary_table', label: 'Primary Table',        type: 'text' },
+        { key: 'lists',         label: 'Lists / Tabs',         type: 'json' },
+      ],
+      children: { key: 'lists', label: 'Lists / Tabs', columns: [
+        { key: 'name', label: 'Name' }, { key: 'table', label: 'Table' }, { key: 'purpose', label: 'Purpose' },
+      ] },
+    },
+    tool: {
+      name: 'extract_workspace',
+      description: 'Extract a Next Experience workspace — an agent/fulfiller working surface, its primary table, and the lists/tabs it presents. Maps to asdlc_workspace (ServiceNow sys_ux_page_registry).',
+      properties: {
+        name:          { type: 'string', description: 'Workspace name' },
+        purpose:       { type: 'string', description: 'Who uses it and for what' },
+        primary_table: { type: 'string', description: 'Main table the workspace operates on' },
+        lists:         { type: 'array', description: 'Lists/tabs shown', items: { type: 'object', properties: {
+          name:    { type: 'string', description: 'List/tab name' },
+          table:   { type: 'string', description: 'Table it shows' },
+          purpose: { type: 'string', description: 'What it is for' },
+        } } },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:          { col: 'name' },
+      purpose:       { col: 'purpose' },
+      primary_table: { col: 'primary_table' },
+      lists:         { col: 'lists', json: true },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  {
+    entity_type: 'variable_set',
+    order: 27,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_variable_set',
+    pk: 'variable_set_id',
+    slugPrefix: 'VSET',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'variable-sets', data_key: 'variable_sets', label: 'Variable Set', group: 'ux',
+      sdk_deployable: true, source_table: 'item_option_new_set',
+      id_key: 'variable_set_id', name_key: 'name', rest_path: 'variable-sets',
+      fields: [
+        { key: 'name',       label: 'Name',                       type: 'text' },
+        { key: 'purpose',    label: 'Purpose',                    type: 'textarea' },
+        { key: 'applies_to', label: 'Used By (catalog items)',    type: 'text' },
+        { key: 'variables',  label: 'Variables',                  type: 'json' },
+      ],
+      children: { key: 'variables', label: 'Variables', columns: [
+        { key: 'label', label: 'Label' }, { key: 'type', label: 'Type' }, { key: 'mandatory', label: 'Mandatory' },
+      ] },
+    },
+    tool: {
+      name: 'extract_variable_set',
+      description: 'Extract a reusable Variable Set — a named group of catalog variables shared across catalog items. Maps to asdlc_variable_set (ServiceNow item_option_new_set).',
+      properties: {
+        name:       { type: 'string', description: 'Variable set name' },
+        purpose:    { type: 'string', description: 'What the set captures and why it is reusable' },
+        applies_to: { type: 'string', description: 'Catalog items / record producers that use this set' },
+        variables:  { type: 'array', description: 'The variables in the set', items: { type: 'object', properties: {
+          label:     { type: 'string', description: 'Variable label' },
+          type:      { type: 'string', description: 'text, choice, reference, date, yes/no, etc.' },
+          mandatory: { type: 'boolean', description: 'Whether it is required' },
+        } } },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:       { col: 'name' },
+      purpose:    { col: 'purpose' },
+      applies_to: { col: 'applies_to' },
+      variables:  { col: 'variables', json: true },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  {
+    entity_type: 'inbound_rest_api',
+    order: 28,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_inbound_rest_api',
+    pk: 'inbound_rest_api_id',
+    slugPrefix: 'API',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'inbound-rest-apis', data_key: 'inbound_rest_apis', label: 'Inbound REST API', group: 'integration',
+      sdk_deployable: true, source_table: 'sys_ws_definition',
+      id_key: 'inbound_rest_api_id', name_key: 'name', rest_path: 'inbound-rest-apis',
+      fields: [
+        { key: 'name',      label: 'Name',                  type: 'text' },
+        { key: 'base_path', label: 'Base Path',             type: 'text' },
+        { key: 'auth',      label: 'Authentication',        type: 'text' },
+        { key: 'purpose',   label: 'Purpose',               type: 'textarea' },
+        { key: 'resources', label: 'Resources',             type: 'json' },
+      ],
+      children: { key: 'resources', label: 'Resources', columns: [
+        { key: 'name', label: 'Name' }, { key: 'method', label: 'Method' }, { key: 'path', label: 'Path' }, { key: 'purpose', label: 'Purpose' },
+      ] },
+    },
+    tool: {
+      name: 'extract_inbound_rest_api',
+      description: 'Extract a Scripted REST API the app EXPOSES — its base path, auth, and resource operations. Maps to asdlc_inbound_rest_api (ServiceNow sys_ws_definition). Distinct from rest_message (an OUTBOUND call the app makes).',
+      properties: {
+        name:      { type: 'string', description: 'API name' },
+        base_path: { type: 'string', description: 'Base API path, e.g. /api/x_app/orders' },
+        auth:      { type: 'string', description: 'How callers authenticate' },
+        purpose:   { type: 'string', description: 'What the API is for and who calls it' },
+        resources: { type: 'array', description: 'Resource operations exposed', items: { type: 'object', properties: {
+          name:    { type: 'string', description: 'Resource/operation name' },
+          method:  { type: 'string', description: 'HTTP method (GET/POST/PUT/PATCH/DELETE)' },
+          path:    { type: 'string', description: 'Relative path' },
+          purpose: { type: 'string', description: 'What it does' },
+        } } },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:      { col: 'name' },
+      base_path: { col: 'base_path' },
+      auth:      { col: 'auth' },
+      purpose:   { col: 'purpose' },
+      resources: { col: 'resources', json: true },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
   // ── Types WITHOUT a dedicated table (v1): extracted + promoted for review, but
   //    not materialized. Add a table + flip materializable to wire them in later.
   {
@@ -1654,6 +1863,8 @@ function designEntityCatalog() {
     name_key:       e.display.name_key || 'name',
     rest_path:      e.display.rest_path || e.display.scope_id,
     fields:         e.display.fields.map(f => ({ key: f.key, label: f.label, type: f.type, options: f.options || undefined })),
+    // Nested child collection (a JSON-array field rendered as a sub-table), if any.
+    children:       e.display.children || null,
   }));
 }
 

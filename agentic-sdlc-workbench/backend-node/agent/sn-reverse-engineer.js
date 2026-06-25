@@ -30,7 +30,7 @@ function getClient() {
   return _client;
 }
 
-const DESIGN_TYPES = ['data_model', 'form_design', 'business_logic', 'catalog_item', 'agent_spec', 'tool', 'workflow', 'use_case', 'dashboard', 'report', 'kpi', 'sla_definition', 'email_notification', 'user_group', 'catalog_category', 'choice_set', 'other'];
+const DESIGN_TYPES = ['data_model', 'form_design', 'business_logic', 'catalog_item', 'agent_spec', 'tool', 'workflow', 'use_case', 'dashboard', 'report', 'kpi', 'sla_definition', 'email_notification', 'user_group', 'catalog_category', 'choice_set', 'service_portal', 'workspace', 'variable_set', 'inbound_rest_api', 'other'];
 
 // ServiceNow source table → Workbench design type. We reverse-engineer by reusing the SAME
 // forward extract_* tool for that type, so a round-tripped design reaches the same Level-1
@@ -46,6 +46,9 @@ const SN_TABLE_TO_TYPE = {
   // Wave 2 flat config entities
   contract_sla: 'sla_definition', sysevent_email_action: 'email_notification',
   sys_user_group: 'user_group', sc_category: 'catalog_category', sys_choice: 'choice_set',
+  // Wave 3 nested entities
+  sp_portal: 'service_portal', sys_ux_page_registry: 'workspace',
+  item_option_new_set: 'variable_set', sys_ws_definition: 'inbound_rest_api',
 };
 // For business_logic, the SN table also tells us the logic_type deterministically.
 const SN_TABLE_TO_LOGIC_TYPE = {
