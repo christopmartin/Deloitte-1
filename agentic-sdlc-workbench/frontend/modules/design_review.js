@@ -438,7 +438,7 @@ export async function render(container) {
     { id: 'user-stories',   label: 'User Stories',    group: 'evidence' },
     { id: 'governance',     label: 'Governance',      group: 'evidence' },
   ];
-  const GROUP_LABELS = { design: 'Design Entities', information: 'Information Layer', logic: 'Business Logic (NL)', evidence: 'Supporting Evidence' };
+  const GROUP_LABELS = { design: 'Design Entities', information: 'Information Layer', logic: 'Business Logic (NL)', process: 'Process & SLAs', configuration: 'Platform Configuration', evidence: 'Supporting Evidence' };
   let activeScope = 'relationships';
 
   // Check for pending drill-down scope override

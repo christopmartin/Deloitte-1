@@ -345,9 +345,9 @@ export async function render(container) {
   // Fail-soft — if the catalog is unavailable the hardcoded groups still render.
   try {
     const catalog = await loadCatalog();
-    if (catalog.length && !SECTION_GROUPS.some(g => g.label === 'Information Layer & NL Rules')) {
+    if (catalog.length && !SECTION_GROUPS.some(g => g.label === 'Additional Tier-A Entities')) {
       SECTION_GROUPS.push({
-        label: 'Information Layer & NL Rules',
+        label: 'Additional Tier-A Entities',
         items: catalog.map(c => ({ id: c.data_key, label: c.label })),
       });
     }

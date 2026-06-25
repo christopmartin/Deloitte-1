@@ -24,6 +24,11 @@
                       only — never write or restate any code. Distinct from business_logic (which is a
                       named code mechanism); use this for the policy a stakeholder states in words.
   nl_validation_rule — a field/data validation stated in PLAIN ENGLISH (e.g. "start date before end date")
+  sla_definition    — a service-level commitment: a response/resolution target with start/stop conditions
+  email_notification — an automated email/notification: when it fires, who gets it, what it says
+  user_group        — a named group of users that grants roles and routes work
+  catalog_category  — a grouping/category that organizes Service Catalog items
+  choice_set        — the set of allowed values (picklist) for a field
   acceptance_criterion — ONE verifiable condition per call; ONLY when the parent Use Case is known
   test_case         — ONE test scenario per call; link requirement_refs to FR/NFR slugs
   guardrail         — any rule, constraint, limit, or boundary on agent behaviour

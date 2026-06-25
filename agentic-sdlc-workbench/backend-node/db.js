@@ -397,6 +397,61 @@ const MIGRATIONS = [
      created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
      updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
    )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_sla_definition (
+     sla_definition_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL,
+     applies_to TEXT, sla_type TEXT, target TEXT, start_condition TEXT, stop_condition TEXT, schedule TEXT,
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_email_notification (
+     email_notification_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL,
+     trigger_event TEXT, recipients TEXT, applies_to TEXT, subject TEXT, body_summary TEXT,
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_user_group (
+     user_group_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL,
+     purpose TEXT, members TEXT, roles_granted TEXT NOT NULL DEFAULT '[]', manager TEXT,
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_catalog_category (
+     catalog_category_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL,
+     description TEXT, catalog TEXT, parent_category TEXT,
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_choice_set (
+     choice_set_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL,
+     applies_to TEXT, choices TEXT NOT NULL DEFAULT '[]', default_value TEXT,
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
 
   // Tool-call audit log
   `CREATE TABLE IF NOT EXISTS asdlc_tool_call_log (
@@ -451,6 +506,12 @@ const SLUG_INDEXES = [
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_rpt_slug  ON asdlc_report(project_id, slug)      WHERE slug IS NOT NULL",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_kpi_slug  ON asdlc_kpi(project_id, slug)         WHERE slug IS NOT NULL",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_nlr_slug  ON asdlc_nl_rule(project_id, slug)     WHERE slug IS NOT NULL",
+  // Wave 2 flat config entities
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_sla_slug   ON asdlc_sla_definition(project_id, slug)    WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_notif_slug ON asdlc_email_notification(project_id, slug) WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_grp_slug   ON asdlc_user_group(project_id, slug)        WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_catg_slug  ON asdlc_catalog_category(project_id, slug)  WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_cho_slug   ON asdlc_choice_set(project_id, slug)        WHERE slug IS NOT NULL",
 ];
 for (const idx of SLUG_INDEXES) {
   try { db.exec(idx); } catch (err) { console.error('[db] slug index failed:', err.message); }
@@ -536,6 +597,11 @@ const SLUG_TABLES = [
   { table: 'asdlc_report',            pk: 'report_id',         prefix: 'RPT'  },
   { table: 'asdlc_kpi',               pk: 'kpi_id',            prefix: 'KPI'  },
   { table: 'asdlc_nl_rule',           pk: 'nl_rule_id',        prefix: 'NLR'  },
+  { table: 'asdlc_sla_definition',    pk: 'sla_definition_id', prefix: 'SLA'  },
+  { table: 'asdlc_email_notification',pk: 'email_notification_id', prefix: 'NOTIF' },
+  { table: 'asdlc_user_group',        pk: 'user_group_id',     prefix: 'GRP'  },
+  { table: 'asdlc_catalog_category',  pk: 'catalog_category_id', prefix: 'CATG' },
+  { table: 'asdlc_choice_set',        pk: 'choice_set_id',     prefix: 'CHO'  },
 ];
 
 function backfillSlugsFor(tableSpec) {
