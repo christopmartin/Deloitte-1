@@ -903,6 +903,697 @@ const REGISTRY = [
     parentLinks: [],
   },
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CONFIG-DRIVEN Tier-A design entities (2026-06-25). Each carries a `display`
+  // block — the single declaration that projects to RT_DESIGN (auto CRUD + audit),
+  // the build spec, the /design-entity-catalog endpoint (frontend renders generically),
+  // and Deployment Guidance. Adding another Tier-A entity = one entry like these + one
+  // table. `display.fields[].type` is constrained to the edit-modal vocabulary
+  // (text|textarea|number|select|json-list|json); json-list ⇄ fieldMap json:true.
+  // ═══════════════════════════════════════════════════════════════════════════
+  {
+    entity_type: 'dashboard',
+    order: 15,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_dashboard',
+    pk: 'dashboard_id',
+    slugPrefix: 'DASH',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'dashboards', data_key: 'dashboards', label: 'Dashboard', group: 'information',
+      sdk_deployable: true, source_table: 'par_dashboard',
+      id_key: 'dashboard_id', name_key: 'name', rest_path: 'dashboards',
+      fields: [
+        { key: 'name',     label: 'Name',                   type: 'text' },
+        { key: 'purpose',  label: 'Purpose',                type: 'textarea' },
+        { key: 'audience', label: 'Audience',               type: 'text' },
+        { key: 'widgets',  label: 'Widgets (one per line)', type: 'json-list' },
+        { key: 'refresh',  label: 'Refresh Cadence',        type: 'select', options: ['realtime','hourly','daily','weekly','monthly'] },
+      ],
+    },
+    tool: {
+      name: 'extract_dashboard',
+      description: 'Extract a dashboard — a curated set of visualizations/widgets for a defined audience. Design intent only (what it shows + for whom), not the implementation. Maps to asdlc_dashboard (ServiceNow par_dashboard).',
+      properties: {
+        name:     { type: 'string', description: 'Name of the dashboard' },
+        purpose:  { type: 'string', description: 'What decisions or questions this dashboard supports' },
+        audience: { type: 'string', description: 'Who uses it — role(s) or team(s)' },
+        widgets:  { type: 'array', items: { type: 'string' }, description: 'The visualizations/widgets shown, one per entry (business description)' },
+        refresh:  { type: 'string', description: 'How fresh the data must be: realtime, hourly, daily, weekly, monthly' },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:     { col: 'name' },
+      purpose:  { col: 'purpose' },
+      audience: { col: 'audience' },
+      widgets:  { col: 'widgets', json: true },
+      refresh:  { col: 'refresh' },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  {
+    entity_type: 'report',
+    order: 16,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_report',
+    pk: 'report_id',
+    slugPrefix: 'RPT',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'reports', data_key: 'reports', label: 'Report', group: 'information',
+      sdk_deployable: false, source_table: 'sys_report',
+      id_key: 'report_id', name_key: 'name', rest_path: 'reports',
+      fields: [
+        { key: 'name',           label: 'Name',                   type: 'text' },
+        { key: 'purpose',        label: 'Purpose',                type: 'textarea' },
+        { key: 'reported_table', label: 'Source Table',           type: 'text' },
+        { key: 'report_columns', label: 'Columns (one per line)', type: 'json-list' },
+        { key: 'filters',        label: 'Filters / Conditions',   type: 'textarea' },
+        { key: 'format',         label: 'Format',                 type: 'select', options: ['list','bar','pie','line','pivot','single_score','calendar','map'] },
+      ],
+    },
+    tool: {
+      name: 'extract_report',
+      description: 'Extract a report — a saved view over a table with chosen columns, filters and a presentation format. Design intent only. Maps to asdlc_report (ServiceNow sys_report). NOT deployable via now-sdk — requires Update Set or manual config.',
+      properties: {
+        name:           { type: 'string', description: 'Name of the report' },
+        purpose:        { type: 'string', description: 'What question this report answers' },
+        reported_table: { type: 'string', description: 'Business label or table name the report runs against' },
+        report_columns: { type: 'array', items: { type: 'string' }, description: 'Columns/fields displayed, one per entry' },
+        filters:        { type: 'string', description: 'Filter conditions in plain English' },
+        format:         { type: 'string', description: 'Presentation: list, bar, pie, line, pivot, single_score, calendar, map' },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:           { col: 'name' },
+      purpose:        { col: 'purpose' },
+      reported_table: { col: 'reported_table' },
+      report_columns: { col: 'report_columns', json: true },
+      filters:        { col: 'filters' },
+      format:         { col: 'format' },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  {
+    entity_type: 'kpi',
+    order: 17,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_kpi',
+    pk: 'kpi_id',
+    slugPrefix: 'KPI',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'kpis', data_key: 'kpis', label: 'KPI', group: 'information',
+      sdk_deployable: false, source_table: 'pa_indicator',
+      id_key: 'kpi_id', name_key: 'name', rest_path: 'kpis',
+      fields: [
+        { key: 'name',        label: 'Name',        type: 'text' },
+        { key: 'metric',      label: 'Metric',      type: 'textarea' },
+        { key: 'unit',        label: 'Unit',        type: 'text' },
+        { key: 'target',      label: 'Target',      type: 'text' },
+        { key: 'direction',   label: 'Direction',   type: 'select', options: ['increase','decrease','maintain'] },
+        { key: 'frequency',   label: 'Frequency',   type: 'select', options: ['realtime','daily','weekly','monthly','quarterly'] },
+        { key: 'data_source', label: 'Data Source', type: 'text' },
+      ],
+    },
+    tool: {
+      name: 'extract_kpi',
+      description: 'Extract a KPI / Performance Analytics indicator — a measurable metric with a target and direction. Design intent only. Maps to asdlc_kpi (ServiceNow pa_indicator). NOT deployable via now-sdk — requires manual config.',
+      properties: {
+        name:        { type: 'string', description: 'Name of the KPI/indicator' },
+        metric:      { type: 'string', description: 'What is being measured, in business terms' },
+        unit:        { type: 'string', description: 'Unit of measure — %, count, hours, GBP, score, etc.' },
+        target:      { type: 'string', description: 'Target value or threshold' },
+        direction:   { type: 'string', description: 'Whether good means increase, decrease, or maintain' },
+        frequency:   { type: 'string', description: 'Measurement cadence: realtime, daily, weekly, monthly, quarterly' },
+        data_source: { type: 'string', description: 'Where the underlying data comes from (table/source)' },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:        { col: 'name' },
+      metric:      { col: 'metric' },
+      unit:        { col: 'unit' },
+      target:      { col: 'target' },
+      direction:   { col: 'direction' },
+      frequency:   { col: 'frequency' },
+      data_source: { col: 'data_source' },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  // ── NL rules (Workbench-native differentiator). Two entity types share ONE table
+  //    (asdlc_nl_rule), discriminated by rule_kind via staticColumns. PO-authored AND
+  //    AI-reverse-engineered from sys_script (status='reverse_engineered'). Plain English
+  //    only — never code. sdk_deployable:false (they drive code, they are not code).
+  {
+    entity_type: 'nl_business_rule',
+    order: 18,
+    materializable: true,
+    summarizable: true,
+    staticColumns: { rule_kind: 'business' },
+    table: 'asdlc_nl_rule',
+    pk: 'nl_rule_id',
+    slugPrefix: 'NLR',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'nl-business-rules', data_key: 'nl_business_rules', label: 'NL Business Rule', group: 'logic',
+      sdk_deployable: false, source_table: null,
+      id_key: 'nl_rule_id', name_key: 'name', rest_path: 'nl-business-rules',
+      fields: [
+        { key: 'name',            label: 'Name',                 type: 'text' },
+        { key: 'rule_text',       label: 'Rule (plain English)', type: 'textarea' },
+        { key: 'linked_table',    label: 'Applies to Table',     type: 'text' },
+        { key: 'linked_workflow', label: 'Related Workflow',     type: 'text' },
+        { key: 'status',          label: 'Status',               type: 'select', options: ['authored','reverse_engineered','needs_review'] },
+        { key: 'rationale',       label: 'Rationale',            type: 'textarea' },
+      ],
+    },
+    tool: {
+      name: 'extract_nl_business_rule',
+      description: 'Extract a business rule stated in PLAIN ENGLISH (not code) — a "when X then Y" policy the system must enforce. Maps to asdlc_nl_rule (rule_kind=business). Capture the intent; do not write or restate any script.',
+      properties: {
+        name:            { type: 'string', description: 'Short name for the rule' },
+        rule_text:       { type: 'string', description: 'The full rule in plain English, e.g. "When an invoice exceeds £10,000 it must be approved by a manager before payment."' },
+        linked_table:    { type: 'string', description: 'Business label or table name the rule applies to, if stated' },
+        linked_workflow: { type: 'string', description: 'Workflow/process this rule governs, if stated' },
+        rationale:       { type: 'string', description: 'Why the rule exists (policy/regulation/business reason)' },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name', 'rule_text'],
+    },
+    fieldMap: {
+      name:            { col: 'name' },
+      rule_text:       { col: 'rule_text' },
+      linked_table:    { col: 'linked_table' },
+      linked_workflow: { col: 'linked_workflow' },
+      status:          { col: 'status' },
+      rationale:       { col: 'rationale' },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  {
+    entity_type: 'nl_validation_rule',
+    order: 19,
+    materializable: true,
+    summarizable: true,
+    staticColumns: { rule_kind: 'validation' },
+    table: 'asdlc_nl_rule',
+    pk: 'nl_rule_id',
+    slugPrefix: 'NLR',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'nl-validation-rules', data_key: 'nl_validation_rules', label: 'NL Validation Rule', group: 'logic',
+      sdk_deployable: false, source_table: null,
+      id_key: 'nl_rule_id', name_key: 'name', rest_path: 'nl-validation-rules',
+      fields: [
+        { key: 'name',         label: 'Name',                       type: 'text' },
+        { key: 'rule_text',    label: 'Validation (plain English)', type: 'textarea' },
+        { key: 'linked_table', label: 'Table',                      type: 'text' },
+        { key: 'linked_field', label: 'Field',                      type: 'text' },
+        { key: 'status',       label: 'Status',                     type: 'select', options: ['authored','reverse_engineered','needs_review'] },
+        { key: 'rationale',    label: 'Rationale',                  type: 'textarea' },
+      ],
+    },
+    tool: {
+      name: 'extract_nl_validation_rule',
+      description: 'Extract a field/data validation rule stated in PLAIN ENGLISH — a constraint on what values are allowed. Maps to asdlc_nl_rule (rule_kind=validation). Capture the intent; never write code.',
+      properties: {
+        name:         { type: 'string', description: 'Short name for the validation' },
+        rule_text:    { type: 'string', description: 'The validation in plain English, e.g. "Start date must be before end date."' },
+        linked_table: { type: 'string', description: 'Business label or table name, if stated' },
+        linked_field: { type: 'string', description: 'Field the validation applies to, if stated' },
+        rationale:    { type: 'string', description: 'Why the validation exists' },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name', 'rule_text'],
+    },
+    fieldMap: {
+      name:         { col: 'name' },
+      rule_text:    { col: 'rule_text' },
+      linked_table: { col: 'linked_table' },
+      linked_field: { col: 'linked_field' },
+      status:       { col: 'status' },
+      rationale:    { col: 'rationale' },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  // ── Wave 2 (2026-06-25): five flat config-driven Tier-A entities. Same engine as
+  //    above — one display block + one table each. Process & SLAs + Platform Config. ─
+  {
+    entity_type: 'sla_definition',
+    order: 20,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_sla_definition',
+    pk: 'sla_definition_id',
+    slugPrefix: 'SLA',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'sla-definitions', data_key: 'sla_definitions', label: 'SLA Definition', group: 'process',
+      sdk_deployable: true, source_table: 'contract_sla',
+      id_key: 'sla_definition_id', name_key: 'name', rest_path: 'sla-definitions',
+      fields: [
+        { key: 'name',            label: 'Name',                       type: 'text' },
+        { key: 'applies_to',      label: 'Applies To (table/records)', type: 'text' },
+        { key: 'sla_type',        label: 'Type',                       type: 'select', options: ['response','resolution','custom'] },
+        { key: 'target',          label: 'Target (e.g. 4 business hours)', type: 'text' },
+        { key: 'start_condition', label: 'Start Condition',            type: 'textarea' },
+        { key: 'stop_condition',  label: 'Stop Condition',             type: 'textarea' },
+        { key: 'schedule',        label: 'Schedule (e.g. 8x5)',        type: 'text' },
+      ],
+    },
+    tool: {
+      name: 'extract_sla_definition',
+      description: 'Extract an SLA definition — a measurable service-level commitment (response/resolution target, start/stop conditions, schedule). Maps to asdlc_sla_definition (ServiceNow contract_sla).',
+      properties: {
+        name:            { type: 'string', description: 'Name of the SLA' },
+        applies_to:      { type: 'string', description: 'Table or records this SLA governs' },
+        sla_type:        { type: 'string', description: 'response, resolution, or custom' },
+        target:          { type: 'string', description: 'The commitment, e.g. "Resolve within 4 business hours"' },
+        start_condition: { type: 'string', description: 'When the SLA clock starts, in plain English' },
+        stop_condition:  { type: 'string', description: 'When the SLA clock stops, in plain English' },
+        schedule:        { type: 'string', description: 'Schedule the SLA runs against, e.g. "8x5 business hours"' },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:            { col: 'name' },
+      applies_to:      { col: 'applies_to' },
+      sla_type:        { col: 'sla_type' },
+      target:          { col: 'target' },
+      start_condition: { col: 'start_condition' },
+      stop_condition:  { col: 'stop_condition' },
+      schedule:        { col: 'schedule' },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  {
+    entity_type: 'email_notification',
+    order: 21,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_email_notification',
+    pk: 'email_notification_id',
+    slugPrefix: 'NOTIF',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'email-notifications', data_key: 'email_notifications', label: 'Email Notification', group: 'configuration',
+      sdk_deployable: true, source_table: 'sysevent_email_action',
+      id_key: 'email_notification_id', name_key: 'name', rest_path: 'email-notifications',
+      fields: [
+        { key: 'name',          label: 'Name',                     type: 'text' },
+        { key: 'trigger_event', label: 'Trigger (when it sends)',  type: 'textarea' },
+        { key: 'recipients',    label: 'Recipients',               type: 'text' },
+        { key: 'applies_to',    label: 'Applies To (table)',       type: 'text' },
+        { key: 'subject',       label: 'Subject',                  type: 'text' },
+        { key: 'body_summary',  label: 'Message (plain English)',  type: 'textarea' },
+      ],
+    },
+    tool: {
+      name: 'extract_email_notification',
+      description: 'Extract an email notification — when it fires, who receives it, and what it says. Maps to asdlc_email_notification (ServiceNow sysevent_email_action).',
+      properties: {
+        name:          { type: 'string', description: 'Name of the notification' },
+        trigger_event: { type: 'string', description: 'Event/condition that triggers it, in plain English' },
+        recipients:    { type: 'string', description: 'Who receives it (roles, users, fields)' },
+        applies_to:    { type: 'string', description: 'Table/record type it relates to' },
+        subject:       { type: 'string', description: 'Email subject line' },
+        body_summary:  { type: 'string', description: 'What the message communicates, in plain English' },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:          { col: 'name' },
+      trigger_event: { col: 'trigger_event' },
+      recipients:    { col: 'recipients' },
+      applies_to:    { col: 'applies_to' },
+      subject:       { col: 'subject' },
+      body_summary:  { col: 'body_summary' },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  {
+    entity_type: 'user_group',
+    order: 22,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_user_group',
+    pk: 'user_group_id',
+    slugPrefix: 'GRP',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'user-groups', data_key: 'user_groups', label: 'User Group', group: 'configuration',
+      sdk_deployable: false, source_table: 'sys_user_group',
+      id_key: 'user_group_id', name_key: 'name', rest_path: 'user-groups',
+      fields: [
+        { key: 'name',          label: 'Name',                          type: 'text' },
+        { key: 'purpose',       label: 'Purpose',                       type: 'textarea' },
+        { key: 'members',       label: 'Members (who belongs)',         type: 'text' },
+        { key: 'roles_granted', label: 'Roles Granted (one per line)',  type: 'json-list' },
+        { key: 'manager',       label: 'Manager',                       type: 'text' },
+      ],
+    },
+    tool: {
+      name: 'extract_user_group',
+      description: 'Extract a user group — a named collection of users that grants roles and routes work. Maps to asdlc_user_group (ServiceNow sys_user_group). NOT now-sdk deployable.',
+      properties: {
+        name:          { type: 'string', description: 'Name of the group' },
+        purpose:       { type: 'string', description: 'What the group is for' },
+        members:       { type: 'string', description: 'Who belongs (roles, teams, named people)' },
+        roles_granted: { type: 'array', items: { type: 'string' }, description: 'Roles this group grants, one per entry' },
+        manager:       { type: 'string', description: 'Group manager/owner' },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:          { col: 'name' },
+      purpose:       { col: 'purpose' },
+      members:       { col: 'members' },
+      roles_granted: { col: 'roles_granted', json: true },
+      manager:       { col: 'manager' },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  {
+    entity_type: 'catalog_category',
+    order: 23,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_catalog_category',
+    pk: 'catalog_category_id',
+    slugPrefix: 'CATG',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'catalog-categories', data_key: 'catalog_categories', label: 'Catalog Category', group: 'configuration',
+      sdk_deployable: false, source_table: 'sc_category',
+      id_key: 'catalog_category_id', name_key: 'name', rest_path: 'catalog-categories',
+      fields: [
+        { key: 'name',            label: 'Name',             type: 'text' },
+        { key: 'description',     label: 'Description',      type: 'textarea' },
+        { key: 'catalog',         label: 'Catalog',          type: 'text' },
+        { key: 'parent_category', label: 'Parent Category',  type: 'text' },
+      ],
+    },
+    tool: {
+      name: 'extract_catalog_category',
+      description: 'Extract a Service Catalog category — how catalog items are grouped for browsing. Maps to asdlc_catalog_category (ServiceNow sc_category). NOT now-sdk deployable.',
+      properties: {
+        name:            { type: 'string', description: 'Category name' },
+        description:     { type: 'string', description: 'What this category contains' },
+        catalog:         { type: 'string', description: 'Which catalog it belongs to' },
+        parent_category: { type: 'string', description: 'Parent category, if nested' },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:            { col: 'name' },
+      description:     { col: 'description' },
+      catalog:         { col: 'catalog' },
+      parent_category: { col: 'parent_category' },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  {
+    entity_type: 'choice_set',
+    order: 24,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_choice_set',
+    pk: 'choice_set_id',
+    slugPrefix: 'CHO',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'choice-sets', data_key: 'choice_sets', label: 'Choice Set', group: 'configuration',
+      sdk_deployable: false, source_table: 'sys_choice',
+      id_key: 'choice_set_id', name_key: 'name', rest_path: 'choice-sets',
+      fields: [
+        { key: 'name',          label: 'Name / Field Label',       type: 'text' },
+        { key: 'applies_to',    label: 'Applies To (table.field)', type: 'text' },
+        { key: 'choices',       label: 'Values (one per line)',    type: 'json-list' },
+        { key: 'default_value', label: 'Default Value',            type: 'text' },
+      ],
+    },
+    tool: {
+      name: 'extract_choice_set',
+      description: 'Extract a choice/picklist value set — the allowed values for a field. Maps to asdlc_choice_set (ServiceNow sys_choice). NOT now-sdk deployable.',
+      properties: {
+        name:          { type: 'string', description: 'Choice set name or the field it applies to' },
+        applies_to:    { type: 'string', description: 'Table.field this choice set governs' },
+        choices:       { type: 'array', items: { type: 'string' }, description: 'Allowed values, one per entry' },
+        default_value: { type: 'string', description: 'Default value, if any' },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:          { col: 'name' },
+      applies_to:    { col: 'applies_to' },
+      choices:       { col: 'choices', json: true },
+      default_value: { col: 'default_value' },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  // ── Wave 3 (2026-06-25): four NESTED config-driven Tier-A entities. Each carries a
+  //    `display.children` descriptor — a JSON-array field rendered as a sub-table (same
+  //    pattern as data_model.fields / catalog_item.variables). All SDK-deployable. ─────
+  {
+    entity_type: 'service_portal',
+    order: 25,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_service_portal',
+    pk: 'service_portal_id',
+    slugPrefix: 'PORTAL',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'service-portals', data_key: 'service_portals', label: 'Service Portal', group: 'ux',
+      sdk_deployable: true, source_table: 'sp_portal',
+      id_key: 'service_portal_id', name_key: 'name', rest_path: 'service-portals',
+      fields: [
+        { key: 'name',     label: 'Name',     type: 'text' },
+        { key: 'title',    label: 'Title',    type: 'text' },
+        { key: 'homepage', label: 'Homepage', type: 'text' },
+        { key: 'theme',    label: 'Theme',    type: 'text' },
+        { key: 'purpose',  label: 'Purpose',  type: 'textarea' },
+        { key: 'pages',    label: 'Pages',    type: 'json' },
+      ],
+      children: { key: 'pages', label: 'Pages', columns: [
+        { key: 'title', label: 'Title' }, { key: 'route', label: 'Route' }, { key: 'purpose', label: 'Purpose' },
+      ] },
+    },
+    tool: {
+      name: 'extract_service_portal',
+      description: 'Extract a Service Portal — a public/employee-facing portal, its theme, homepage, and its pages. Maps to asdlc_service_portal (ServiceNow sp_portal).',
+      properties: {
+        name:     { type: 'string', description: 'Internal name of the portal' },
+        title:    { type: 'string', description: 'Display title shown to users' },
+        homepage: { type: 'string', description: 'Landing page / homepage route' },
+        theme:    { type: 'string', description: 'Theme / branding' },
+        purpose:  { type: 'string', description: 'What the portal is for and who uses it' },
+        pages:    { type: 'array', description: 'Pages in the portal', items: { type: 'object', properties: {
+          title:   { type: 'string', description: 'Page title' },
+          route:   { type: 'string', description: 'URL route / id' },
+          purpose: { type: 'string', description: 'What the page shows' },
+        } } },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:     { col: 'name' },
+      title:    { col: 'title' },
+      homepage: { col: 'homepage' },
+      theme:    { col: 'theme' },
+      purpose:  { col: 'purpose' },
+      pages:    { col: 'pages', json: true },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  {
+    entity_type: 'workspace',
+    order: 26,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_workspace',
+    pk: 'workspace_id',
+    slugPrefix: 'WS',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'workspaces', data_key: 'workspaces', label: 'Workspace', group: 'ux',
+      sdk_deployable: true, source_table: 'sys_ux_page_registry',
+      id_key: 'workspace_id', name_key: 'name', rest_path: 'workspaces',
+      fields: [
+        { key: 'name',          label: 'Name',                 type: 'text' },
+        { key: 'purpose',       label: 'Purpose',              type: 'textarea' },
+        { key: 'primary_table', label: 'Primary Table',        type: 'text' },
+        { key: 'lists',         label: 'Lists / Tabs',         type: 'json' },
+      ],
+      children: { key: 'lists', label: 'Lists / Tabs', columns: [
+        { key: 'name', label: 'Name' }, { key: 'table', label: 'Table' }, { key: 'purpose', label: 'Purpose' },
+      ] },
+    },
+    tool: {
+      name: 'extract_workspace',
+      description: 'Extract a Next Experience workspace — an agent/fulfiller working surface, its primary table, and the lists/tabs it presents. Maps to asdlc_workspace (ServiceNow sys_ux_page_registry).',
+      properties: {
+        name:          { type: 'string', description: 'Workspace name' },
+        purpose:       { type: 'string', description: 'Who uses it and for what' },
+        primary_table: { type: 'string', description: 'Main table the workspace operates on' },
+        lists:         { type: 'array', description: 'Lists/tabs shown', items: { type: 'object', properties: {
+          name:    { type: 'string', description: 'List/tab name' },
+          table:   { type: 'string', description: 'Table it shows' },
+          purpose: { type: 'string', description: 'What it is for' },
+        } } },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:          { col: 'name' },
+      purpose:       { col: 'purpose' },
+      primary_table: { col: 'primary_table' },
+      lists:         { col: 'lists', json: true },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  {
+    entity_type: 'variable_set',
+    order: 27,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_variable_set',
+    pk: 'variable_set_id',
+    slugPrefix: 'VSET',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'variable-sets', data_key: 'variable_sets', label: 'Variable Set', group: 'ux',
+      sdk_deployable: true, source_table: 'item_option_new_set',
+      id_key: 'variable_set_id', name_key: 'name', rest_path: 'variable-sets',
+      fields: [
+        { key: 'name',       label: 'Name',                       type: 'text' },
+        { key: 'purpose',    label: 'Purpose',                    type: 'textarea' },
+        { key: 'applies_to', label: 'Used By (catalog items)',    type: 'text' },
+        { key: 'variables',  label: 'Variables',                  type: 'json' },
+      ],
+      children: { key: 'variables', label: 'Variables', columns: [
+        { key: 'label', label: 'Label' }, { key: 'type', label: 'Type' }, { key: 'mandatory', label: 'Mandatory' },
+      ] },
+    },
+    tool: {
+      name: 'extract_variable_set',
+      description: 'Extract a reusable Variable Set — a named group of catalog variables shared across catalog items. Maps to asdlc_variable_set (ServiceNow item_option_new_set).',
+      properties: {
+        name:       { type: 'string', description: 'Variable set name' },
+        purpose:    { type: 'string', description: 'What the set captures and why it is reusable' },
+        applies_to: { type: 'string', description: 'Catalog items / record producers that use this set' },
+        variables:  { type: 'array', description: 'The variables in the set', items: { type: 'object', properties: {
+          label:     { type: 'string', description: 'Variable label' },
+          type:      { type: 'string', description: 'text, choice, reference, date, yes/no, etc.' },
+          mandatory: { type: 'boolean', description: 'Whether it is required' },
+        } } },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:       { col: 'name' },
+      purpose:    { col: 'purpose' },
+      applies_to: { col: 'applies_to' },
+      variables:  { col: 'variables', json: true },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
+  {
+    entity_type: 'inbound_rest_api',
+    order: 28,
+    materializable: true,
+    summarizable: true,
+    table: 'asdlc_inbound_rest_api',
+    pk: 'inbound_rest_api_id',
+    slugPrefix: 'API',
+    nameKeys: ['name'],
+    display: {
+      scope_id: 'inbound-rest-apis', data_key: 'inbound_rest_apis', label: 'Inbound REST API', group: 'integration',
+      sdk_deployable: true, source_table: 'sys_ws_definition',
+      id_key: 'inbound_rest_api_id', name_key: 'name', rest_path: 'inbound-rest-apis',
+      fields: [
+        { key: 'name',      label: 'Name',                  type: 'text' },
+        { key: 'base_path', label: 'Base Path',             type: 'text' },
+        { key: 'auth',      label: 'Authentication',        type: 'text' },
+        { key: 'purpose',   label: 'Purpose',               type: 'textarea' },
+        { key: 'resources', label: 'Resources',             type: 'json' },
+      ],
+      children: { key: 'resources', label: 'Resources', columns: [
+        { key: 'name', label: 'Name' }, { key: 'method', label: 'Method' }, { key: 'path', label: 'Path' }, { key: 'purpose', label: 'Purpose' },
+      ] },
+    },
+    tool: {
+      name: 'extract_inbound_rest_api',
+      description: 'Extract a Scripted REST API the app EXPOSES — its base path, auth, and resource operations. Maps to asdlc_inbound_rest_api (ServiceNow sys_ws_definition). Distinct from rest_message (an OUTBOUND call the app makes).',
+      properties: {
+        name:      { type: 'string', description: 'API name' },
+        base_path: { type: 'string', description: 'Base API path, e.g. /api/x_app/orders' },
+        auth:      { type: 'string', description: 'How callers authenticate' },
+        purpose:   { type: 'string', description: 'What the API is for and who calls it' },
+        resources: { type: 'array', description: 'Resource operations exposed', items: { type: 'object', properties: {
+          name:    { type: 'string', description: 'Resource/operation name' },
+          method:  { type: 'string', description: 'HTTP method (GET/POST/PUT/PATCH/DELETE)' },
+          path:    { type: 'string', description: 'Relative path' },
+          purpose: { type: 'string', description: 'What it does' },
+        } } },
+        ...PROVENANCE_FIELDS,
+      },
+      required: ['name'],
+    },
+    fieldMap: {
+      name:      { col: 'name' },
+      base_path: { col: 'base_path' },
+      auth:      { col: 'auth' },
+      purpose:   { col: 'purpose' },
+      resources: { col: 'resources', json: true },
+      ...PROVENANCE_FIELDMAP,
+    },
+    parentLinks: [],
+  },
+
   // ── Types WITHOUT a dedicated table (v1): extracted + promoted for review, but
   //    not materialized. Add a table + flip materializable to wire them in later.
   {
@@ -1132,6 +1823,51 @@ function entityName(entityType, data) {
   return parts.length ? parts.join(' :: ') : null;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CONFIG-DRIVEN DESIGN-ENTITY PROJECTIONS (2026-06-25)
+// A registry entry that carries a `display` block is the single declaration that
+// projects to: RT_DESIGN (auto CRUD + audit), the build spec, the frontend catalog,
+// and Deployment Guidance. These helpers derive each projection from that one block.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Registry entries that carry a display block AND have a real table. */
+function entitiesWithDisplay() {
+  return REGISTRY.filter(e => e.display && e.materializable && e.table);
+}
+
+/** Derive an RT_DESIGN spec ({table,pk,key,entity_type,json,allowed,enums}) from a
+ *  display-bearing entry, so server.js auto-generates list/get/PUT + audit CP for it. */
+function rtDesignSpec(e) {
+  const colOf   = (k) => (e.fieldMap[k] && e.fieldMap[k].col) || k;
+  const json    = Object.values(e.fieldMap).filter(m => m.json).map(m => m.col);
+  const allowed = e.display.fields.map(f => colOf(f.key));
+  const enums   = {};
+  for (const f of e.display.fields) {
+    if (f.type === 'select' && Array.isArray(f.options)) enums[colOf(f.key)] = f.options;
+  }
+  return { table: e.table, pk: e.pk, key: e.display.data_key, entity_type: e.entity_type, json, allowed, enums };
+}
+
+/** Frontend-facing catalog projection: everything design_review.js needs to render
+ *  and edit a new entity generically (no kebab/snake guessing — emitted explicitly). */
+function designEntityCatalog() {
+  return entitiesWithDisplay().map(e => ({
+    scope_id:       e.display.scope_id,
+    data_key:       e.display.data_key,
+    entity_type:    e.entity_type,
+    label:          e.display.label,
+    group:          e.display.group || 'design',
+    sdk_deployable: !!e.display.sdk_deployable,
+    source_table:   e.display.source_table || null,
+    id_key:         e.display.id_key || e.pk,
+    name_key:       e.display.name_key || 'name',
+    rest_path:      e.display.rest_path || e.display.scope_id,
+    fields:         e.display.fields.map(f => ({ key: f.key, label: f.label, type: f.type, options: f.options || undefined })),
+    // Nested child collection (a JSON-array field rendered as a sub-table), if any.
+    children:       e.display.children || null,
+  }));
+}
+
 module.exports = {
   REGISTRY,
   COMMON_TOOL_FIELDS,
@@ -1142,4 +1878,7 @@ module.exports = {
   buildApiTools,
   toolToEntity,
   entityName,
+  entitiesWithDisplay,
+  rtDesignSpec,
+  designEntityCatalog,
 };

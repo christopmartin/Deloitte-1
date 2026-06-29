@@ -262,7 +262,7 @@ async function main() {
   const md = await expRes.text();
   assert(expRes.ok, 'build-export responded ok');
   assert(/## ServiceNow Data Model/.test(md), 'build spec has Data Model section');
-  assert(/## ServiceNow Business Logic/.test(md), 'build spec has Business Logic section');
+  assert(/## Implementation Artifacts \(Tier C\)/.test(md), 'build spec has Implementation Artifacts (Tier C) section');
   assert(md.includes('a1b2c3d4flight000000000000000001'), 'build spec carries Level-2 source_sys_id (round-trip identity)');
   assert(/Fluent \(Level-2 construct\)/.test(md), 'build spec embeds Fluent provenance for regeneration');
 

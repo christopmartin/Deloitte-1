@@ -30,7 +30,7 @@ function getClient() {
   return _client;
 }
 
-const DESIGN_TYPES = ['data_model', 'form_design', 'business_logic', 'catalog_item', 'agent_spec', 'tool', 'workflow', 'use_case', 'other'];
+const DESIGN_TYPES = ['data_model', 'form_design', 'business_logic', 'catalog_item', 'agent_spec', 'tool', 'workflow', 'use_case', 'dashboard', 'report', 'kpi', 'sla_definition', 'email_notification', 'user_group', 'catalog_category', 'choice_set', 'service_portal', 'workspace', 'variable_set', 'inbound_rest_api', 'other'];
 
 // ServiceNow source table → Workbench design type. We reverse-engineer by reusing the SAME
 // forward extract_* tool for that type, so a round-tripped design reaches the same Level-1
@@ -41,6 +41,14 @@ const SN_TABLE_TO_TYPE = {
   sc_cat_item: 'catalog_item', sys_hub_flow: 'workflow',
   sys_script: 'business_logic', sys_script_client: 'business_logic',
   sys_script_include: 'business_logic', sys_ui_action: 'business_logic',
+  // Config-driven Information Layer entities (reverse-engineer via the same forward extract_* tool)
+  par_dashboard: 'dashboard', sys_report: 'report', pa_indicator: 'kpi',
+  // Wave 2 flat config entities
+  contract_sla: 'sla_definition', sysevent_email_action: 'email_notification',
+  sys_user_group: 'user_group', sc_category: 'catalog_category', sys_choice: 'choice_set',
+  // Wave 3 nested entities
+  sp_portal: 'service_portal', sys_ux_page_registry: 'workspace',
+  item_option_new_set: 'variable_set', sys_ws_definition: 'inbound_rest_api',
 };
 // For business_logic, the SN table also tells us the logic_type deterministically.
 const SN_TABLE_TO_LOGIC_TYPE = {
@@ -263,4 +271,93 @@ async function reverseEngineer(artifacts, ctx = {}) {
   return results;
 }
 
-module.exports = { reverseEngineer, reverseEngineerOne, buildInferred, stubInference, SN_TABLE_TO_TYPE, SN_TABLE_TO_LOGIC_TYPE, SYSTEM_PROMPT, EMIT_TOOL, DESIGN_TYPES };
+// ─────────────────────────────────────────────────────────────────────────────
+// NL-rule reverse engineering (Workbench differentiator)
+// Reads an implementation script (sys_script business rule, or similar) and emits a
+// PLAIN-ENGLISH candidate rule for PO review — never code. Reuses the same client /
+// model / wiki / logging machinery; a focused tool + prompt are the only differences.
+// ─────────────────────────────────────────────────────────────────────────────
+const NL_RULE_TOOL = {
+  name: 'emit_nl_rule',
+  description: 'Emit ONE plain-English rule that captures the business intent of the implementation. Never restate code.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      name:         { type: 'string', description: 'Short descriptive name for the rule' },
+      rule_text:    { type: 'string', description: 'The rule in plain English, e.g. "When an invoice exceeds £10,000 it must be approved by a manager before payment." No code, no field/API names unless essential.' },
+      linked_table: { type: 'string', description: 'Business label or table the rule applies to, if evident' },
+      linked_field: { type: 'string', description: 'Field the rule concerns, for a validation rule, if evident' },
+      rationale:    { type: 'string', description: 'Why this rule exists / what the code is enforcing' },
+      confidence:   { type: 'number', minimum: 0, maximum: 1, description: 'Honest confidence (0–1) that this captures the true intent' },
+    },
+    required: ['name', 'rule_text', 'confidence'],
+  },
+};
+
+const NL_RULE_SYSTEM_PROMPT = [
+  'You are reverse-engineering a ServiceNow implementation artifact (typically a business rule script)',
+  'into ONE plain-English business rule a non-technical product owner would recognise and could have',
+  'authored before any code existed. Read the script/config and state the POLICY it enforces — the',
+  '"when X then Y" intent — NOT a line-by-line summary and NOT any code. If the script only touches',
+  'system/audit plumbing (timestamps, logging, sys_updated) with no business policy, say so in rationale',
+  'and set a low confidence. Call emit_nl_rule exactly once. Do not write a prose reply.',
+].join('\n');
+
+/** Reverse-engineer ONE script artifact → a candidate NL rule object (or a stub offline).
+ *  @param artifact { source_table, source_sys_id, name, salient } — salient should carry the script + context.
+ *  @returns { source_sys_id, rule: { name, rule_text, linked_table?, linked_field?, rationale?, confidence }, usage?, stub? } */
+async function reverseEngineerNlRule(artifact, ctx = {}) {
+  const client = getClient();
+  if (!client) {
+    return {
+      source_sys_id: artifact.source_sys_id,
+      stub: true,
+      rule: {
+        name: `[stub] ${artifact.name || 'rule'}`,
+        rule_text: `[stub — no ANTHROPIC_API_KEY] Intent inferred from ${artifact.source_table || 'script'} "${artifact.name || ''}".`,
+        rationale: '[stub] deterministic offline inference',
+        confidence: 0.5,
+      },
+    };
+  }
+
+  const model = aiConfig.resolveModel('reverse_engineer');
+  const thinkCfg = aiConfig.getThinkingConfig('reverse_engineer');
+  const maxTokens = Math.max(aiConfig.getMaxTokens(), 12000);
+
+  const guidance = aiConfig.getActiveBestPractices(['business_logic'], aiConfig.getProjectPlatform(ctx.projectId));
+  const systemBlocks = [{ type: 'text', text: NL_RULE_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }];
+  if (guidance.length) {
+    systemBlocks.push({ type: 'text', text:
+      'House rules / platform guidance (FOLLOW THESE):\n' +
+      guidance.map(b => `  - ${b.title ? b.title + ': ' : ''}${b.rule_text}`).join('\n') });
+  }
+
+  const req = {
+    model,
+    max_tokens: maxTokens,
+    system: withWiki(systemBlocks),
+    tools: [NL_RULE_TOOL],
+    tool_choice: thinkCfg ? { type: 'auto' } : { type: 'tool', name: NL_RULE_TOOL.name },
+    messages: [{ role: 'user', content: userMessageFor(artifact) }],
+  };
+  if (thinkCfg) { req.thinking = thinkCfg.thinking; if (thinkCfg.outputConfig) req.output_config = thinkCfg.outputConfig; }
+
+  const resp = await client.messages.create(req);
+  aiConfig.logUsage({ projectId: ctx.projectId, source: 'sn_reverse_engineer_nl_rule', refId: artifact.source_sys_id, model, usage: resp.usage });
+  aiConfig.logToolCalls('sn_reverse_engineer_nl_rule', (resp.content || []).filter(b => b.type === 'tool_use'));
+
+  const tu = (resp.content || []).find(b => b.type === 'tool_use' && b.name === NL_RULE_TOOL.name);
+  const input = tu ? tu.input : parseFallback(resp);
+  const rule = {
+    name: input.name || artifact.name || '(unnamed rule)',
+    rule_text: input.rule_text || '',
+    linked_table: input.linked_table || '',
+    linked_field: input.linked_field || '',
+    rationale: input.rationale || '',
+    confidence: typeof input.confidence === 'number' ? input.confidence : 0.6,
+  };
+  return { source_sys_id: artifact.source_sys_id, rule, usage: resp.usage, model };
+}
+
+module.exports = { reverseEngineer, reverseEngineerOne, reverseEngineerNlRule, buildInferred, stubInference, SN_TABLE_TO_TYPE, SN_TABLE_TO_LOGIC_TYPE, SYSTEM_PROMPT, EMIT_TOOL, NL_RULE_TOOL, DESIGN_TYPES };

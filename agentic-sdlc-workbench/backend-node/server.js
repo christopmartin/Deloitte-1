@@ -3,6 +3,14 @@
 
 require('dotenv').config();          // load .env before anything else
 
+// Corporate SSL inspection presents a self-signed cert chain Node.js rejects.
+// SN_INSECURE_TLS=true disables verification for all outbound HTTPS from this process.
+// Proper fix: set NODE_EXTRA_CA_CERTS=/path/to/corp-root-ca.pem instead.
+if (process.env.SN_INSECURE_TLS === 'true') {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+  console.warn('[tls] SN_INSECURE_TLS=true — TLS certificate verification disabled. Set NODE_EXTRA_CA_CERTS to your corporate root CA PEM for a proper fix.');
+}
+
 const path = require('path');
 const fs = require('fs');
 const express = require('express');
@@ -398,6 +406,7 @@ app.get('/api/v1/servicenow/resolve-project', (req, res) => {
 // Resolve credentials (body → project link → env), insert a `running` row, then run
 // the read-only discovery off the request path (202 + poll), mirroring ingest/process.
 const snAssess = require('./agent/sn-assess');
+const snCatalog = require('./agent/sn-instance-catalog');
 
 app.post('/api/v1/projects/:id/servicenow/assess', (req, res) => {
   const uid = userId(req);
@@ -457,6 +466,93 @@ app.get('/api/v1/projects/:id/servicenow/assessments/:aid', (req, res) => {
   let report = null;
   try { report = row.report_json ? JSON.parse(row.report_json) : null; } catch { /* leave null */ }
   res.json({ ...row, report });
+});
+
+// ── ServiceNow whole-instance CATALOG (read-only awareness sweep) ─────────────
+// Cross-scope, identity-only sweep → collision awareness for the deployer + cross-scope
+// net-new for governance. Mirrors the assess 202 async pattern; creds resolve body →
+// project → env. Complements deep-capture (one scope, full payloads); never writes.
+app.post('/api/v1/projects/:id/servicenow/catalog', (req, res) => {
+  const uid = userId(req);
+  const project = db.prepare("SELECT * FROM asdlc_project WHERE project_id=?").get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const body = req.body || {};
+  const instance = body.instance || project.servicenow_instance || process.env.SN_INSTANCE;
+  const user = body.user || project.sn_user || process.env.SN_USER;
+  const pw   = body.pw   || decryptField(project.sn_password_enc) || process.env.SN_PASSWORD;
+  if (!instance || !user || !pw) {
+    return res.status(400).json({ error: 'ServiceNow credentials required (set them on the Application, or SN_INSTANCE/SN_USER/SN_PASSWORD env).' });
+  }
+
+  const crid = generateId();
+  db.prepare(`
+    INSERT INTO asdlc_sn_catalog_run (catalog_run_id, project_id, instance_url, capturing_user, status, created_by, created_at, updated_at)
+    VALUES (?,?,?,?,'running',?,datetime('now'),datetime('now'))
+  `).run(crid, project.project_id, String(instance).replace(/\/$/, ''), user, uid);
+  res.status(202).json({ catalog_run_id: crid, status: 'running' });
+
+  // Fire-and-forget; persist result (or error) back onto the row.
+  (async () => {
+    try {
+      const catalog = await snCatalog.captureInstanceCatalog({ instance, user, pw });
+      const summary = snCatalog.summarizeCatalog(catalog);
+      db.prepare("UPDATE asdlc_sn_catalog_run SET status='complete', catalog_json=?, summary_json=?, capturing_user=?, updated_at=datetime('now') WHERE catalog_run_id=?")
+        .run(JSON.stringify(catalog), JSON.stringify(summary), catalog.capturing_user || user, crid);
+    } catch (err) {
+      console.error('[sn-catalog] failed:', err.message);
+      db.prepare("UPDATE asdlc_sn_catalog_run SET status='failed', error=?, updated_at=datetime('now') WHERE catalog_run_id=?")
+        .run(String(err.message).slice(0, 1000), crid);
+    }
+  })();
+});
+
+// Latest catalog run for a project. summary_json always; full catalog_json only on
+// ?full=1 (snapshots run ~1-5 MB — never ship them by default).
+app.get('/api/v1/projects/:id/servicenow/catalog/latest', (req, res) => {
+  const row = db.prepare(`
+    SELECT catalog_run_id, project_id, instance_url, capturing_user, status, summary_json, error, created_by, created_at, updated_at
+    FROM asdlc_sn_catalog_run WHERE project_id=? ORDER BY created_at DESC LIMIT 1
+  `).get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'No catalog run for this project' });
+  let summary = null;
+  try { summary = row.summary_json ? JSON.parse(row.summary_json) : null; } catch { /* leave null */ }
+  const out = { ...row, summary };
+  delete out.summary_json;
+  // Back-fill warnings for runs stored before warnings were added to summary_json.
+  if (summary && !summary.warnings) {
+    try {
+      const catRow = db.prepare("SELECT catalog_json FROM asdlc_sn_catalog_run WHERE catalog_run_id=?").get(row.catalog_run_id);
+      if (catRow && catRow.catalog_json) {
+        const warnMatch = catRow.catalog_json.match(/"warnings"\s*:\s*(\[[^\]]*\])/);
+        summary.warnings = warnMatch ? JSON.parse(warnMatch[1]) : [];
+      }
+    } catch { summary.warnings = []; }
+  }
+  if (req.query.full === '1') {
+    const full = db.prepare("SELECT catalog_json FROM asdlc_sn_catalog_run WHERE catalog_run_id=?").get(row.catalog_run_id);
+    try { out.catalog = full && full.catalog_json ? JSON.parse(full.catalog_json) : null; } catch { out.catalog = null; }
+  }
+  res.json(out);
+});
+
+// Existence-drift governance view from the latest COMPLETE catalog: vanished (advisory),
+// moved (scope changed), untracked (net-new on the instance → inbound HITL candidates).
+app.get('/api/v1/projects/:id/servicenow/catalog/drift', (req, res) => {
+  const project = db.prepare("SELECT project_id, servicenow_scope FROM asdlc_project WHERE project_id=?").get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const row = db.prepare(
+    "SELECT catalog_run_id, catalog_json, capturing_user FROM asdlc_sn_catalog_run WHERE project_id=? AND status='complete' ORDER BY created_at DESC LIMIT 1"
+  ).get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'No completed catalog run — run a catalog sweep first.' });
+  let catalog = null;
+  try { catalog = JSON.parse(row.catalog_json); } catch { /* unreadable */ }
+  if (!catalog) return res.status(500).json({ error: 'Catalog snapshot is unreadable.' });
+  const drift = snCatalog.detectExistenceDrift(project.project_id, catalog, { projectScope: project.servicenow_scope });
+  res.json({
+    catalog_run_id: row.catalog_run_id, captured_at: catalog.captured_at, capturing_user: row.capturing_user,
+    caveat: 'Catalog reflects only what the capturing account can read (ServiceNow ACL-filters rows silently). "vanished" is advisory — never a delete.',
+    ...drift,
+  });
 });
 
 // ── ServiceNow round-trip: sync apply-mode (system setting) ──────────────────
@@ -5064,6 +5160,14 @@ const RT_DESIGN = {
                       enums: { auth_type: ['noAuthentication','basic','oauth2'], alias_type: ['connection','credential'], connection_type: ['httpConnection','jdbcConnection','basicConnection','jmsConnection'] } },
 };
 
+// Config-driven entities: merge RT_DESIGN specs derived from registry `display`
+// blocks (Dashboards/Reports/KPIs/NL rules). Hand-written entries above always win —
+// the guard means a future hand-tuned spec is never clobbered by the derived one.
+for (const e of registry.entitiesWithDisplay()) {
+  if (RT_DESIGN[e.display.scope_id]) continue;
+  RT_DESIGN[e.display.scope_id] = registry.rtDesignSpec(e);
+}
+
 function rtParseRow(row, jsonCols) {
   if (!row) return row;
   const out = { ...row };
@@ -5145,7 +5249,159 @@ for (const [scope, spec] of Object.entries(RT_DESIGN)) {
     }
     res.json({ ...rtParseRow(after, spec.json), _cp: cpResult });
   });
+
+  // Single POST — create a new row. Only for config-driven (display) entities so the
+  // hardcoded FK-parented RT types keep their ingest-only create path. Enables
+  // PO-authoring (e.g. an NL rule, a dashboard) directly in the UI, with an audit CP.
+  const regEntry = registry.byEntityType[spec.entity_type];
+  const isDisplayEntity = regEntry && regEntry.display && regEntry.display.scope_id === scope;
+  if (isDisplayEntity) {
+    app.post(`/api/v1/projects/:id/${scope}`, (req, res) => {
+      const uid = userId(req);
+      const project = db.prepare('SELECT project_id FROM asdlc_project WHERE project_id = ?').get(req.params.id);
+      if (!project) return res.status(404).json({ error: 'Project not found' });
+      const name = (req.body && (req.body.name || req.body.title) || '').trim();
+      if (!name) return res.status(400).json({ error: 'name is required' });
+
+      const insert = {};
+      spec.allowed.forEach(f => { if (req.body[f] !== undefined) insert[f] = req.body[f]; });
+      insert.name = name;
+      if (spec.enums) {
+        try {
+          for (const [col, vals] of Object.entries(spec.enums)) {
+            if (insert[col] !== undefined && insert[col] !== '' && insert[col] != null) validateEnum(insert[col], vals, col);
+          }
+        } catch (err) { return res.status(400).json({ error: err.message }); }
+      }
+      for (const c of spec.json) if (c in insert && typeof insert[c] !== 'string') insert[c] = JSON.stringify(insert[c]);
+      Object.assign(insert, regEntry.staticColumns || {});   // e.g. NL rules rule_kind
+
+      const id   = generateId();
+      const slug = regEntry.slugPrefix ? nextSlug(spec.table, regEntry.slugPrefix, req.params.id) : null;
+      const cols = [spec.pk, 'project_id', ...(slug ? ['slug'] : []), ...Object.keys(insert), 'created_by', 'updated_by'];
+      const vals = [id, req.params.id, ...(slug ? [slug] : []), ...Object.keys(insert).map(k => insert[k]), uid, uid];
+      db.prepare(`INSERT INTO ${spec.table} (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).run(...vals);
+
+      const after = db.prepare(`SELECT * FROM ${spec.table} WHERE ${spec.pk} = ?`).get(id);
+      auditLog(spec.table, id, 'CREATE', null, after, uid);
+      const cpResult = createAutoApprovedCP(req.params.id, spec.entity_type, id, name,
+        [{ field: 'name', old: null, new: name }], uid);
+      res.json({ ...rtParseRow(after, spec.json), _cp: cpResult });
+    });
+  }
 }
+
+// ─── Design-entity catalog (config-driven engine) ────────────────────────────
+// Single source of truth for the frontend: the registry `display` blocks projected
+// for generic rendering/editing. Global (identical per project) — the SPA caches it
+// once and merges into its hardcoded tabs (hardcoded wins on key collision).
+app.get('/api/v1/design-entity-catalog', (_req, res) => {
+  res.json({ entities: registry.designEntityCatalog() });
+});
+
+// ─── NL rules: AI reverse-engineering + gap-prompting ────────────────────────
+// reverse-engineer: read a captured implementation script (asdlc_sn_artifact whose
+// source_table is sys_script*) and emit a PLAIN-ENGLISH candidate rule for PO review.
+app.post('/api/v1/projects/:id/nl-rules/reverse-engineer', async (req, res) => {
+  const uid = userId(req);
+  const projectId = req.params.id;
+  const project = db.prepare('SELECT project_id FROM asdlc_project WHERE project_id = ?').get(projectId);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  const { artifact_id, rule_kind } = req.body || {};
+  if (!artifact_id) return res.status(400).json({ error: 'artifact_id is required (an asdlc_sn_artifact id for a captured script)' });
+  const kind = rule_kind === 'validation' ? 'validation' : 'business';
+
+  const art = db.prepare('SELECT * FROM asdlc_sn_artifact WHERE sn_artifact_id = ? AND project_id = ?').get(artifact_id, projectId);
+  if (!art) return res.status(404).json({ error: 'Source artifact not found in this project' });
+
+  // Build an artifact-like object the reverse-engineer expects (salient carries the script + context).
+  const payload = parseJson(art.payload) || {};
+  const salient = {};
+  for (const k of ['name', 'collection', 'table', 'when', 'condition', 'script', 'description']) {
+    if (payload[k] != null && payload[k] !== '') salient[k] = payload[k];
+  }
+  const reArtifact = {
+    source_table: art.source_table || 'sys_script',
+    source_sys_id: art.source_sys_id || null,
+    source_scope: art.source_scope || null,
+    name: art.name,
+    salient,
+  };
+
+  let result;
+  try {
+    const { reverseEngineerNlRule } = require('./agent/sn-reverse-engineer');
+    result = await reverseEngineerNlRule(reArtifact, { projectId });
+  } catch (err) {
+    return res.status(502).json({ error: `Reverse-engineering failed: ${err.message}` });
+  }
+  const rule = result.rule || {};
+
+  const id   = generateId();
+  const slug = nextSlug('asdlc_nl_rule', 'NLR', projectId);
+  db.prepare(`INSERT INTO asdlc_nl_rule
+      (nl_rule_id, project_id, slug, rule_kind, name, rule_text, linked_table, linked_field,
+       status, rationale, confidence, source_system, source_sys_id, source_table, source_scope,
+       created_by, updated_by)
+      VALUES (?,?,?,?,?,?,?,?, 'reverse_engineered', ?,?, 'workbench', ?,?,?, ?,?)`)
+    .run(id, projectId, slug, kind, rule.name || art.name || '(unnamed rule)', rule.rule_text || '',
+      rule.linked_table || null, rule.linked_field || null, rule.rationale || null,
+      typeof rule.confidence === 'number' ? rule.confidence : null,
+      reArtifact.source_sys_id, reArtifact.source_table, reArtifact.source_scope, uid, uid);
+
+  const after = db.prepare('SELECT * FROM asdlc_nl_rule WHERE nl_rule_id = ?').get(id);
+  auditLog('asdlc_nl_rule', id, 'CREATE', null, after, uid);
+  const entityType = kind === 'validation' ? 'nl_validation_rule' : 'nl_business_rule';
+  const cpResult = createAutoApprovedCP(projectId, entityType, id, after.name,
+    [{ field: 'rule_text', old: null, new: after.rule_text }], uid);
+
+  res.json({ ...after, _cp: cpResult, _stub: !!result.stub, _confidence: rule.confidence });
+});
+
+// gaps: design entities (data models, workflows) with no documented NL rule, plus
+// captured scripts not yet reverse-engineered — drives the "add a rule" prompts.
+app.get('/api/v1/projects/:id/nl-rules/gaps', (req, res) => {
+  const projectId = req.params.id;
+  const project = db.prepare('SELECT project_id FROM asdlc_project WHERE project_id = ?').get(projectId);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  const rules = db.prepare("SELECT linked_table, linked_workflow, source_sys_id FROM asdlc_nl_rule WHERE project_id = ? AND lifecycle_status = 'active'").all(projectId);
+  const linkedTables    = new Set(rules.map(r => (r.linked_table || '').trim().toLowerCase()).filter(Boolean));
+  const linkedWorkflows = new Set(rules.map(r => (r.linked_workflow || '').trim().toLowerCase()).filter(Boolean));
+  const reSysIds        = new Set(rules.map(r => r.source_sys_id).filter(Boolean));
+
+  const dataModels = db.prepare("SELECT data_model_id, slug, name, physical_name FROM asdlc_data_model WHERE project_id = ? AND lifecycle_status = 'active' ORDER BY slug").all(projectId);
+  const tables_without_rules = dataModels.filter(dm => {
+    const n = (dm.name || '').trim().toLowerCase(), p = (dm.physical_name || '').trim().toLowerCase();
+    return !(linkedTables.has(n) || (p && linkedTables.has(p)));
+  }).map(dm => ({ data_model_id: dm.data_model_id, slug: dm.slug, name: dm.name }));
+
+  const workflows = db.prepare("SELECT workflow_id, slug, name FROM asdlc_workflow WHERE project_id = ? AND lifecycle_status = 'active' ORDER BY slug").all(projectId);
+  const workflows_without_rules = workflows.filter(wf => !linkedWorkflows.has((wf.name || '').trim().toLowerCase()))
+    .map(wf => ({ workflow_id: wf.workflow_id, slug: wf.slug, name: wf.name }));
+
+  // Captured implementation scripts (Tier-C) not yet turned into an NL rule.
+  let scripts_not_reverse_engineered = [];
+  try {
+    const scripts = db.prepare(
+      "SELECT sn_artifact_id, name, source_sys_id, source_table FROM asdlc_sn_artifact " +
+      "WHERE project_id = ? AND source_table IN ('sys_script','sys_script_include','sys_ui_action') ORDER BY name"
+    ).all(projectId);
+    scripts_not_reverse_engineered = scripts.filter(s => !s.source_sys_id || !reSysIds.has(s.source_sys_id))
+      .map(s => ({ sn_artifact_id: s.sn_artifact_id, name: s.name, source_table: s.source_table }));
+  } catch { /* substrate table may be empty / absent — non-fatal */ }
+
+  res.json({
+    generated_at: new Date().toISOString(),
+    tables_without_rules, workflows_without_rules, scripts_not_reverse_engineered,
+    summary: {
+      tables_without_rules: tables_without_rules.length,
+      workflows_without_rules: workflows_without_rules.length,
+      scripts_not_reverse_engineered: scripts_not_reverse_engineered.length,
+    },
+  });
+});
 
 // ─── Generic ServiceNow artifact read/edit API (Phase 4b) ────────────────────
 // The polymorphic asdlc_sn_artifact substrate, mirroring the RT_DESIGN pattern.
@@ -5487,6 +5743,28 @@ app.get('/api/v1/projects/:id/design-report/relationships', (req, res) => {
   const use_case_map = {};
   ucRows.forEach(uc => { use_case_map[uc.use_case_id] = { slug: uc.slug, title: uc.title }; });
 
+  // Config-driven Tier-A entities for the Miller "Tier-A Design" section. Lightweight rows
+  // (id, slug, name + a 1-line secondary) grouped by display.group so the view self-populates.
+  const tier_a_entities = {};
+  for (const e of registry.entitiesWithDisplay()) {
+    let rows = [];
+    try {
+      rows = db.prepare(`SELECT * FROM ${e.table} WHERE project_id = ? AND lifecycle_status = 'active' ORDER BY slug`).all(req.params.id);
+    } catch { rows = []; }
+    if (!rows.length) continue;
+    // secondary = the first non-name flat field with a value (e.g. purpose, target, metric).
+    const secondaryKeys = e.display.fields.filter(f => f.key !== 'name' && f.type !== 'json' && f.type !== 'json-list').map(f => f.key);
+    tier_a_entities[e.display.data_key] = {
+      label: e.display.label, scope_id: e.display.scope_id, group: e.display.group || 'design',
+      id_key: e.pk,
+      rows: rows.map(r => {
+        let secondary = '';
+        for (const k of secondaryKeys) { if (r[k]) { secondary = String(r[k]); break; } }
+        return { id: r[e.pk], slug: r.slug, name: r.name, secondary };
+      }),
+    };
+  }
+
   res.json({
     project: {
       project_id: project.project_id, project_name: project.project_name,
@@ -5505,6 +5783,7 @@ app.get('/api/v1/projects/:id/design-report/relationships', (req, res) => {
     functional_reqs: frs,
     nonfunctional_reqs: nfrs,
     use_case_map,
+    tier_a_entities,
   });
 });
 
@@ -5527,7 +5806,9 @@ app.get('/api/v1/projects/:id/build-export', async (req, res) => {
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
   const allSections = ['use_cases','workflows','agents','tools','guardrails','data_sources','test_scenarios','user_stories','governance','relationships','cost_summary',
-    'data_models','form_designs','business_logic','catalog_items','integrations','sn_generic_artifacts'];
+    'data_models','form_designs','business_logic','catalog_items','integrations','sn_generic_artifacts',
+    // config-driven Tier-A entities (Information Layer + NL rules) — derived from registry display blocks
+    ...registry.entitiesWithDisplay().map(e => e.display.data_key)];
   const sectionsParam = req.query.sections || 'all';
   const sections = sectionsParam === 'all' ? allSections : sectionsParam.split(',').map(s => s.trim()).filter(s => allSections.includes(s));
 
@@ -5732,6 +6013,22 @@ app.get('/api/v1/projects/:id/build-export', async (req, res) => {
     }
   }
 
+  // ── Config-driven Tier-A entities (Information Layer + NL rules) ─────────────
+  // Gathered generically from registry display blocks; rendered by the generic
+  // section renderer in buildExportMarkdown (bespoke RT sections above untouched).
+  for (const e of registry.entitiesWithDisplay()) {
+    const k = e.display.data_key;
+    if (!sections.includes(k)) continue;
+    const jsonCols = Object.values(e.fieldMap).filter(m => m.json).map(m => m.col);
+    data[k] = db.prepare(
+      `SELECT * FROM ${e.table} WHERE project_id = ? AND lifecycle_status = 'active' ORDER BY slug`
+    ).all(req.params.id).map(r => {
+      const o = { ...r };
+      for (const c of jsonCols) o[c] = parseJson(o[c]);
+      return o;
+    });
+  }
+
   // ── ServiceNow Generic Artifacts (Phase 1-3 substrate) ──────────────────────
   if (sections.includes('sn_generic_artifacts')) {
     try {
@@ -5903,6 +6200,10 @@ app.get('/api/v1/projects/:id/build-export', async (req, res) => {
     }
   }
 
+  // Instance Context: collision awareness for the names this spec would CREATE,
+  // computed against the latest instance catalog (read-only; {available:false} if none).
+  data._instance_context = loadInstanceContext(project.project_id, deployTargetsFromData(data, project.servicenow_scope));
+
   // Build the deterministic markdown (a faithful DB dump — never altered by AI)
   let md = buildExportMarkdown(project, baseline, sections, data);
 
@@ -5989,6 +6290,12 @@ app.get('/api/v1/projects/:id/servicenow/delta-info', (req, res) => {
   ).all(...cpIds);
 
   let updateCount = 0, createCount = 0;
+  const createTargets = [];   // R1c: CREATE items → check for catalog name collisions
+  const mapForCollision = (entity_type, row) => {
+    const m = snCatalog.DESIGN_SURFACE_MAP[entity_type]; if (!m || !row) return;
+    const name = row[m.nameKey || 'name'] || row.name;
+    if (name) createTargets.push({ kind: entity_type, name, slug: row.slug || null, surfaces: m.surfaces, scope: project.servicenow_scope || null, instanceUnique: m.instanceUnique });
+  };
   for (const item of items) {
     // Generic artifacts (Phase 3): live in asdlc_sn_artifact, not the 22-type registry.
     if (item.entity_type === 'sn_artifact') {
@@ -6001,10 +6308,23 @@ app.get('/api/v1/projects/:id/servicenow/delta-info', (req, res) => {
     const ent = registry.byEntityType[item.entity_type];
     if (!ent || !ent.materializable) continue;
     let row = null;
-    try { row = db.prepare(`SELECT source_sys_id FROM ${ent.table} WHERE ${ent.pk} = ?`).get(item.entity_id); } catch { /* ignore */ }
+    try { row = db.prepare(`SELECT * FROM ${ent.table} WHERE ${ent.pk} = ?`).get(item.entity_id); } catch { /* ignore */ }
     if (!row) continue;
     if (row.source_sys_id) updateCount++;
-    else createCount++;
+    else { createCount++; mapForCollision(item.entity_type, row); }
+  }
+
+  // R1c: a CREATE whose name already exists on the instance is likely a record deployed
+  // last cycle but never registered (source_sys_id still NULL) — re-export will DUPLICATE
+  // it. Surface a pre-export warning from the latest catalog (best-effort; catalog optional).
+  let collisionWarnings = [];
+  if (createTargets.length) {
+    try {
+      const cr = db.prepare("SELECT catalog_json FROM asdlc_sn_catalog_run WHERE project_id=? AND status='complete' ORDER BY created_at DESC LIMIT 1").get(req.params.id);
+      if (cr && cr.catalog_json) {
+        collisionWarnings = snCatalog.computeCollisions(JSON.parse(cr.catalog_json), createTargets).filter(c => c.hard);
+      }
+    } catch { /* catalog absent / unreadable — skip the warning */ }
   }
 
   const pendingCps = deltaCps.map(c => ({
@@ -6024,6 +6344,8 @@ app.get('/api/v1/projects/:id/servicenow/delta-info', (req, res) => {
     has_changes: (updateCount + createCount) > 0,
     pending_cps: pendingCps,
     generics: genericCounts,
+    collision_warning_count: collisionWarnings.length,
+    collision_warnings: collisionWarnings.slice(0, 10),
   });
 });
 
@@ -6120,7 +6442,8 @@ app.get('/api/v1/projects/:id/servicenow/delta-export', (req, res) => {
     else creates.push(entry);
   }
 
-  const md       = buildSNDeltaMarkdown(project, deltaCps, updates, creates, sinceTs, generics);
+  const instanceContext = loadInstanceContext(project.project_id, deployTargetsFromCreates(creates, project.servicenow_scope));
+  const md       = buildSNDeltaMarkdown(project, deltaCps, updates, creates, sinceTs, generics, instanceContext);
   const dateStr  = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const code     = (project.project_code || project.project_name || 'project').replace(/\s+/g, '-');
   const fileName = `${code}-sn-delta-${dateStr}.md`;
@@ -6211,7 +6534,7 @@ app.post('/api/v1/projects/:id/servicenow/register-sysid', (req, res) => {
 
 // ─── SN Delta markdown assembler ─────────────────────────────────────────────
 
-function buildSNDeltaMarkdown(project, deltaCps, updates, creates, sinceTs, generics = []) {
+function buildSNDeltaMarkdown(project, deltaCps, updates, creates, sinceTs, generics = [], instanceContext = null) {
   const lines    = [];
   const ts       = new Date().toISOString();
   const genUpdates = generics.filter(g => g.source_sys_id).length;
@@ -6247,6 +6570,10 @@ function buildSNDeltaMarkdown(project, deltaCps, updates, creates, sinceTs, gene
   if (generics.length) lines.push(`| Generic artifacts (Fluent) | ${generics.length} (${genUpdates} update, ${genCreates} create) |`);
   lines.push(`| Exported | ${ts} |`);
   lines.push('');
+
+  // ── Instance Context (whole-instance collision awareness for the POSTs below) ─
+  renderInstanceContextSection(lines, instanceContext);
+
   lines.push('---');
   lines.push('');
 
@@ -6533,6 +6860,126 @@ function mdCell(val) {
   return String(val).replace(/\|/g, '\\|').replace(/\n/g, ' ').trim();
 }
 
+// ── Instance Context (catalog-derived collision awareness) helpers ────────────
+// Shared by the full Build Spec (buildExportMarkdown) and the SN delta spec
+// (buildSNDeltaMarkdown). The Workbench knows the names it is about to CREATE, so it
+// checks them against the latest instance catalog and surfaces only the hits.
+
+// Build deployTargets (entities the Workbench would CREATE → no source_sys_id) from the
+// build-export `data` object. A tracked row (has source_sys_id) is an intended PATCH, not
+// a collision. Targets deploy INTO the project scope, so that's the scope we collide on.
+function deployTargetsFromData(data, projectScope) {
+  const map = snCatalog.DESIGN_SURFACE_MAP;
+  const out = [];
+  const add = (type, rows) => {
+    const m = map[type]; if (!m) return;
+    for (const r of (rows || [])) {
+      if (r.source_sys_id) continue;
+      const name = r[m.nameKey || 'name'] || r.name;
+      if (!name) continue;
+      out.push({ kind: type, name, slug: r.slug || null, surfaces: m.surfaces, scope: projectScope || null, instanceUnique: m.instanceUnique });
+    }
+  };
+  add('agent_spec', data.agents);
+  add('tool', data.tools);
+  add('use_case', data.use_cases);
+  add('workflow', data.workflows);
+  add('data_model', data.data_models);
+  add('business_logic', data.business_logic);
+  add('catalog_item', data.catalog_items);
+  add('integration', data.integrations);
+  return out;
+}
+
+// Same, from the SN delta-export `creates` list (entities being POSTed → no source_sys_id).
+function deployTargetsFromCreates(creates, projectScope) {
+  const map = snCatalog.DESIGN_SURFACE_MAP;
+  const out = [];
+  for (const c of (creates || [])) {
+    const m = map[c.entity_type]; if (!m) continue;
+    const name = (c.row && c.row[m.nameKey || 'name']) || c.entity_name;
+    if (!name) continue;
+    out.push({ kind: c.entity_type, name, slug: (c.row && c.row.slug) || null, surfaces: m.surfaces, scope: projectScope || null, instanceUnique: m.instanceUnique });
+  }
+  return out;
+}
+
+// Load the latest COMPLETE catalog for a project and compute the instance-context view
+// (collisions for deployTargets + a per-surface inventory). Returns {available:false}
+// when no catalog exists so the caller can emit a "run a catalog" note.
+function loadInstanceContext(projectId, deployTargets, { sampleSize = 25 } = {}) {
+  let row;
+  try {
+    row = db.prepare("SELECT catalog_run_id, catalog_json, summary_json, capturing_user FROM asdlc_sn_catalog_run WHERE project_id=? AND status='complete' ORDER BY created_at DESC LIMIT 1").get(projectId);
+  } catch { return { available: false }; }
+  if (!row) return { available: false };
+  let catalog = null, summary = null;
+  try { catalog = JSON.parse(row.catalog_json); } catch { /* unreadable */ }
+  try { summary = row.summary_json ? JSON.parse(row.summary_json) : null; } catch { /* ignore */ }
+  if (!catalog) return { available: false };
+  const collisions = snCatalog.computeCollisions(catalog, deployTargets || []);
+  const inventory = {};
+  for (const [t, rows] of Object.entries(catalog.surfaces || {})) {
+    inventory[t] = { count: rows.length, sample: rows.slice(0, sampleSize).map(r => r.name).filter(Boolean) };
+  }
+  return { available: true, captured_at: catalog.captured_at, capturing_user: row.capturing_user, summary, collisions, inventory };
+}
+
+// Render the `## Instance Context` section into a markdown lines[] array. Bounded by
+// design: only collision HITS + a collapsed, sampled inventory (the spec is unbounded).
+function renderInstanceContextSection(lines, ic) {
+  lines.push('---'); lines.push('');
+  lines.push('## Instance Context');
+  lines.push('');
+  if (!ic || !ic.available) {
+    lines.push('> No instance catalog has been captured for this project — **collision checks were skipped**. Run a Catalog sweep (Instance Catalog page) to enable "what already exists on this instance" awareness before deploying.');
+    lines.push('');
+    return;
+  }
+  const s = ic.summary || {};
+  const surfaceCount = Object.keys(s.surface_counts || {}).length;
+  lines.push(`> Catalog captured **${ic.captured_at || '?'}** by **${ic.capturing_user || '?'}** · ${s.total_entries || 0} records across ${surfaceCount} surfaces.`);
+  lines.push('>');
+  lines.push('> ⚠️ **Completeness caveat:** the catalog reflects only what the capturing account can read (ServiceNow ACL-filters rows silently). Absence of a collision is **not** proof a name is free.');
+  lines.push('');
+  const collisions = ic.collisions || [];
+  const hard = collisions.filter(c => c.hard);
+  const soft = collisions.filter(c => !c.hard);
+  if (hard.length) {
+    lines.push('### ⚠️ Name collisions — a record with this name ALREADY EXISTS on the target instance');
+    lines.push('');
+    lines.push('| Deploying | SN surface | Existing scope | sys_id |');
+    lines.push('|---|---|---|---|');
+    for (const c of hard) lines.push(`| ${c.deploy_kind}: ${c.name} | \`${c.surface}\` | \`${c.scope || '?'}\` | \`${c.sys_id}\` |`);
+    lines.push('');
+    lines.push('> Resolve each before deploy: PATCH the existing record (register its sys_id onto the Workbench row), rename, or confirm the duplicate is intentional. A blind create will duplicate or clobber.');
+    lines.push('');
+  } else {
+    lines.push('_No hard name collisions detected against the captured catalog._');
+    lines.push('');
+  }
+  if (soft.length) {
+    lines.push('<details><summary>Same-name records in OTHER scopes (informational — names are unique per scope)</summary>');
+    lines.push('');
+    for (const c of soft) lines.push(`- ${c.deploy_kind}: \`${c.name}\` also exists in scope \`${c.scope || '?'}\` (\`${c.surface}\`)`);
+    lines.push('');
+    lines.push('</details>');
+    lines.push('');
+  }
+  if (ic.inventory && Object.keys(ic.inventory).length) {
+    lines.push('<details><summary>Instance inventory — per-surface counts + sample names</summary>');
+    lines.push('');
+    for (const [t, info] of Object.entries(ic.inventory)) {
+      if (!info.count) continue;
+      const names = info.sample && info.sample.length ? ` — e.g. ${info.sample.slice(0, 25).join(', ')}` : '';
+      lines.push(`- \`${t}\`: ${info.count}${names}`);
+    }
+    lines.push('');
+    lines.push('</details>');
+    lines.push('');
+  }
+}
+
 function buildExportMarkdown(project, baseline, sections, data) {
   const lines  = [];
   const ts     = new Date().toISOString();
@@ -6563,6 +7010,11 @@ function buildExportMarkdown(project, baseline, sections, data) {
   }
   lines.push(`| Exported | ${ts} |`);
   lines.push('');
+
+  // ── Instance Context (whole-instance collision awareness) ───────────────────
+  // What already exists on the target instance, + ⚠️ collisions for names this spec
+  // would CREATE. Computed in the handler from the latest catalog (data._instance_context).
+  renderInstanceContextSection(lines, data._instance_context);
 
   // ── ServiceNow SDK Quick Reference ─────────────────────────────────────────
   // Always emitted — gives Claude Code the SDK conventions it needs to generate
@@ -7260,8 +7712,10 @@ function buildExportMarkdown(project, baseline, sections, data) {
   }
   if (sections.includes('business_logic') && data.business_logic) {
     lines.push('---'); lines.push('');
-    lines.push('## ServiceNow Business Logic'); lines.push('');
-    if (!data.business_logic.length) { lines.push('*No business logic.*'); lines.push(''); }
+    lines.push('## Implementation Artifacts (Tier C)'); lines.push('');
+    lines.push('> **These are implementation artifacts** — Business Rules, Script Includes, Client Scripts, UI Actions, and UI Policies captured for round-trip drift detection. **Do not regenerate or redeploy these from this spec.** Edit them directly in ServiceNow Studio or via Update Set. They are included here so Claude Code can detect drift (name collisions, changed scripts) before deploying Tier A design elements.');
+    lines.push('');
+    if (!data.business_logic.length) { lines.push('*No implementation artifacts captured.*'); lines.push(''); }
     for (const bl of data.business_logic) {
       lines.push(`### \`${[bl.name, bl.slug].filter(Boolean).join(' — ')}\` (${bl.logic_type || ''})`); lines.push('');
       if (bl.source_sys_id) lines.push(`> **Source:** ${bl.source_table || ''} \`${bl.source_sys_id}\``);
@@ -7320,6 +7774,50 @@ function buildExportMarkdown(project, baseline, sections, data) {
         lines.push('');
       }
       rtFluentDetails(ci);
+    }
+  }
+
+  // ── Config-driven Tier-A entities (Information Layer + NL rules) ─────────────
+  // ONE generic renderer driven by each registry display block. Existing bespoke
+  // sections above are skipped (BESPOKE set) so they render exactly as before.
+  {
+    const BESPOKE = new Set(['data_models','form_designs','business_logic','catalog_items','integrations']);
+    for (const e of registry.entitiesWithDisplay()) {
+      const k = e.display.data_key;
+      if (BESPOKE.has(k) || !sections.includes(k) || data[k] === undefined) continue;
+      const colOf = (key) => (e.fieldMap[key] && e.fieldMap[key].col) || key;
+      const childCfg = e.display.children || null;   // nested collection → rendered as a sub-table
+      lines.push('---'); lines.push('');
+      lines.push(`## ${e.display.label}s`); lines.push('');
+      if (!data[k].length) { lines.push(`*No ${e.display.label.toLowerCase()}s.*`); lines.push(''); continue; }
+      for (const rec of data[k]) {
+        lines.push(`### \`${[rec.name, rec.slug].filter(Boolean).join(' — ')}\``); lines.push('');
+        if (rec.source_sys_id) lines.push(`> **Source:** ${e.display.source_table || rec.source_table || ''} \`${rec.source_sys_id}\``);
+        for (const f of e.display.fields) {
+          if (f.key === 'name') continue;
+          if (childCfg && f.key === childCfg.key) continue;   // children rendered as a table below
+          let v = rec[colOf(f.key)];
+          if (v == null || v === '') continue;
+          if (Array.isArray(v)) v = v.map(x => (typeof x === 'string' ? x : JSON.stringify(x))).join(', ');
+          const label = f.label.replace(/ \(one per line\)$/, '');
+          lines.push(`**${label}:** ${mdCell(v)}`);
+        }
+        lines.push('');
+        // Nested child collection as a markdown table.
+        if (childCfg) {
+          const rows = Array.isArray(rec[colOf(childCfg.key)]) ? rec[colOf(childCfg.key)] : [];
+          lines.push(`#### ${childCfg.label} (${rows.length})`); lines.push('');
+          if (rows.length) {
+            lines.push('| ' + childCfg.columns.map(c => c.label).join(' | ') + ' |');
+            lines.push('|' + childCfg.columns.map(() => '---').join('|') + '|');
+            for (const r of rows) lines.push('| ' + childCfg.columns.map(c => mdCell(r[c.key])).join(' | ') + ' |');
+          } else {
+            lines.push(`*No ${childCfg.label.toLowerCase()} recorded.*`);
+          }
+          lines.push('');
+        }
+        rtFluentDetails(rec);
+      }
     }
   }
 
@@ -7495,6 +7993,94 @@ function buildExportMarkdown(project, baseline, sections, data) {
             }
           }
         }
+      }
+    }
+  }
+
+  // ── Deployment Guidance ──────────────────────────────────────────────────────
+  // Partition this spec's design elements into: SDK-deployable (now-sdk handles
+  // these automatically) vs. elements that require an Update Set or manual config.
+  // Only types that are actually present in this spec are listed.
+  {
+    const NON_SDK_TYPES = {
+      sys_report:        { label: 'Reports (`sys_report`)',                    how: 'Export Update Set from source instance and apply on target, or create manually via Reports > View/Run.' },
+      pa_indicator:      { label: 'PA Indicators / KPIs (`pa_indicator`)',     how: 'Configure manually in Performance Analytics > Indicators.' },
+      sys_user_group:    { label: 'User Groups (`sys_user_group`)',            how: 'Create via User Management > Groups, or include in an Update Set from source.' },
+      sys_choice:        { label: 'Choice / Picklist Values (`sys_choice`)',   how: 'Add choices in the Dictionary editor for each field, or include in an Update Set.' },
+      sc_category:       { label: 'Catalog Categories (`sc_category`)',        how: 'Create in Service Catalog > Catalog Administration; assign items after SDK deploy.' },
+      sys_transform_map: { label: 'Transform Maps (`sys_transform_map`)',      how: 'Create via System Import Sets > Transform Maps (with Transform Entries).' },
+    };
+
+    // Build list of SDK-deployable elements present in this spec
+    const sdkElements = [];
+    if (sections.includes('agents') && (data.agents || []).length)           sdkElements.push('**AI Agents** — `AiAgent` Fluent constructor');
+    if (sections.includes('workflows') && (data.workflows || []).length)     sdkElements.push('**AI Agentic Workflows** — `AiAgenticWorkflow` Fluent constructor');
+    if (sections.includes('tools') && (data.tools || []).length)             sdkElements.push('**Tools** — `Record()` or typed constructor per tool type');
+    if (sections.includes('data_models') && (data.data_models || []).length) sdkElements.push('**Data Models / Tables** — `Table` Fluent constructor');
+    if (sections.includes('form_designs') && (data.form_designs || []).length)   sdkElements.push('**Form Designs** — `Record()` on `sys_ui_form`');
+    if (sections.includes('integrations') && (data.integrations || []).length)   sdkElements.push('**Integrations** — `RestMessage` (outbound), `Alias` (connection aliases)');
+    if (sections.includes('catalog_items') && (data.catalog_items || []).length) sdkElements.push('**Catalog Items + Variables** — `CatalogItem` Fluent constructor');
+    const arts = data.sn_generic_artifacts || [];
+    const artsByStrategy = {};
+    for (const a of arts) { const s = a.deploy_strategy || 'record'; artsByStrategy[s] = (artsByStrategy[s] || 0) + 1; }
+    if (artsByStrategy['typed'])    sdkElements.push(`**Generic Artifacts (typed)** — ${artsByStrategy['typed']} artifact(s) use dedicated Fluent constructors`);
+    if (artsByStrategy['record'] || artsByStrategy['override'])
+      sdkElements.push(`**Generic Artifacts (Record())** — ${(artsByStrategy['record']||0) + (artsByStrategy['override']||0)} artifact(s) via \`Record()\` fallback`);
+
+    // Find non-SDK types present in generic artifacts or business logic
+    const nonSdkPresent = [];
+    const seenNonSdk = new Set();
+    for (const a of arts) {
+      const t = a.source_table;
+      if (t && NON_SDK_TYPES[t] && !seenNonSdk.has(t)) {
+        seenNonSdk.add(t); nonSdkPresent.push({ ...NON_SDK_TYPES[t], table: t });
+      }
+    }
+
+    // Config-driven Tier-A entities: partition by display.sdk_deployable. SDK-deployable
+    // → install pass; otherwise → manual/Update Set (keyed by source_table in NON_SDK_TYPES).
+    // Entities with no source_table (NL rules) deploy as neither — they drive code, not deploy.
+    for (const de of registry.entitiesWithDisplay()) {
+      const k = de.display.data_key;
+      if (!sections.includes(k) || !(data[k] || []).length) continue;
+      const t = de.display.source_table;
+      if (de.display.sdk_deployable) {
+        sdkElements.push(`**${de.display.label}s** — Fluent constructor${t ? ` (\`${t}\`)` : ''}`);
+      } else if (t && NON_SDK_TYPES[t] && !seenNonSdk.has(t)) {
+        seenNonSdk.add(t); nonSdkPresent.push({ ...NON_SDK_TYPES[t], table: t });
+      }
+    }
+
+    const implArtifactCount = (data.business_logic || []).length;
+    const hasContent = sdkElements.length || nonSdkPresent.length || implArtifactCount;
+    if (hasContent) {
+      lines.push('---'); lines.push('');
+      lines.push('## Deployment Guidance'); lines.push('');
+      lines.push('Deploy order: initialize scope → SDK install (Tier A) → manual/Update Set steps (non-SDK) → validate.');
+      lines.push('');
+      if (sdkElements.length) {
+        lines.push('### Deploy via `npx now-sdk install`');
+        lines.push('');
+        lines.push('The following design elements in this spec have Fluent API support and deploy in a single SDK install pass:');
+        lines.push('');
+        for (const e of sdkElements) lines.push(`- ${e}`);
+        lines.push('');
+      }
+      if (nonSdkPresent.length) {
+        lines.push('### Requires Update Set or manual configuration');
+        lines.push('');
+        lines.push('These element types were captured but **cannot be deployed via `now-sdk install`**. Deploy them before or after the SDK pass as noted:');
+        lines.push('');
+        lines.push('| Type | How to deploy |');
+        lines.push('|---|---|');
+        for (const e of nonSdkPresent) lines.push(`| ${e.label} | ${e.how} |`);
+        lines.push('');
+      }
+      if (implArtifactCount) {
+        lines.push('### Implementation Artifacts — do NOT redeploy');
+        lines.push('');
+        lines.push(`This spec contains **${implArtifactCount}** implementation artifact(s) (Business Rules, Script Includes, Client Scripts, UI Actions, UI Policies) captured for drift detection. **Do not regenerate these from this spec.** They live in ServiceNow and must be edited there directly. Use them for collision awareness only.`);
+        lines.push('');
       }
     }
   }
@@ -7690,21 +8276,36 @@ function buildExportMarkdown(project, baseline, sections, data) {
   // ── Post-Deploy: Register sys_ids ───────────────────────────────────────────
   // Slug-keyed manifest the deployer fills with returned sys_ids and POSTs back, closing
   // the round-trip identity loop so the next reverse-sync reconciles instead of duplicating.
+  // CREATE entities only (no source_sys_id) — a row that already carries a sys_id is a
+  // tracked PATCH and needs no registration. Each row is a ready-to-fill register-sysid
+  // payload (R1b): registration is REQUIRED or the next delta re-POSTs → duplicate.
+  const regScope = project.servicenow_scope || '';
   const regRows = [];
-  for (const a of (data.agents || []))    if (a.slug) regRows.push({ entity_type: 'agent_spec', slug: a.slug, sys_id: '', source_table: 'sn_aia_agent' });
-  for (const w of (data.workflows || [])) if (w.slug) regRows.push({ entity_type: 'workflow',   slug: w.slug, sys_id: '', source_table: 'sn_aia_usecase' });
-  for (const t of (data.tools || []))     if (t.slug) regRows.push({ entity_type: 'tool',       slug: t.slug, sys_id: '', source_table: 'sn_aia_tool' });
+  const addReg = (rows, entity_type, source_table) => {
+    for (const r of (rows || [])) if (r.slug && !r.source_sys_id)
+      regRows.push({ entity_type, slug: r.slug, sys_id: '', source_table, source_scope: regScope });
+  };
+  addReg(data.use_cases,      'use_case',       'sn_aia_usecase');
+  addReg(data.agents,         'agent_spec',     'sn_aia_agent');
+  addReg(data.tools,          'tool',           'sn_aia_tool');
+  addReg(data.workflows,      'workflow',       'sn_aia_usecase');
+  addReg(data.data_models,    'data_model',     'sys_db_object');
+  addReg(data.business_logic, 'business_logic', 'sys_script');
+  addReg(data.catalog_items,  'catalog_item',   'sc_cat_item');
+  addReg(data.integrations,   'integration',    'sys_rest_message');
   // Generic artifacts (new records only — those with source_sys_id are already registered)
   for (const art of (data.sn_generic_artifacts || [])) {
     if (art.slug && !art.source_sys_id)
-      regRows.push({ entity_type: 'sn_artifact', slug: art.slug, sys_id: '', source_table: art.source_table || '' });
+      regRows.push({ entity_type: 'sn_artifact', slug: art.slug, sys_id: '', source_table: art.source_table || '', source_scope: regScope });
     for (const ch of (art.children || []))
       if (ch.slug && !ch.source_sys_id)
-        regRows.push({ entity_type: 'sn_artifact', slug: ch.slug, sys_id: '', source_table: ch.source_table || art.source_table || '' });
+        regRows.push({ entity_type: 'sn_artifact', slug: ch.slug, sys_id: '', source_table: ch.source_table || art.source_table || '', source_scope: regScope });
   }
   if (regRows.length) {
     lines.push('---'); lines.push('');
     lines.push('## Post-Deploy: Register sys_ids');
+    lines.push('');
+    lines.push('> **REQUIRED step — do not skip.** Until each created record\'s `sys_id` is registered back, the Workbench row stays unlinked and the **next delta will re-create it as a duplicate**. (Re-capturing a record that carries its `[[wb:…]]` tag also self-heals the link, but registering here is the deterministic path.)');
     lines.push('');
     lines.push('After `now-sdk install`, look up each artifact\'s `sys_id` on the instance and paste it into the matching row below, then POST the whole body to the endpoint below.');
     lines.push('');
@@ -8241,6 +8842,10 @@ app.post('/api/v1/ingest-documents/:id/promote', async (req, res) => {
 //   fall back to the project link + SN_INSTANCE/SN_USER/SN_PASSWORD env.
 // ═══════════════════════════════════════════════════════════════════════════
 const snSync = require('./agent/sn-sync');
+const { WB_PROVENANCE_TABLES } = require('./agent/sn-capture');
+// wb table name → { pk } for the R1 link self-heal (covers L1 tables + asdlc_sn_artifact).
+const PK_BY_WB_TABLE = {};
+WB_PROVENANCE_TABLES.forEach(t => { PK_BY_WB_TABLE[t.table] = t.pk; });
 
 // A reconcile field_change names a DB column; turn it back into the entity_data key
 // the materializer's fieldMap understands (or null if it isn't a mappable field).
@@ -8486,7 +9091,7 @@ app.post('/api/v1/projects/:id/servicenow/sync', async (req, res) => {
     return { change_packet_id: cpId, packet_code: cpCode, item_count: specs.length };
   };
 
-  const result = { auto_cp: null, hitl_cp: null, hash_advanced: 0, dropped };
+  const result = { auto_cp: null, hitl_cp: null, hash_advanced: 0, links_healed: 0, dropped };
 
   // 1. HITL packet (pending_review) — surfaced in the Change Packet Queue, never auto-applied.
   if (hitlSpecs.length) result.hitl_cp = insertSyncCp(hitlSpecs, 'pending_review', 'needs human review');
@@ -8517,6 +9122,45 @@ app.post('/api/v1/projects/:id/servicenow/sync', async (req, res) => {
       .run(pl.artifact.hash, scope, pl.wb_id);
     auditLog(entity.table, pl.wb_id, 'UPDATE', { source_hash: row.source_hash }, { source_hash: pl.artifact.hash }, uid);
     result.hash_advanced++;
+  }
+
+  // 4. R1 LINK SELF-HEAL. A Workbench-authored entity deployed to SN and re-captured
+  //    matches here either by its sys_id (already linked) or by its embedded
+  //    [[wb:project/slug]] tag (classifyArtifacts → findWbBySlug). The tag match heals
+  //    source_hash but historically NOT source_sys_id — so the next outbound delta still
+  //    saw NULL → POST → duplicate. Back-fill source_sys_id for any matched row that lacks
+  //    it. Safe: classifyArtifacts only slug-matches on a QUALIFIED tag within this project,
+  //    and we write the sys_id of the very record that carried the tag. `IS NULL` guard
+  //    makes it a no-op for already-linked rows (never overwrites a different sys_id).
+  const healSeen = new Set();
+  const healCandidates = [];
+  for (const u of (plan.unchanged || [])) {
+    if (u && u.wb_table && u.wb_id && u.source_sys_id)
+      healCandidates.push({ wb_table: u.wb_table, wb_id: u.wb_id, sys_id: u.source_sys_id, source_table: u.source_table || null });
+  }
+  for (const pl of plan.planned) {
+    if (pl.classification === 'drift' || !pl.wb_table || !pl.wb_id) continue;
+    const sid = pl.source_sys_id || (pl.artifact && pl.artifact.source_sys_id);
+    if (sid) healCandidates.push({ wb_table: pl.wb_table, wb_id: pl.wb_id, sys_id: sid, source_table: (pl.artifact && pl.artifact.source_table) || null });
+  }
+  for (const c of healCandidates) {
+    const key = `${c.wb_table}:${c.wb_id}`;
+    if (healSeen.has(key)) continue;
+    healSeen.add(key);
+    const pk = PK_BY_WB_TABLE[c.wb_table];
+    if (!pk) continue;
+    try {
+      const r = db.prepare(
+        `UPDATE ${c.wb_table}
+            SET source_sys_id = ?, source_table = COALESCE(source_table, ?),
+                source_scope = COALESCE(source_scope, ?), updated_at = datetime('now')
+          WHERE ${pk} = ? AND project_id = ? AND (source_sys_id IS NULL OR source_sys_id = '')`
+      ).run(c.sys_id, c.source_table, scope, c.wb_id, project.project_id);
+      if (r.changes) {
+        auditLog(c.wb_table, c.wb_id, 'sn_link_selfheal', { source_sys_id: null }, { source_sys_id: c.sys_id }, uid);
+        result.links_healed++;
+      }
+    } catch { /* table without provenance columns — skip */ }
   }
 
   try { require('./agent/fluent-ingest').markSynced(project.project_id); } catch (e) { console.error('[sn-sync] markSynced', e.message); }

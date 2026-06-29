@@ -271,6 +271,26 @@ const MIGRATIONS = [
    )`,
   "CREATE INDEX IF NOT EXISTS idx_sn_assessment_project ON asdlc_sn_assessment(project_id, created_at)",
 
+  // ── ServiceNow whole-instance catalog (read-only awareness sweep) ─────────────
+  // One row per cross-scope identity-only sweep. catalog_json holds the full snapshot
+  // ({surfaces:{table:[{sys_id,name,scope,…}]}, warnings}); summary_json the per-surface
+  // counts (always returned; catalog_json gated behind ?full=1). capturing_user records
+  // WHO swept it (ACL-completeness context). status: running|complete|failed. History kept.
+  `CREATE TABLE IF NOT EXISTS asdlc_sn_catalog_run (
+     catalog_run_id TEXT PRIMARY KEY,
+     project_id     TEXT REFERENCES asdlc_project(project_id),
+     instance_url   TEXT,
+     capturing_user TEXT,
+     status         TEXT NOT NULL DEFAULT 'running',
+     catalog_json   TEXT,
+     summary_json   TEXT,
+     error          TEXT,
+     created_by     TEXT,
+     created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+   )`,
+  "CREATE INDEX IF NOT EXISTS idx_sn_catalog_project ON asdlc_sn_catalog_run(project_id, created_at)",
+
   // ── Materialize core design elements from BRD ingest ─────────────────────────
   // Guardrails + data sources become first-class design rows; user stories get a
   // thin traceability home (narrative + requirement_refs slugs, no duplicated AC
@@ -329,6 +349,155 @@ const MIGRATIONS = [
      updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')),
      version INTEGER NOT NULL DEFAULT 1
    )`,
+  // ── Config-driven Tier-A design entities (Information Layer + NL rules) ───────
+  // Mirror the CREATE TABLEs in schema.sql so existing DBs get them too. No CHECK
+  // constraints on enum columns — never crash materialization on model output.
+  `CREATE TABLE IF NOT EXISTS asdlc_dashboard (
+     dashboard_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL, purpose TEXT, audience TEXT,
+     widgets TEXT NOT NULL DEFAULT '[]', refresh TEXT,
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_report (
+     report_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL, purpose TEXT, reported_table TEXT,
+     report_columns TEXT NOT NULL DEFAULT '[]', filters TEXT, format TEXT,
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_kpi (
+     kpi_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL, metric TEXT, unit TEXT, target TEXT,
+     direction TEXT, frequency TEXT, data_source TEXT,
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_nl_rule (
+     nl_rule_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, rule_kind TEXT NOT NULL DEFAULT 'business', name TEXT NOT NULL,
+     rule_text TEXT, linked_table TEXT, linked_field TEXT, linked_workflow TEXT,
+     status TEXT NOT NULL DEFAULT 'authored', rationale TEXT, confidence REAL,
+     source_system TEXT NOT NULL DEFAULT 'workbench',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_sla_definition (
+     sla_definition_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL,
+     applies_to TEXT, sla_type TEXT, target TEXT, start_condition TEXT, stop_condition TEXT, schedule TEXT,
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_email_notification (
+     email_notification_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL,
+     trigger_event TEXT, recipients TEXT, applies_to TEXT, subject TEXT, body_summary TEXT,
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_user_group (
+     user_group_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL,
+     purpose TEXT, members TEXT, roles_granted TEXT NOT NULL DEFAULT '[]', manager TEXT,
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_catalog_category (
+     catalog_category_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL,
+     description TEXT, catalog TEXT, parent_category TEXT,
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_choice_set (
+     choice_set_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL,
+     applies_to TEXT, choices TEXT NOT NULL DEFAULT '[]', default_value TEXT,
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  // Wave 3 nested entities (children stored as JSON arrays)
+  `CREATE TABLE IF NOT EXISTS asdlc_service_portal (
+     service_portal_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL, title TEXT, homepage TEXT, theme TEXT, purpose TEXT,
+     pages TEXT NOT NULL DEFAULT '[]',
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_workspace (
+     workspace_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL, purpose TEXT, primary_table TEXT,
+     lists TEXT NOT NULL DEFAULT '[]',
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_variable_set (
+     variable_set_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL, purpose TEXT, applies_to TEXT,
+     variables TEXT NOT NULL DEFAULT '[]',
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+  `CREATE TABLE IF NOT EXISTS asdlc_inbound_rest_api (
+     inbound_rest_api_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES asdlc_project(project_id),
+     slug TEXT, name TEXT NOT NULL, base_path TEXT, auth TEXT, purpose TEXT,
+     resources TEXT NOT NULL DEFAULT '[]',
+     source_system TEXT NOT NULL DEFAULT 'servicenow',
+     source_sys_id TEXT, source_table TEXT, source_scope TEXT, source_fluent TEXT, source_hash TEXT,
+     visibility_scope TEXT NOT NULL DEFAULT 'PROJECT', lifecycle_status TEXT NOT NULL DEFAULT 'active',
+     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1
+   )`,
+
   // Tool-call audit log
   `CREATE TABLE IF NOT EXISTS asdlc_tool_call_log (
      call_id TEXT PRIMARY KEY, source TEXT NOT NULL, tool_name TEXT NOT NULL,
@@ -377,6 +546,22 @@ const SLUG_INDEXES = [
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_gr_slug  ON asdlc_guardrail(project_id, slug)    WHERE slug IS NOT NULL",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_ds_slug  ON asdlc_data_source(project_id, slug)  WHERE slug IS NOT NULL",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_us_slug  ON asdlc_user_story(project_id, slug)   WHERE slug IS NOT NULL",
+  // Config-driven Tier-A entities (Information Layer + NL rules)
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_dash_slug ON asdlc_dashboard(project_id, slug)   WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_rpt_slug  ON asdlc_report(project_id, slug)      WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_kpi_slug  ON asdlc_kpi(project_id, slug)         WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_nlr_slug  ON asdlc_nl_rule(project_id, slug)     WHERE slug IS NOT NULL",
+  // Wave 2 flat config entities
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_sla_slug   ON asdlc_sla_definition(project_id, slug)    WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_notif_slug ON asdlc_email_notification(project_id, slug) WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_grp_slug   ON asdlc_user_group(project_id, slug)        WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_catg_slug  ON asdlc_catalog_category(project_id, slug)  WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_cho_slug   ON asdlc_choice_set(project_id, slug)        WHERE slug IS NOT NULL",
+  // Wave 3 nested entities
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_portal_slug ON asdlc_service_portal(project_id, slug)   WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_ws_slug2    ON asdlc_workspace(project_id, slug)        WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_vset_slug   ON asdlc_variable_set(project_id, slug)     WHERE slug IS NOT NULL",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_api_slug    ON asdlc_inbound_rest_api(project_id, slug) WHERE slug IS NOT NULL",
 ];
 for (const idx of SLUG_INDEXES) {
   try { db.exec(idx); } catch (err) { console.error('[db] slug index failed:', err.message); }
@@ -457,6 +642,20 @@ const SLUG_TABLES = [
   { table: 'asdlc_guardrail',         pk: 'guardrail_id',      prefix: 'GR'   },
   { table: 'asdlc_data_source',       pk: 'data_source_id',    prefix: 'DS'   },
   { table: 'asdlc_user_story',        pk: 'user_story_id',     prefix: 'US'   },
+  // Config-driven Tier-A entities (Information Layer + NL rules)
+  { table: 'asdlc_dashboard',         pk: 'dashboard_id',      prefix: 'DASH' },
+  { table: 'asdlc_report',            pk: 'report_id',         prefix: 'RPT'  },
+  { table: 'asdlc_kpi',               pk: 'kpi_id',            prefix: 'KPI'  },
+  { table: 'asdlc_nl_rule',           pk: 'nl_rule_id',        prefix: 'NLR'  },
+  { table: 'asdlc_sla_definition',    pk: 'sla_definition_id', prefix: 'SLA'  },
+  { table: 'asdlc_email_notification',pk: 'email_notification_id', prefix: 'NOTIF' },
+  { table: 'asdlc_user_group',        pk: 'user_group_id',     prefix: 'GRP'  },
+  { table: 'asdlc_catalog_category',  pk: 'catalog_category_id', prefix: 'CATG' },
+  { table: 'asdlc_choice_set',        pk: 'choice_set_id',     prefix: 'CHO'  },
+  { table: 'asdlc_service_portal',    pk: 'service_portal_id', prefix: 'PORTAL' },
+  { table: 'asdlc_workspace',         pk: 'workspace_id',      prefix: 'WS'   },
+  { table: 'asdlc_variable_set',      pk: 'variable_set_id',   prefix: 'VSET' },
+  { table: 'asdlc_inbound_rest_api',  pk: 'inbound_rest_api_id', prefix: 'API' },
 ];
 
 function backfillSlugsFor(tableSpec) {

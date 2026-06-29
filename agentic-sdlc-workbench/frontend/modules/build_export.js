@@ -1,6 +1,6 @@
 // build_export.js — Build Export module for Agentic SDLC Workbench
 // Exports a complete application design as a Markdown build spec for Claude Code / ServiceNow.
-import { apiFetch, getCurrentProjectId, el, showToast, navigate } from '../app.js';
+import { apiFetch, getCurrentProjectId, el, showToast, navigate, loadCatalog } from '../app.js';
 
 // ─── Section groups ───────────────────────────────────────────────────────────
 const SECTION_GROUPS = [
@@ -13,7 +13,7 @@ const SECTION_GROUPS = [
       { id: 'tools',      label: 'Tools'      },
       { id: 'data_models',    label: 'Data Model (SN)'     },
       { id: 'form_designs',   label: 'Form Designs (SN)'   },
-      { id: 'business_logic', label: 'Business Logic (SN)' },
+      { id: 'business_logic', label: 'Impl. Artifacts (SN — Tier C)' },
       { id: 'catalog_items',  label: 'Catalog Items (SN)'  },
       { id: 'integrations',        label: 'Integrations (SN)'        },
       { id: 'sn_generic_artifacts', label: 'Generic Artifacts (SN)' },
@@ -340,6 +340,18 @@ function injectStyles() {
 export async function render(container) {
   injectStyles();
   _allCheckboxes = [];
+
+  // Config-driven entities: append a catalog group once (idempotent across re-renders).
+  // Fail-soft — if the catalog is unavailable the hardcoded groups still render.
+  try {
+    const catalog = await loadCatalog();
+    if (catalog.length && !SECTION_GROUPS.some(g => g.label === 'Additional Tier-A Entities')) {
+      SECTION_GROUPS.push({
+        label: 'Additional Tier-A Entities',
+        items: catalog.map(c => ({ id: c.data_key, label: c.label })),
+      });
+    }
+  } catch { /* degrade to hardcoded groups */ }
 
   const page = el('div', { className: 'be-page' });
 

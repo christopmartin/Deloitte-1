@@ -27,6 +27,24 @@ const PAYLOAD_NOISE = new Set([
 ]);
 const REAL_TABLE = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/;
 
+// ── TLS / proxy helper ───────────────────────────────────────────────────────
+// Corporate networks that do SSL inspection present a self-signed cert chain that
+// Node.js (which uses its own CA bundle, not the OS store) rejects with
+// SELF_SIGNED_CERT_IN_CHAIN. Set SN_INSECURE_TLS=true in .env to bypass; uses
+// undici's native Agent (built into Node 18+) so no extra package is needed.
+// The proper fix is NODE_EXTRA_CA_CERTS pointing to the corporate root CA PEM.
+function makeFetch(fetchImpl) {
+  if (fetchImpl) return fetchImpl;
+  if (process.env.SN_INSECURE_TLS === 'true') {
+    try {
+      const { Agent } = require('undici');
+      const agent = new Agent({ connect: { rejectUnauthorized: false } });
+      return (url, opts = {}) => fetch(url, { ...opts, dispatcher: agent });
+    } catch { /* undici unavailable — fall through */ }
+  }
+  return fetch;
+}
+
 // ── Pagination (P1) ──────────────────────────────────────────────────────────
 // Every Table API GET is capped at one page; the old single-shot `sysparm_limit=1000`
 // SILENTLY DROPPED the 1001st row, so a large scope imported looking complete. We now
@@ -135,7 +153,7 @@ function hashArtifact(salient) {
  * @returns {Promise<Array>} artifacts [{source_table, design_type, source_sys_id, name, salient, hash}] (+ {__error} entries)
  */
 async function captureScope({ scope, instance, user, pw, fetchImpl }) {
-  const f = fetchImpl || fetch;
+  const f = makeFetch(fetchImpl);
   const auth = 'Basic ' + Buffer.from(`${user}:${pw}`).toString('base64');
   const base = normalizeInstanceUrl(instance);
   const headers = { Authorization: auth, Accept: 'application/json' };
@@ -344,4 +362,4 @@ function classifyArtifacts(artifacts, projectId) {
   return res;
 }
 
-module.exports = { SN_SURFACES, WB_PROVENANCE_TABLES, hashArtifact, captureScope, findWbBySysId, findWbBySlug, parseWbTag, classifyArtifacts };
+module.exports = { SN_SURFACES, WB_PROVENANCE_TABLES, hashArtifact, captureScope, fetchAllRows, findWbBySysId, findWbBySlug, parseWbTag, classifyArtifacts, makeFetch };
