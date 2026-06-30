@@ -10,6 +10,11 @@ let currentUserName = null;
 let currentProjectId = null;
 let currentModule = null;
 
+const ADMIN_MODULES = new Set([
+  'home', 'library', 'projects', 'trust', 'validation',
+  'cost_management', 'admin_ai', 'admin_best_practices', 'sn_artifacts',
+]);
+
 const MODULE_LOADERS = {
   home: () => import('./modules/home.js'),
   ingest: () => import('./modules/ingest.js'),
@@ -66,6 +71,7 @@ function showApp() {
 // ============================================================
 export async function navigate(moduleName) {
   currentModule = moduleName;
+  document.body.classList.toggle('admin-context', ADMIN_MODULES.has(moduleName));
 
   // Update sidebar active state
   document.querySelectorAll('.nav-item').forEach(btn => {
@@ -163,8 +169,8 @@ function registerProjectSelectorHandler() {
     } else {
       localStorage.removeItem('asdlc_project_id');
     }
-    // Re-render active module with new project context
-    if (currentModule) navigate(currentModule);
+    // Re-render active module with new project context (workflow pages only)
+    if (currentModule && !ADMIN_MODULES.has(currentModule)) navigate(currentModule);
   });
 }
 

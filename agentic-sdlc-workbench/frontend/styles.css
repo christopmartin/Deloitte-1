@@ -172,6 +172,12 @@ img { max-width: 100%; display: block; }
   position: relative;
 }
 
+body.admin-context .project-selector-wrap {
+  opacity: 0.4;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+
 .project-select {
   appearance: none;
   background: var(--color-bg);

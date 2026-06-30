@@ -190,21 +190,8 @@ function buildSubmitPanel() {
   ));
   const body = el('div', { className: 'panel-body' });
 
-  // Row 1: application / type / title
-  const row1 = el('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px', marginBottom: '12px' } });
-
-  const appGroup = el('div', { className: 'form-group', style: { margin: 0 } });
-  appGroup.appendChild(el('label', { className: 'form-label' }, 'Application *'));
-  const appSelect = el('select', { className: 'form-select', id: 'ingest-app-select' });
-  appSelect.innerHTML = '<option value="">— Select Application —</option>';
-  apiFetch('/projects').then(data => {
-    const ps = Array.isArray(data) ? data : (data.items || []);
-    ps.forEach(p => appSelect.appendChild(el('option', { value: p.project_id },
-      `${p.client_name ? p.client_name + ' — ' : ''}${p.project_name}`)));
-    const active = getCurrentProjectId();
-    if (active) appSelect.value = active;
-  }).catch(() => {});
-  appGroup.appendChild(appSelect);
+  // Row 1: type / title (application comes from the global top dropdown)
+  const row1 = el('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '12px' } });
 
   const typeGroup = el('div', { className: 'form-group', style: { margin: 0 } });
   typeGroup.appendChild(el('label', { className: 'form-label' }, 'Document Type *'));
@@ -218,7 +205,6 @@ function buildSubmitPanel() {
     placeholder: 'e.g. "Add PO lookup to Invoice agent"' });
   titleGroup.appendChild(titleInput);
 
-  row1.appendChild(appGroup);
   row1.appendChild(typeGroup);
   row1.appendChild(titleGroup);
   body.appendChild(row1);
@@ -408,7 +394,7 @@ function buildSubmitPanel() {
   const btnRow = el('div', { style: { display: 'flex', alignItems: 'center', gap: '12px' } });
   const submitBtn = el('button', { className: 'btn btn-primary' }, '↑ Submit for Analysis');
   submitBtn.addEventListener('click', () =>
-    doSubmit(appSelect, typeSelect, titleInput, descInput, scopeSelect, platformSelect,
+    doSubmit(getCurrentProjectId(), typeSelect, titleInput, descInput, scopeSelect, platformSelect,
              () => droppedFile, reqTextarea, resetFile, submitBtn));
   btnRow.appendChild(submitBtn);
   btnRow.appendChild(el('span', { className: 'text-muted text-sm' },
@@ -421,8 +407,8 @@ function buildSubmitPanel() {
 }
 
 
-async function doSubmit(appSelect, typeSelect, titleInput, descInput, scopeSelect, platformSelect, getFile, reqTextarea, resetFile, btn) {
-  if (!appSelect.value)         { showToast('Select an application first.', 'error'); return; }
+async function doSubmit(projectId, typeSelect, titleInput, descInput, scopeSelect, platformSelect, getFile, reqTextarea, resetFile, btn) {
+  if (!projectId)               { showToast('Select an application from the top dropdown first.', 'error'); return; }
   if (!titleInput.value.trim()) { showToast('Enter a title.', 'error'); return; }
 
   const droppedFile = getFile();
@@ -442,7 +428,7 @@ async function doSubmit(appSelect, typeSelect, titleInput, descInput, scopeSelec
       // ── multipart/form-data — file takes priority ─────────────────────────
       const fd = new FormData();
       fd.append('file',           droppedFile);
-      fd.append('project_id',     appSelect.value);
+      fd.append('project_id',     projectId);
       fd.append('document_title', titleInput.value.trim());
       fd.append('document_type',  typeSelect.value);
       fd.append('file_name',      droppedFile.name);
@@ -459,7 +445,7 @@ async function doSubmit(appSelect, typeSelect, titleInput, descInput, scopeSelec
       fetchOpts = {
         method: 'POST',
         body: JSON.stringify({
-          project_id:     appSelect.value,
+          project_id:     projectId,
           document_title: titleInput.value.trim(),
           document_type:  typeSelect.value,
           description:    descInput.value.trim() || null,

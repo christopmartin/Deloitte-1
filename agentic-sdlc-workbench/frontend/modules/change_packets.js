@@ -238,8 +238,6 @@ async function buildPacketList(paneLeft, paneRight) {
   // ── Filter bar ────────────────────────────────────────────────────────
   const filterBar = el('div', { className: 'filter-bar' });
   const searchInput = el('input', { type: 'text', className: 'filter-input', placeholder: 'Search packets…' });
-  const projectSel = el('select', { className: 'filter-select' });
-  projectSel.innerHTML = '<option value="">All Applications</option>';
   const sourceSel = el('select', { className: 'filter-select' });
   sourceSel.innerHTML = '<option value="">All Sources</option><option>agent</option><option>manual</option><option>import</option>';
   const riskSel = el('select', { className: 'filter-select' });
@@ -248,7 +246,6 @@ async function buildPacketList(paneLeft, paneRight) {
   statusSel.innerHTML = '<option value="">All Statuses</option><option>pending</option><option>approved</option><option>rejected</option><option>in_review</option>';
 
   filterBar.appendChild(searchInput);
-  filterBar.appendChild(projectSel);
   filterBar.appendChild(sourceSel);
   filterBar.appendChild(riskSel);
   filterBar.appendChild(statusSel);
@@ -302,9 +299,8 @@ async function buildPacketList(paneLeft, paneRight) {
     updateSelectionBar();
     refreshPacketList(listBody, paneRight, updateSelectionBar);
   };
-  [projectSel, sourceSel, riskSel, statusSel].forEach(el_ => {
+  [sourceSel, riskSel, statusSel].forEach(el_ => {
     el_.addEventListener('change', () => {
-      filters.project     = projectSel.value;
       filters.source_type = sourceSel.value;
       filters.risk        = riskSel.value;
       filters.status      = statusSel.value;
@@ -318,15 +314,10 @@ async function buildPacketList(paneLeft, paneRight) {
 
   // ── Load data ─────────────────────────────────────────────────────────
   try {
-    const projData = await apiFetch('/projects');
-    const projects = Array.isArray(projData) ? projData : (projData.items || []);
-    projects.forEach(p => projectSel.appendChild(el('option', { value: p.project_id }, p.project_name)));
-
     const params = new URLSearchParams();
     const activeId = getCurrentProjectId();
     if (activeId) {
       params.set('project_id', activeId);
-      projectSel.value = activeId;
       filters.project = activeId;
     }
 

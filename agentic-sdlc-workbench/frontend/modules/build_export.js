@@ -396,19 +396,6 @@ function buildControls(card, projects) {
   card.innerHTML = '';
   card.appendChild(el('div', { className: 'be-card-title' }, 'Export Settings'));
 
-  // ── Application selector ──────────────────────────────────────────────────
-  const projectField = el('div', { className: 'be-field' },
-    el('label', { for: 'be-project-select' }, 'Application')
-  );
-  const projectSelect = el('select', { id: 'be-project-select', className: 'be-select' });
-  projectSelect.appendChild(el('option', { value: '' }, '— Select application —'));
-  for (const p of projects) {
-    const label = (p.client_name ? `${p.client_name} — ` : '') + p.project_name;
-    projectSelect.appendChild(el('option', { value: p.project_id }, label));
-  }
-  projectField.appendChild(projectSelect);
-  card.appendChild(projectField);
-
   // ── Version selector ──────────────────────────────────────────────────────
   const versionField = el('div', { className: 'be-field' },
     el('label', { for: 'be-baseline-select' }, 'Version')
@@ -487,26 +474,10 @@ function buildControls(card, projects) {
   // Store reference to direction header so loadSnDeltaInfo can show/hide it
   _snDeltaBtn._deployHdr = snDeployHdr;
 
-  // ── Wire project change ───────────────────────────────────────────────────
-  projectSelect.addEventListener('change', async () => {
-    _projectId = projectSelect.value || null;
-    // Reset baseline list
-    _baselineSelect.innerHTML = '';
-    _baselineSelect.appendChild(el('option', { value: '' }, 'Current live design (recommended)'));
-    if (_projectId) {
-      await Promise.all([loadBaselines(_projectId), loadPreview(_projectId), loadSnDeltaInfo(_projectId)]);
-    } else {
-      renderPreviewEmpty();
-      hideSnDeltaBtn();
-    }
-  });
-
-  // Pre-select current project from global selector
+  // Auto-init from global application selector
   const currentPid = getCurrentProjectId();
   if (currentPid && projects.some(p => p.project_id === currentPid)) {
-    projectSelect.value = currentPid;
     _projectId = currentPid;
-    // Fire initial load without waiting (renders spinner then data)
     loadBaselines(currentPid);
     loadPreview(currentPid);
     loadSnDeltaInfo(currentPid);

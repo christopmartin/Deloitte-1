@@ -34,10 +34,6 @@ export async function render(container) {
   // ── controls bar ──────────────────────────────────────────────
   const bar = el('div', { className: 'tst-controls' });
 
-  const projSel = el('select', { className: 'filter-select', style: { minWidth: '240px' } });
-  projSel.innerHTML = '<option value="">— Select application —</option>';
-  bar.appendChild(projSel);
-
   // Top-level toggle: AC vs Test Cases vs Coverage
   const toggle = el('div', { className: 'tst-toggle' });
   const acBtn = el('button', { className: 'tst-toggle-btn', 'data-view': 'ac' }, 'Acceptance Criteria');
@@ -54,22 +50,8 @@ export async function render(container) {
   _reportArea = el('div', { id: 'tst-report-area' });
   container.appendChild(_reportArea);
 
-  // ── load project list ─────────────────────────────────────────
-  try {
-    const projects = await apiFetch('/projects');
-    projects.forEach(p => {
-      const opt = el('option', { value: p.project_id },
-        `${p.project_name}${p.project_code ? ` — ${p.project_code}` : ''}`);
-      projSel.appendChild(opt);
-    });
-  } catch (err) {
-    _reportArea.innerHTML = `<div class="error-state">Could not load projects: ${escHtml(err.message)}</div>`;
-    return;
-  }
-
-  // Pre-select current project if set
-  const pid = getCurrentProjectId();
-  if (pid) { projSel.value = pid; _projectId = pid; }
+  // Use global application context
+  _projectId = getCurrentProjectId();
 
   // ── wire toggle ────────────────────────────────────────────────
   const setView = (v) => {
@@ -83,13 +65,6 @@ export async function render(container) {
   covBtn.addEventListener('click', () => setView('coverage'));
   setView('ac');
 
-  // ── wire project selector ──────────────────────────────────────
-  projSel.addEventListener('change', () => {
-    _projectId = projSel.value || null;
-    if (_projectId) loadView();
-    else showEmptyState();
-  });
-
   if (_projectId) loadView();
   else showEmptyState();
 }
@@ -97,7 +72,7 @@ export async function render(container) {
 function showEmptyState() {
   _reportArea.innerHTML =
     '<div class="empty-state" style="margin-top:40px"><div class="empty-state-icon">🧪</div>' +
-    '<h3>Select an application</h3><p>Choose one above to view its acceptance criteria and test cases.</p></div>';
+    '<h3>No application selected</h3><p>Select an application from the top dropdown to view its acceptance criteria and test cases.</p></div>';
 }
 
 // ─── view loaders ───────────────────────────────────────────────────────────
