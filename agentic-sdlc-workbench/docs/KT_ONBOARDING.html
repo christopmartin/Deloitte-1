@@ -1,0 +1,1421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agentic Workbench — KT & Onboarding Guide</title>
+  <style>
+    :root {
+      --blue:    #1d4ed8;
+      --blue-lt: #dbeafe;
+      --purple:  #7c3aed;
+      --purp-lt: #ede9fe;
+      --green:   #059669;
+      --grn-lt:  #d1fae5;
+      --teal:    #0891b2;
+      --teal-lt: #cffafe;
+      --amber:   #d97706;
+      --amb-lt:  #fef3c7;
+      --rose:    #be185d;
+      --rose-lt: #fce7f3;
+      --slate:   #475569;
+      --slate-lt:#f1f5f9;
+      --bg:      #f8fafc;
+      --card:    #ffffff;
+      --border:  #e2e8f0;
+      --text:    #0f172a;
+      --muted:   #64748b;
+      --sidebar: 230px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+           background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.65; }
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code { font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+           background: var(--slate-lt); padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+    pre code { background: transparent; padding: 0; }
+    pre.code-block { background: #1e293b; color: #e2e8f0; padding: 18px 20px; border-radius: 8px;
+                     overflow-x: auto; font-size: 12.5px; line-height: 1.6; margin: 12px 0; }
+    pre.code-block .cm  { color: #94a3b8; }
+    pre.code-block .kw  { color: #93c5fd; }
+    pre.code-block .st  { color: #86efac; }
+    pre.code-block .nm  { color: #fbbf24; }
+
+    /* ── LAYOUT ── */
+    .app { display: flex; min-height: 100vh; }
+
+    .sidebar {
+      width: var(--sidebar); background: #1e293b; color: #cbd5e1;
+      position: fixed; top: 0; left: 0; height: 100vh; overflow-y: auto;
+      display: flex; flex-direction: column; z-index: 100;
+      scrollbar-width: thin; scrollbar-color: #334155 transparent;
+    }
+    .sidebar-header { padding: 18px 16px 14px; border-bottom: 1px solid #334155; }
+    .sidebar-header h2 { font-size: 11px; font-weight: 700; color: #f1f5f9;
+                          letter-spacing: 0.07em; text-transform: uppercase; }
+    .sidebar-header p  { font-size: 11px; color: #64748b; margin-top: 3px; }
+    .sidebar nav { padding: 6px 0 20px; flex: 1; }
+    .nav-group { padding: 12px 14px 4px; font-size: 9.5px; font-weight: 700;
+                  text-transform: uppercase; letter-spacing: 0.09em; color: #475569; }
+    .nav-btn {
+      display: flex; align-items: center; gap: 9px; width: 100%; padding: 7px 16px;
+      background: none; border: none; color: #94a3b8; cursor: pointer;
+      text-align: left; font-size: 12.5px; transition: all 0.12s; border-left: 3px solid transparent;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .nav-btn:hover  { background: #273549; color: #e2e8f0; }
+    .nav-btn.active { background: #1e3a5f; color: #93c5fd; border-left-color: #3b82f6; }
+    .nav-icon { font-size: 14px; width: 16px; text-align: center; flex-shrink: 0; }
+
+    .main { margin-left: var(--sidebar); flex: 1; min-width: 0; }
+    .page-header {
+      background: var(--card); border-bottom: 1px solid var(--border);
+      padding: 20px 32px; position: sticky; top: 0; z-index: 50;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .page-header-left h1 { font-size: 18px; font-weight: 700; color: var(--text); }
+    .page-header-left p  { color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .page-header-meta { display: flex; gap: 16px; align-items: center; }
+    .meta-pill { background: var(--slate-lt); color: var(--slate); padding: 4px 10px;
+                 border-radius: 20px; font-size: 11px; font-weight: 500; }
+
+    .content { padding: 28px 32px 48px; max-width: 1200px; }
+    .section { display: none; }
+    .section.active { display: block; }
+
+    /* ── SECTION HEADERS ── */
+    .section-title { font-size: 22px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+    .section-lead  { font-size: 14px; color: var(--muted); margin-bottom: 24px; max-width: 760px; }
+
+    /* ── CARDS ── */
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 10px; overflow: hidden; margin-bottom: 18px;
+    }
+    .card-header {
+      padding: 14px 18px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      background: var(--slate-lt);
+    }
+    .card-header h3 { font-size: 14px; font-weight: 600; color: var(--text); }
+    .card-header .sub { font-size: 11px; color: var(--muted); margin-top: 1px; }
+    .card-body  { padding: 16px 18px; }
+    .card-body p { margin-bottom: 10px; color: #334155; font-size: 13.5px; }
+    .card-body p:last-child { margin-bottom: 0; }
+
+    /* ── CAPABILITY PILLS ── */
+    .cap-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+    .cap-pill {
+      display: flex; align-items: center; gap: 6px; padding: 8px 14px;
+      border-radius: 8px; font-size: 13px; font-weight: 600; border: 1.5px solid;
+    }
+    .cap-pill.blue   { background: var(--blue-lt); border-color: #93c5fd; color: var(--blue); }
+    .cap-pill.green  { background: var(--grn-lt);  border-color: #6ee7b7; color: var(--green); }
+    .cap-pill.purple { background: var(--purp-lt); border-color: #c4b5fd; color: var(--purple); }
+
+    /* ── STATUS BADGES ── */
+    .badge {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600;
+      white-space: nowrap; flex-shrink: 0;
+    }
+    .badge.working { background: var(--grn-lt);  color: #065f46; }
+    .badge.partial { background: var(--amb-lt);  color: #92400e; }
+    .badge.stub    { background: var(--slate-lt); color: #374151; }
+    .badge.future  { background: var(--purp-lt); color: #4c1d95; }
+
+    /* ── MODULE GRID ── */
+    .module-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; margin-bottom: 28px; }
+    .module-card {
+      background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+      padding: 14px 16px; cursor: pointer; transition: all 0.12s;
+      border-left: 4px solid transparent;
+    }
+    .module-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,.08); transform: translateY(-1px); }
+    .module-card.status-working { border-left-color: var(--green); }
+    .module-card.status-partial { border-left-color: var(--amber); }
+    .module-card.status-stub    { border-left-color: #9ca3af; }
+    .module-card.status-future  { border-left-color: var(--purple); }
+    .module-card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+    .module-name { font-size: 13.5px; font-weight: 600; color: var(--text); }
+    .module-file { font-size: 11px; color: var(--muted); font-family: monospace; margin-top: 2px; }
+    .module-desc { font-size: 12.5px; color: #475569; line-height: 1.5; }
+    .module-gaps { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+    .gap-item { font-size: 11.5px; color: #b45309; display: flex; gap: 5px; margin-bottom: 2px; }
+    .gap-item::before { content: "❌"; font-size: 10px; flex-shrink: 0; margin-top: 1px; }
+
+    /* ── MODULE DETAIL (accordion) ── */
+    .module-detail { margin-bottom: 12px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+    .module-detail-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 16px; background: var(--slate-lt); cursor: pointer;
+      border-bottom: 1px solid var(--border);
+    }
+    .module-detail-header:hover { background: #e9eef5; }
+    .module-detail-header h4 { font-size: 13.5px; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 8px; }
+    .module-detail-body { padding: 16px; display: none; }
+    .module-detail-body.open { display: block; }
+    .detail-file { font-family: monospace; font-size: 11.5px; background: var(--slate-lt); padding: 3px 8px; border-radius: 4px; color: var(--slate); margin-bottom: 10px; display: inline-block; }
+    .works-list, .gaps-list { margin: 8px 0 12px 0; padding-left: 0; list-style: none; }
+    .works-list li { display: flex; gap: 6px; font-size: 13px; color: #374151; margin-bottom: 4px; padding-left: 20px; }
+    .works-list li::before { content: "✓"; color: var(--green); font-weight: 700; margin-left: -20px; width: 20px; }
+    .gaps-list li  { display: flex; gap: 6px; font-size: 13px; color: #92400e; margin-bottom: 4px; }
+    .gap-label { font-size: 11px; background: var(--amb-lt); color: #92400e; padding: 1px 7px; border-radius: 10px; white-space: nowrap; }
+
+    /* ── TABLES ── */
+    .data-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 20px; }
+    .data-table th { background: #1e293b; color: #e2e8f0; padding: 9px 14px; text-align: left; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+    .data-table td { padding: 9px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    .data-table tr:last-child td { border-bottom: none; }
+    .data-table tr:hover td { background: #f8fafc; }
+    .data-table code { font-size: 11.5px; }
+    .sev-critical td { background: #fff1f2; }
+    .sev-high     td { background: #fffbeb; }
+    .sev-medium   td { background: #f0fdf4; }
+
+    /* ── ISSUE BADGES ── */
+    .issue-num { background: var(--slate-lt); color: var(--slate); padding: 1px 7px; border-radius: 4px; font-size: 11px; font-weight: 700; font-family: monospace; }
+    .sev-tag { padding: 2px 8px; border-radius: 10px; font-size: 10.5px; font-weight: 600; }
+    .sev-tag.critical { background: #fee2e2; color: #b91c1c; }
+    .sev-tag.high     { background: var(--amb-lt); color: #92400e; }
+    .sev-tag.medium   { background: var(--grn-lt); color: #065f46; }
+
+    /* ── ARCH DIAGRAM ── */
+    .arch-box {
+      background: #1e293b; border-radius: 10px; padding: 24px; margin-bottom: 20px;
+      font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 12.5px; line-height: 1.7;
+      color: #e2e8f0; overflow-x: auto;
+    }
+    .arch-box .layer-browser { color: #93c5fd; }
+    .arch-box .layer-api     { color: #86efac; }
+    .arch-box .layer-db      { color: #fbbf24; }
+    .arch-box .layer-ai      { color: #c4b5fd; }
+    .arch-box .layer-sn      { color: #67e8f9; }
+    .arch-box .dim { color: #475569; }
+
+    /* ── TWO-COL ── */
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 18px; }
+    @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+
+    /* ── FLOW STEPS ── */
+    .flow { display: flex; flex-direction: column; gap: 0; }
+    .flow-step { display: flex; gap: 14px; padding: 10px 0; }
+    .flow-step-num { width: 28px; height: 28px; border-radius: 50%; background: var(--blue); color: white;
+                      font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+                      flex-shrink: 0; margin-top: 1px; }
+    .flow-step-content { flex: 1; }
+    .flow-step-content strong { font-size: 13px; display: block; }
+    .flow-step-content span   { font-size: 12px; color: var(--muted); }
+    .flow-connector { width: 28px; display: flex; justify-content: center; }
+    .flow-connector::before { content: "│"; color: #cbd5e1; font-size: 16px; line-height: 1; }
+
+    /* ── MODEL TABLE ── */
+    .model-row td:first-child { font-family: monospace; font-size: 11.5px; font-weight: 600; color: var(--purple); }
+
+    /* ── DATA MODEL DOMAINS ── */
+    .dm-grid   { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 20px; }
+    @media (max-width:900px) { .dm-grid { grid-template-columns: 1fr; } }
+    .dm-domain { border-radius: 10px; overflow: hidden; border: 1px solid var(--border); }
+    .dm-head   { padding: 8px 14px; font-size: 11px; font-weight: 700; letter-spacing:.07em; text-transform: uppercase; }
+    .dm-head.blue   { background: #dbeafe; color: #1d4ed8; border-bottom: 1px solid #bfdbfe; }
+    .dm-head.green  { background: #d1fae5; color: #065f46; border-bottom: 1px solid #a7f3d0; }
+    .dm-head.amber  { background: #fef3c7; color: #92400e; border-bottom: 1px solid #fde68a; }
+    .dm-head.purple { background: #ede9fe; color: #5b21b6; border-bottom: 1px solid #ddd6fe; }
+    .dm-head.teal   { background: #cffafe; color: #164e63; border-bottom: 1px solid #a5f3fc; }
+    .dm-head.slate  { background: #f1f5f9; color: #334155; border-bottom: 1px solid #e2e8f0; }
+    .dm-body  { background: var(--card); padding: 6px 0; }
+    .dm-row   { display: flex; align-items: baseline; gap: 8px; padding: 3px 12px; }
+    .dm-row.l1{ padding-left: 24px; }
+    .dm-row.l2{ padding-left: 36px; }
+    .dm-row.l3{ padding-left: 48px; }
+    .dm-conn  { font-family: 'Cascadia Code','Consolas',monospace; color: #94a3b8; font-size: 11px; flex-shrink: 0; }
+    .dm-t     { font-family: 'Cascadia Code','Consolas','Courier New',monospace; font-size: 11.5px; font-weight: 600; white-space: nowrap; flex-shrink: 0; }
+    .dm-t.b{color:#1d4ed8} .dm-t.g{color:#059669} .dm-t.a{color:#b45309}
+    .dm-t.p{color:#7c3aed} .dm-t.c{color:#0891b2} .dm-t.s{color:#475569}
+    .dm-d     { font-size: 11.5px; color: #64748b; flex: 1; min-width: 0; }
+    .dm-warn  { padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; background: #fee2e2; color: #b91c1c; white-space: nowrap; flex-shrink: 0; }
+    .dm-sep   { margin: 5px 12px; border: none; border-top: 1px solid var(--border); }
+
+    /* ── SESSION CARDS ── */
+    .session-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+    .session-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+    .session-card-head { padding: 14px 16px 12px; border-bottom: 1px solid var(--border); background: linear-gradient(135deg, #1e293b, #334155); }
+    .session-num  { font-size: 10px; font-weight: 700; color: #64748b; letter-spacing: 0.08em; text-transform: uppercase; }
+    .session-title { font-size: 15px; font-weight: 700; color: #f1f5f9; margin-top: 2px; }
+    .session-meta  { display: flex; gap: 10px; margin-top: 8px; }
+    .session-tag   { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; background: #334155; color: #94a3b8; }
+    .session-body  { padding: 14px 16px; }
+    .session-body p { font-size: 13px; color: #475569; margin-bottom: 8px; }
+    .session-topics { list-style: none; }
+    .session-topics li { font-size: 12.5px; color: #374151; padding: 3px 0 3px 16px; position: relative; }
+    .session-topics li::before { content: "→"; position: absolute; left: 0; color: var(--blue); }
+    .session-pre   { background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 6px; padding: 9px 12px; margin-bottom: 12px; }
+    .session-pre h4{ font-size: 10px; font-weight: 700; letter-spacing:.07em; text-transform: uppercase; color: #0369a1; margin: 0 0 6px; }
+    .pre-list  { list-style: none; padding: 0; margin: 0; }
+    .pre-list li { font-size: 12px; color: #374151; padding: 2px 0 2px 16px; position: relative; }
+    .pre-list li::before { content: "✓"; position: absolute; left: 0; color: #0891b2; font-size: 10px; font-weight: 700; line-height: 1.7; }
+
+    /* ── LEGEND ── */
+    .legend { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; }
+
+    /* ── HEADING STYLES ── */
+    h2.sub-heading { font-size: 16px; font-weight: 700; color: var(--text); margin: 24px 0 12px; }
+    h3.sub-heading { font-size: 14px; font-weight: 600; color: var(--text); margin: 20px 0 10px; }
+
+    /* ── HIGHLIGHT BOX ── */
+    .callout { border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; display: flex; gap: 12px; font-size: 13px; }
+    .callout.info    { background: var(--blue-lt); border-left: 4px solid var(--blue); color: #1e3a5f; }
+    .callout.warn    { background: var(--amb-lt);  border-left: 4px solid var(--amber); color: #78350f; }
+    .callout.danger  { background: #fee2e2; border-left: 4px solid #ef4444; color: #7f1d1d; }
+    .callout.success { background: var(--grn-lt);  border-left: 4px solid var(--green); color: #064e3b; }
+    .callout-icon { font-size: 16px; flex-shrink: 0; margin-top: 1px; }
+  </style>
+</head>
+<body>
+<div class="app">
+
+<!-- ── SIDEBAR ── -->
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>Agentic Workbench</h2>
+    <p>KT &amp; Onboarding Guide</p>
+  </div>
+  <nav>
+    <div class="nav-group">Getting Started</div>
+    <button class="nav-btn active" onclick="show('overview')"    ><span class="nav-icon">🎯</span> What Is This?</button>
+    <button class="nav-btn"        onclick="show('arch')"        ><span class="nav-icon">🏗️</span> Architecture</button>
+    <button class="nav-btn"        onclick="show('stack')"       ><span class="nav-icon">🛠️</span> Tech Stack</button>
+    <button class="nav-btn"        onclick="show('setup')"       ><span class="nav-icon">💻</span> Local Setup</button>
+
+    <div class="nav-group">The Application</div>
+    <button class="nav-btn"        onclick="show('features')"    ><span class="nav-icon">📦</span> Feature Inventory</button>
+    <button class="nav-btn"        onclick="show('codemap')"     ><span class="nav-icon">🗺️</span> Code Map</button>
+    <button class="nav-btn"        onclick="show('datamodel')"   ><span class="nav-icon">🗄️</span> Data Model</button>
+
+    <div class="nav-group">Integrations</div>
+    <button class="nav-btn"        onclick="show('ai')"          ><span class="nav-icon">🤖</span> AI Integration</button>
+    <button class="nav-btn"        onclick="show('sn')"          ><span class="nav-icon">🔄</span> ServiceNow</button>
+
+    <div class="nav-group">Quality &amp; Roadmap</div>
+    <button class="nav-btn"        onclick="show('issues')"      ><span class="nav-icon">🐛</span> Known Issues</button>
+    <button class="nav-btn"        onclick="show('deferred')"    ><span class="nav-icon">🔮</span> Deferred (v2)</button>
+    <button class="nav-btn"        onclick="show('sessions')"    ><span class="nav-icon">📋</span> KT Sessions</button>
+  </nav>
+</aside>
+
+<!-- ── MAIN ── -->
+<main class="main">
+  <div class="page-header">
+    <div class="page-header-left">
+      <h1>Knowledge Transfer &amp; Onboarding Guide</h1>
+      <p>Everything a new team member needs to get oriented and productive</p>
+    </div>
+    <div class="page-header-meta">
+      <span class="meta-pill">📅 2026-07-01</span>
+      <span class="meta-pill">🏗️ POC → Production</span>
+      <span class="meta-pill">4/10 prod-ready</span>
+    </div>
+  </div>
+
+  <div class="content">
+
+    <!-- ══════════════════════════════════════════════════════ -->
+    <!-- SECTION: OVERVIEW                                      -->
+    <!-- ══════════════════════════════════════════════════════ -->
+    <div id="overview" class="section active">
+      <div class="section-title">What Is This Tool?</div>
+      <div class="section-lead">The Agentic Workbench is a design-intelligence platform for ServiceNow implementations — it turns messy documents and live SN instances into governed, AI-generated application designs.</div>
+
+      <div class="cap-row">
+        <div class="cap-pill blue">🤖 AI Ingestion</div>
+        <div class="cap-pill green">✍️ Design Review &amp; Governance</div>
+        <div class="cap-pill purple">🔄 ServiceNow Round-Trip</div>
+      </div>
+
+      <div class="two-col">
+        <div class="card">
+          <div class="card-header"><h3>🤖 AI Ingestion</h3></div>
+          <div class="card-body">
+            <p>Upload existing documents — BRDs, process maps, meeting notes, SN config exports — and Claude reads them, extracts structured design entities (use cases, workflows, agents, tools, requirements, test cases), and populates a design database.</p>
+            <p>Think of it as <strong>"AI fills in the blanks from your documents."</strong> Analysts upload source material; the AI does the first-pass design work.</p>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>✍️ Design Review &amp; Governance</h3></div>
+          <div class="card-body">
+            <p>A structured workspace for reviewing, editing, and governing the AI-generated design. Supports change packets (tracked change proposals with approval workflow), baselines (point-in-time snapshots), Now Assist cost estimation, and AI-powered quality review.</p>
+            <p>Every change is tracked. Every AI action is audited.</p>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><h3>🔄 ServiceNow Round-Trip</h3><span class="badge partial">⚠️ Partial</span></div>
+        <div class="card-body">
+          <p>Connect to a live ServiceNow instance, reverse-engineer its current configuration into the Workbench, reconcile it against the design, and (eventually) write approved changes back to SN. This is the highest-value capability. Ingest + reconcile are working; <strong>write-back is the main remaining gap.</strong></p>
+        </div>
+      </div>
+
+      <h2 class="sub-heading">Who uses it?</h2>
+      <p style="color:#334155; margin-bottom:16px;">Deloitte consultants on ServiceNow engagements — primarily architects and analysts who need to design, document, and govern SN applications at scale across large, complex client environments.</p>
+
+      <div class="callout warn">
+        <span class="callout-icon">⚠️</span>
+        <div><strong>Current production readiness: 4 / 10.</strong> The AI integration and SN ingestion pipeline are solid. Authentication does not exist (just an HTTP header), multi-tenancy is modeled but not enforced, and there is no test suite or CI/CD. The production roadmap addresses all of this — see <code>docs/PRODUCTION_WORKPLAN.md</code>.</div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════ -->
+    <!-- SECTION: ARCHITECTURE                                  -->
+    <!-- ══════════════════════════════════════════════════════ -->
+    <div id="arch" class="section">
+      <div class="section-title">System Architecture</div>
+      <div class="section-lead">Three-tier system: Vanilla JS SPA → Express API → SQLite, with Anthropic Claude and ServiceNow as external services.</div>
+
+      <svg viewBox="0 0 800 446" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;display:block;margin-bottom:20px;border-radius:10px;">
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0,0 L10,5 L0,10 Z" fill="#475569"/>
+          </marker>
+          <marker id="arr-sm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+            <path d="M0,0 L10,5 L0,10 Z" fill="#334155"/>
+          </marker>
+          <!-- clip paths for header stripes (rounded top only) -->
+          <clipPath id="cp-b">  <rect x="20"  y="15"  width="760" height="90"  rx="8"/></clipPath>
+          <clipPath id="cp-e">  <rect x="20"  y="153" width="760" height="90"  rx="8"/></clipPath>
+          <clipPath id="cp-a">  <rect x="20"  y="307" width="240" height="122" rx="8"/></clipPath>
+          <clipPath id="cp-s">  <rect x="280" y="307" width="240" height="122" rx="8"/></clipPath>
+          <clipPath id="cp-sn"> <rect x="540" y="307" width="240" height="122" rx="8"/></clipPath>
+        </defs>
+
+        <!-- ── Background ── -->
+        <rect width="800" height="446" rx="10" fill="#1e293b"/>
+
+        <!-- ════════════════════ BROWSER ════════════════════ -->
+        <rect x="20"  y="15"  width="760" height="90"  rx="8" fill="#111e38"/>
+        <rect x="20"  y="15"  width="760" height="30"  fill="#1a3263" clip-path="url(#cp-b)"/>
+        <rect x="20"  y="15"  width="5"   height="90"  fill="#3b82f6" clip-path="url(#cp-b)"/>
+        <rect x="20"  y="15"  width="760" height="90"  rx="8" fill="none" stroke="#3b82f6" stroke-width="1.5"/>
+        <!-- Layer label -->
+        <text x="771" y="30" text-anchor="end" dominant-baseline="middle"
+              fill="#1d4ed8" font-family="-apple-system,'Segoe UI',sans-serif" font-size="9" font-weight="700" letter-spacing="0.08em">PRESENTATION LAYER</text>
+        <!-- Title -->
+        <text x="400" y="30" text-anchor="middle" dominant-baseline="middle"
+              fill="#f1f5f9" font-family="-apple-system,'Segoe UI',sans-serif" font-size="13.5" font-weight="700">Browser · Vanilla JS SPA</text>
+        <!-- Detail -->
+        <text x="400" y="65" text-anchor="middle" dominant-baseline="middle"
+              fill="#93c5fd" font-family="'Cascadia Code','Consolas','Courier New',monospace" font-size="12">frontend/app.js  →  frontend/modules/*.js  (22 modules)</text>
+        <text x="400" y="87" text-anchor="middle" dominant-baseline="middle"
+              fill="#475569" font-family="-apple-system,'Segoe UI',sans-serif" font-size="11">No framework  ·  No build step  ·  Plain ES modules  ·  DOM events</text>
+
+        <!-- ── Connector: Browser → Express ── -->
+        <line x1="400" y1="106" x2="400" y2="149" stroke="#334155" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+        <rect x="236" y="119" width="328" height="19" rx="4" fill="#0f172a" stroke="#1e293b" stroke-width="1"/>
+        <text x="400" y="129" text-anchor="middle" dominant-baseline="middle"
+              fill="#64748b" font-family="'Cascadia Code','Consolas','Courier New',monospace" font-size="10.5">HTTP / JSON  ·  X-User-ID header  (no real auth — dev only)</text>
+
+        <!-- ════════════════════ EXPRESS ════════════════════ -->
+        <rect x="20"  y="153" width="760" height="90"  rx="8" fill="#0a2118"/>
+        <rect x="20"  y="153" width="760" height="30"  fill="#053d24" clip-path="url(#cp-e)"/>
+        <rect x="20"  y="153" width="5"   height="90"  fill="#10b981" clip-path="url(#cp-e)"/>
+        <rect x="20"  y="153" width="760" height="90"  rx="8" fill="none" stroke="#059669" stroke-width="1.5"/>
+        <text x="771" y="168" text-anchor="end" dominant-baseline="middle"
+              fill="#065f46" font-family="-apple-system,'Segoe UI',sans-serif" font-size="9" font-weight="700" letter-spacing="0.08em">APPLICATION LAYER</text>
+        <text x="400" y="168" text-anchor="middle" dominant-baseline="middle"
+              fill="#f1f5f9" font-family="-apple-system,'Segoe UI',sans-serif" font-size="13.5" font-weight="700">Node.js / Express API</text>
+        <text x="400" y="203" text-anchor="middle" dominant-baseline="middle"
+              fill="#6ee7b7" font-family="'Cascadia Code','Consolas','Courier New',monospace" font-size="12">backend-node/server.js  ·  188 routes  ·  9,935 lines</text>
+        <text x="400" y="225" text-anchor="middle" dominant-baseline="middle"
+              fill="#475569" font-family="-apple-system,'Segoe UI',sans-serif" font-size="11">async/await  ·  multer file uploads  ·  raw parameterized SQL  ·  no ORM</text>
+
+        <!-- ── Fork connectors: Express → 3 services ── -->
+        <line x1="400" y1="244" x2="400" y2="275" stroke="#334155" stroke-width="1.5"/>
+        <line x1="140" y1="275" x2="660" y2="275" stroke="#334155" stroke-width="1.5"/>
+        <line x1="140" y1="275" x2="140" y2="303" stroke="#334155" stroke-width="1.5" marker-end="url(#arr-sm)"/>
+        <line x1="400" y1="275" x2="400" y2="303" stroke="#334155" stroke-width="1.5" marker-end="url(#arr-sm)"/>
+        <line x1="660" y1="275" x2="660" y2="303" stroke="#334155" stroke-width="1.5" marker-end="url(#arr-sm)"/>
+        <!-- Connector labels -->
+        <text x="270" y="272" text-anchor="middle" dominant-baseline="auto"
+              fill="#1e3a5f" font-family="-apple-system,'Segoe UI',sans-serif" font-size="9.5" font-weight="600">@anthropic-ai/sdk</text>
+        <text x="400" y="272" text-anchor="middle" dominant-baseline="auto"
+              fill="#1a3000" font-family="-apple-system,'Segoe UI',sans-serif" font-size="9.5" font-weight="600">node:sqlite</text>
+        <text x="530" y="272" text-anchor="middle" dominant-baseline="auto"
+              fill="#0c2f35" font-family="-apple-system,'Segoe UI',sans-serif" font-size="9.5" font-weight="600">REST / HTTPS</text>
+
+        <!-- ════════════════════ ANTHROPIC ════════════════════ -->
+        <rect x="20"  y="307" width="240" height="122" rx="8" fill="#130d2a"/>
+        <rect x="20"  y="307" width="240" height="30"  fill="#211050" clip-path="url(#cp-a)"/>
+        <rect x="20"  y="307" width="5"   height="122" fill="#8b5cf6" clip-path="url(#cp-a)"/>
+        <rect x="20"  y="307" width="240" height="122" rx="8" fill="none" stroke="#7c3aed" stroke-width="1.5"/>
+        <text x="140" y="322" text-anchor="middle" dominant-baseline="middle"
+              fill="#f1f5f9" font-family="-apple-system,'Segoe UI',sans-serif" font-size="12.5" font-weight="700">Anthropic Claude</text>
+        <text x="140" y="352" text-anchor="middle" dominant-baseline="middle"
+              fill="#c4b5fd" font-family="'Cascadia Code','Consolas','Courier New',monospace" font-size="11">Opus 4.8 · Sonnet 4.6 · Haiku 4.5</text>
+        <text x="140" y="372" text-anchor="middle" dominant-baseline="middle"
+              fill="#64748b" font-family="-apple-system,'Segoe UI',sans-serif" font-size="10.5">Multi-model routing by task role</text>
+        <text x="140" y="390" text-anchor="middle" dominant-baseline="middle"
+              fill="#64748b" font-family="-apple-system,'Segoe UI',sans-serif" font-size="10.5">Extended thinking on Opus calls</text>
+        <text x="140" y="408" text-anchor="middle" dominant-baseline="middle"
+              fill="#64748b" font-family="-apple-system,'Segoe UI',sans-serif" font-size="10.5">All usage logged → asdlc_ai_usage</text>
+
+        <!-- ════════════════════ SQLITE ════════════════════ -->
+        <rect x="280" y="307" width="240" height="122" rx="8" fill="#180f00"/>
+        <rect x="280" y="307" width="240" height="30"  fill="#2d1900" clip-path="url(#cp-s)"/>
+        <rect x="280" y="307" width="5"   height="122" fill="#f59e0b" clip-path="url(#cp-s)"/>
+        <rect x="280" y="307" width="240" height="122" rx="8" fill="none" stroke="#d97706" stroke-width="1.5"/>
+        <text x="400" y="322" text-anchor="middle" dominant-baseline="middle"
+              fill="#f1f5f9" font-family="-apple-system,'Segoe UI',sans-serif" font-size="12.5" font-weight="700">SQLite Database</text>
+        <text x="400" y="352" text-anchor="middle" dominant-baseline="middle"
+              fill="#fcd34d" font-family="'Cascadia Code','Consolas','Courier New',monospace" font-size="11">asdlc.db  ·  68 tables  ·  WAL mode</text>
+        <text x="400" y="372" text-anchor="middle" dominant-baseline="middle"
+              fill="#64748b" font-family="-apple-system,'Segoe UI',sans-serif" font-size="10.5">node:sqlite  (requires Node ≥ 22.5)</text>
+        <text x="400" y="390" text-anchor="middle" dominant-baseline="middle"
+              fill="#64748b" font-family="-apple-system,'Segoe UI',sans-serif" font-size="10.5">UUID PKs · soft-delete · audit log</text>
+        <text x="400" y="408" text-anchor="middle" dominant-baseline="middle"
+              fill="#92400e" font-family="-apple-system,'Segoe UI',sans-serif" font-size="10.5" font-weight="600">→ PostgreSQL in production</text>
+
+        <!-- ════════════════════ SERVICENOW ════════════════════ -->
+        <rect x="540" y="307" width="240" height="122" rx="8" fill="#001519"/>
+        <rect x="540" y="307" width="240" height="30"  fill="#002a31" clip-path="url(#cp-sn)"/>
+        <rect x="540" y="307" width="5"   height="122" fill="#06b6d4" clip-path="url(#cp-sn)"/>
+        <rect x="540" y="307" width="240" height="122" rx="8" fill="none" stroke="#0891b2" stroke-width="1.5"/>
+        <text x="660" y="322" text-anchor="middle" dominant-baseline="middle"
+              fill="#f1f5f9" font-family="-apple-system,'Segoe UI',sans-serif" font-size="12.5" font-weight="700">ServiceNow REST API</text>
+        <text x="660" y="352" text-anchor="middle" dominant-baseline="middle"
+              fill="#67e8f9" font-family="'Cascadia Code','Consolas','Courier New',monospace" font-size="11">Per-project credentials</text>
+        <text x="660" y="372" text-anchor="middle" dominant-baseline="middle"
+              fill="#64748b" font-family="-apple-system,'Segoe UI',sans-serif" font-size="10.5">AES-256-GCM encryption</text>
+        <text x="660" y="390" text-anchor="middle" dominant-baseline="middle"
+              fill="#64748b" font-family="-apple-system,'Segoe UI',sans-serif" font-size="10.5">Fluent notation round-trip IR</text>
+        <text x="660" y="408" text-anchor="middle" dominant-baseline="middle"
+              fill="#0e7490" font-family="-apple-system,'Segoe UI',sans-serif" font-size="10.5" font-weight="600">Read ✓  ·  Write-back partial ⚠</text>
+      </svg>
+
+      <div class="two-col">
+        <div class="card">
+          <div class="card-header"><h3>📄 Typical Page Load</h3></div>
+          <div class="card-body">
+            <div class="flow">
+              <div class="flow-step">
+                <div class="flow-step-num">1</div>
+                <div class="flow-step-content"><strong>app.js reads localStorage</strong><span>Loads <code>asdlc_user_id</code> + <code>asdlc_project_id</code></span></div>
+              </div>
+              <div class="flow-step">
+                <div class="flow-step-num">2</div>
+                <div class="flow-step-content"><strong>Module render() called</strong><span>Module fires <code>apiFetch()</code> calls with user header</span></div>
+              </div>
+              <div class="flow-step">
+                <div class="flow-step-num">3</div>
+                <div class="flow-step-content"><strong>Express queries SQLite</strong><span>Parameterized SQL, returns JSON</span></div>
+              </div>
+              <div class="flow-step">
+                <div class="flow-step-num">4</div>
+                <div class="flow-step-content"><strong>Module renders to DOM</strong><span>innerHTML updates; no virtual DOM</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>🤖 AI Ingestion Flow</h3></div>
+          <div class="card-body">
+            <div class="flow">
+              <div class="flow-step">
+                <div class="flow-step-num">1</div>
+                <div class="flow-step-content"><strong>User uploads document</strong><span>POST → server stores, returns <code>status: pending</code> immediately</span></div>
+              </div>
+              <div class="flow-step">
+                <div class="flow-step-num">2</div>
+                <div class="flow-step-content"><strong>Frontend polls every 3s</strong><span>GET <code>/api/v1/ingest/documents/:id</code></span></div>
+              </div>
+              <div class="flow-step">
+                <div class="flow-step-num">3</div>
+                <div class="flow-step-content"><strong>Background: Claude extracts</strong><span>Sonnet extracts entities → Opus synthesizes</span></div>
+              </div>
+              <div class="flow-step">
+                <div class="flow-step-num">4</div>
+                <div class="flow-step-content"><strong>Status flips to "staged"</strong><span>User reviews, clicks Promote → committed to design tables</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════ -->
+    <!-- SECTION: TECH STACK                                    -->
+    <!-- ══════════════════════════════════════════════════════ -->
+    <div id="stack" class="section">
+      <div class="section-title">Tech Stack</div>
+      <div class="section-lead">Lean and dependency-light by design. No framework, no build step — fast to start, straightforward to debug.</div>
+
+      <div class="card" style="overflow:hidden;">
+        <table class="data-table">
+          <thead><tr><th>Layer</th><th>Technology</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Runtime</strong></td><td><code>Node.js ≥ 22.5</code></td><td>Required for built-in <code>node:sqlite</code> module</td></tr>
+            <tr><td><strong>Web framework</strong></td><td><code>Express 4.x</code></td><td>Single monolithic <code>server.js</code> (188 routes, 9,935 lines)</td></tr>
+            <tr><td><strong>Database</strong></td><td>SQLite via <code>node:sqlite</code></td><td>WAL mode; raw parameterized SQL; no ORM — production migration to PostgreSQL planned</td></tr>
+            <tr><td><strong>AI provider</strong></td><td>Anthropic Claude</td><td><code>@anthropic-ai/sdk ^0.95.1</code>; multi-model routing per role</td></tr>
+            <tr><td><strong>SN integration</strong></td><td>ServiceNow REST API</td><td>AES-256-GCM credential storage per project</td></tr>
+            <tr><td><strong>File parsing</strong></td><td>mammoth (DOCX), plain fs (TXT/CSV)</td><td>PDF not yet properly supported — falls through to UTF-8 read</td></tr>
+            <tr><td><strong>Frontend</strong></td><td>Vanilla JS ES modules</td><td>No React/Vue/Angular; no build step; no bundler</td></tr>
+            <tr><td><strong>Styling</strong></td><td>Single <code>styles.css</code> (38 KB)</td><td>CSS variables; light/dark mode vars defined (no toggle yet)</td></tr>
+            <tr><td><strong>Document export</strong></td><td><code>docx</code> library</td><td>Used for Build Spec DOCX export</td></tr>
+            <tr><td><strong>Dev tooling</strong></td><td>None currently</td><td>Linter, test runner, CI/CD all to be added in production build</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout info">
+        <span class="callout-icon">ℹ️</span>
+        <div><strong>Why no framework?</strong> The POC was built for speed of iteration. The Vanilla JS approach means zero build-time complexity and easy debugging — open DevTools, read source, done. The production roadmap keeps Vanilla JS for v1 and defers framework adoption to v2 if needed.</div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════ -->
+    <!-- SECTION: FEATURES                                      -->
+    <!-- ══════════════════════════════════════════════════════ -->
+    <div id="features" class="section">
+      <div class="section-title">Feature Inventory</div>
+      <div class="section-lead">23 modules across the SPA. Click any card for details.</div>
+
+      <div class="legend">
+        <span class="badge working">✅ Working</span>
+        <span class="badge partial">⚠️ Partial</span>
+        <span class="badge stub">🔲 Stub</span>
+        <span class="badge future">🔮 Future</span>
+      </div>
+
+      <!-- Module grid (quick scan) -->
+      <div class="module-grid">
+        <div class="module-card status-working" onclick="toggleDetail('d-shell')">
+          <div class="module-card-header"><div><div class="module-name">Navigation Shell</div><div class="module-file">frontend/app.js</div></div><span class="badge working">✅ Working</span></div>
+          <div class="module-desc">SPA bootstrap, user/project context, shared utils (apiFetch, showToast). No real login — demo user dropdown only.</div>
+        </div>
+        <div class="module-card status-working" onclick="toggleDetail('d-home')">
+          <div class="module-card-header"><div><div class="module-name">Dashboard</div><div class="module-file">modules/home.js</div></div><span class="badge working">✅ Working</span></div>
+          <div class="module-desc">Project summary stats, recent audit activity, quick-navigation cards.</div>
+        </div>
+        <div class="module-card status-working" onclick="toggleDetail('d-projects')">
+          <div class="module-card-header"><div><div class="module-name">Projects &amp; Clients</div><div class="module-file">modules/projects.js</div></div><span class="badge working">✅ Working</span></div>
+          <div class="module-desc">Create/manage clients and projects. SN connection config, AI model overrides, cost parameters per project.</div>
+        </div>
+        <div class="module-card status-working" onclick="toggleDetail('d-ingest')">
+          <div class="module-card-header"><div><div class="module-name">AI Ingestion</div><div class="module-file">modules/ingest.js</div></div><span class="badge working">✅ Working</span></div>
+          <div class="module-desc">Upload docs → AI extracts design entities → staged review → promote to design.</div>
+          <div class="module-gaps">
+            <div class="gap-item">PDF produces garbage output (#64)</div>
+            <div class="gap-item">RASIC not consistently populated (#36)</div>
+          </div>
+        </div>
+        <div class="module-card status-working" onclick="toggleDetail('d-design')">
+          <div class="module-card-header"><div><div class="module-name">Design Review</div><div class="module-file">modules/design_review.js</div></div><span class="badge working">✅ Working</span></div>
+          <div class="module-desc">Central design workspace — use cases, workflows, agents, tools, requirements, quality review. 6,151 lines.</div>
+          <div class="module-gaps">
+            <div class="gap-item">Action buttons stay active after terminal state (#17)</div>
+          </div>
+        </div>
+        <div class="module-card status-working" onclick="toggleDetail('d-cp')">
+          <div class="module-card-header"><div><div class="module-name">Change Packets</div><div class="module-file">modules/change_packets.js</div></div><span class="badge working">✅ Working</span></div>
+          <div class="module-desc">Full change governance workflow: create → submit → approve / reject / send-back. Mass-approve, split, history.</div>
+        </div>
+        <div class="module-card status-partial" onclick="toggleDetail('d-snsync')">
+          <div class="module-card-header"><div><div class="module-name">ServiceNow Sync</div><div class="module-file">modules/servicenow_sync.js</div></div><span class="badge partial">⚠️ Partial</span></div>
+          <div class="module-desc">Reverse-engineer SN app, assess alignment, reconcile delta.</div>
+          <div class="module-gaps">
+            <div class="gap-item">Write-back to SN not complete</div>
+            <div class="gap-item">SN error detail leaked (#41)</div>
+          </div>
+        </div>
+        <div class="module-card status-working" onclick="toggleDetail('d-snassess')">
+          <div class="module-card-header"><div><div class="module-name">SN Assessment</div><div class="module-file">modules/servicenow_assessment.js</div></div><span class="badge working">✅ Working</span></div>
+          <div class="module-desc">AI-powered quality and alignment assessment of a SN application. Produces scored report with findings.</div>
+        </div>
+        <div class="module-card status-working" onclick="toggleDetail('d-sncat')">
+          <div class="module-card-header"><div><div class="module-name">SN Catalog</div><div class="module-file">modules/servicenow_catalog.js</div></div><span class="badge working">✅ Working</span></div>
+          <div class="module-desc">Exports catalog item designs into SN-compatible format. Covers items, variables, and workflow bindings.</div>
+        </div>
+        <div class="module-card status-partial" onclick="toggleDetail('d-snart')">
+          <div class="module-card-header"><div><div class="module-name">SN Artifacts</div><div class="module-file">modules/sn_artifacts.js</div></div><span class="badge partial">⚠️ Partial</span></div>
+          <div class="module-desc">Phase 4 feature. Viewer/editor for SN artifacts (scripts, flows, tables). Viewing works; editing pipeline partial.</div>
+        </div>
+        <div class="module-card status-working" onclick="toggleDetail('d-cost')">
+          <div class="module-card-header"><div><div class="module-name">Cost Projections</div><div class="module-file">modules/cost_projections.js</div></div><span class="badge working">✅ Working</span></div>
+          <div class="module-desc">Now Assist cost modeling. Per-step cost bindings × rate cards = projected engagement cost.</div>
+          <div class="module-gaps"><div class="gap-item">Hardcodes claude-opus-4-5 model (#43)</div></div>
+        </div>
+        <div class="module-card status-partial" onclick="toggleDetail('d-costmgmt')">
+          <div class="module-card-header"><div><div class="module-name">Cost Management</div><div class="module-file">modules/cost_management.js</div></div><span class="badge partial">⚠️ Partial</span></div>
+          <div class="module-desc">Per-project cost parameters (cost per assist, overage, entitlement). Core CRUD works; modal unstyled.</div>
+        </div>
+        <div class="module-card status-partial" onclick="toggleDetail('d-testing')">
+          <div class="module-card-header"><div><div class="module-name">Testing</div><div class="module-file">modules/testing.js</div></div><span class="badge partial">⚠️ Partial</span></div>
+          <div class="module-desc">Test case CRUD, AI gap analysis, coverage matrix. Core features work; pagination bug present.</div>
+        </div>
+        <div class="module-card status-partial" onclick="toggleDetail('d-build')">
+          <div class="module-card-header"><div><div class="module-name">Build Export</div><div class="module-file">modules/build_export.js</div></div><span class="badge partial">⚠️ Partial</span></div>
+          <div class="module-desc">Generate Build Spec as DOCX from finalized design. Generation and export work; SN write-back incomplete.</div>
+        </div>
+        <div class="module-card status-partial" onclick="toggleDetail('d-baseline')">
+          <div class="module-card-header"><div><div class="module-name">Baselines</div><div class="module-file">modules/baseline.js</div></div><span class="badge partial">⚠️ Partial</span></div>
+          <div class="module-desc">Design snapshots at milestones. Create, lock, compare. Detail view has a broken ID field.</div>
+        </div>
+        <div class="module-card status-working" onclick="toggleDetail('d-library')">
+          <div class="module-card-header"><div><div class="module-name">Library</div><div class="module-file">modules/library.js</div></div><span class="badge working">✅ Working</span></div>
+          <div class="module-desc">Cross-project entity reuse — browse and copy design artifacts from other projects.</div>
+          <div class="module-gaps"><div class="gap-item">One endpoint uses manual string escaping — SQL injection risk (#39)</div></div>
+        </div>
+        <div class="module-card status-partial" onclick="toggleDetail('d-evidence')">
+          <div class="module-card-header"><div><div class="module-name">Evidence</div><div class="module-file">modules/evidence.js</div></div><span class="badge partial">⚠️ Partial</span></div>
+          <div class="module-desc">Links evidence sources to design entities. Viewing works. "Re-run Extraction" is a stub.</div>
+        </div>
+        <div class="module-card status-partial" onclick="toggleDetail('d-valid')">
+          <div class="module-card-header"><div><div class="module-name">Validation</div><div class="module-file">modules/validation.js</div></div><span class="badge partial">⚠️ Partial</span></div>
+          <div class="module-desc">Design validation rules — completeness, consistency, best practices. Rule engine partially implemented.</div>
+        </div>
+        <div class="module-card status-working" onclick="toggleDetail('d-audit')">
+          <div class="module-card-header"><div><div class="module-name">Audit Log</div><div class="module-file">modules/audit.js</div></div><span class="badge working">✅ Working</span></div>
+          <div class="module-desc">Full audit log viewer. Every write operation is logged. Filter by entity, user, date range.</div>
+        </div>
+        <div class="module-card status-stub" onclick="toggleDetail('d-reports')">
+          <div class="module-card-header"><div><div class="module-name">Reports</div><div class="module-file">modules/reports.js</div></div><span class="badge stub">🔲 Stub</span></div>
+          <div class="module-desc">Report templates for design deliverables. "Preview" and "Generate" show fake success — no real generation. V2 feature.</div>
+        </div>
+        <div class="module-card status-working" onclick="toggleDetail('d-adminai')">
+          <div class="module-card-header"><div><div class="module-name">Admin — AI Settings</div><div class="module-file">modules/admin_ai.js</div></div><span class="badge working">✅ Working</span></div>
+          <div class="module-desc">Configure AI model per role. Usage stats. Settings stored in <code>asdlc_app_setting</code>, read by <code>ai-config.js</code>.</div>
+        </div>
+        <div class="module-card status-working" onclick="toggleDetail('d-adminbp')">
+          <div class="module-card-header"><div><div class="module-name">Admin — Best Practices</div><div class="module-file">modules/admin_best_practices.js</div></div><span class="badge working">✅ Working</span></div>
+          <div class="module-desc">Manage best practice library injected into AI prompts during ingestion and quality review.</div>
+        </div>
+        <div class="module-card status-partial" onclick="toggleDetail('d-trust')">
+          <div class="module-card-header"><div><div class="module-name">Trust &amp; Supervision</div><div class="module-file">modules/trust.js</div></div><span class="badge partial">⚠️ Partial</span></div>
+          <div class="module-desc">AI agent trust level and HITL gate configuration. UI works; runtime enforcement not implemented.</div>
+        </div>
+      </div>
+
+      <!-- Detail accordions -->
+      <h2 class="sub-heading">Module Details</h2>
+
+      <div id="d-shell" class="module-detail">
+        <div class="module-detail-header" onclick="toggleDetail('d-shell')">
+          <h4>🧭 Navigation Shell <span class="badge working">✅ Working</span></h4><span>▼</span>
+        </div>
+        <div class="module-detail-body">
+          <span class="detail-file">frontend/app.js</span>
+          <p>The SPA shell that bootstraps the entire application. On load it reads <code>asdlc_user_id</code> and <code>asdlc_project_id</code> from <code>localStorage</code>, renders the sidebar nav, and delegates to module <code>render(container)</code> functions on nav click.</p>
+          <p><strong>Shared utilities exposed globally:</strong> <code>apiFetch(path, options)</code> — wraps <code>fetch()</code>, injects the <code>X-User-ID</code> header, shows a toast on error. <code>showToast(message, type)</code>. <code>formatDate(iso)</code>.</p>
+          <div class="callout danger"><span class="callout-icon">🔐</span><div><strong>No real login.</strong> A user dropdown lets you pick from 5 pre-seeded demo users. <code>localStorage</code> is the only session store. This is completely replaced in the production build (Phase 4 — Auth from scratch).</div></div>
+        </div>
+      </div>
+
+      <div id="d-ingest" class="module-detail">
+        <div class="module-detail-header" onclick="toggleDetail('d-ingest')">
+          <h4>🤖 AI Ingestion <span class="badge working">✅ Working</span></h4><span>▼</span>
+        </div>
+        <div class="module-detail-body">
+          <span class="detail-file">frontend/modules/ingest.js</span>
+          <p>The primary AI data-entry mechanism. Upload source documents; Claude extracts structured design entities and stages them for review before promotion to the live design.</p>
+          <ul class="works-list">
+            <li>Upload DOCX, TXT, CSV files (multer, 30 MB limit)</li>
+            <li>AI extraction pipeline: Sonnet extracts, Opus synthesizes cross-document</li>
+            <li>Staged review of extracted entities before promotion</li>
+            <li>Clarification Q&amp;A: AI asks follow-ups when source is ambiguous</li>
+            <li>User feedback loop (thumbs up/down on individual extractions)</li>
+            <li>Full ingest history with status tracking</li>
+          </ul>
+          <p><strong>Known gaps:</strong></p>
+          <ul class="gaps-list">
+            <li><span class="gap-label">#64</span> PDF files fall through to UTF-8 read — produces garbage output instead of an error</li>
+            <li><span class="gap-label">#36</span> RASIC fields not consistently populated — recurring AI regression</li>
+            <li><span class="gap-label">#40</span> Clarification auto-apply overwrites cost params project-wide instead of scoping to the document</li>
+            <li><span class="gap-label">Stealth</span> If <code>ANTHROPIC_API_KEY</code> is missing, silently uses regex heuristics instead of Claude — no warning shown</li>
+          </ul>
+        </div>
+      </div>
+
+      <div id="d-design" class="module-detail">
+        <div class="module-detail-header" onclick="toggleDetail('d-design')">
+          <h4>✍️ Design Review <span class="badge working">✅ Working</span></h4><span>▼</span>
+        </div>
+        <div class="module-detail-body">
+          <span class="detail-file">frontend/modules/design_review.js (6,151 lines)</span>
+          <div class="callout warn"><span class="callout-icon">⚠️</span><div>This is the largest file in the codebase at 6,151 lines. It owns tabbed navigation, all design entity renderers, modals, quality review, and inline CSS. Refactoring is on the production roadmap.</div></div>
+          <ul class="works-list">
+            <li>Use Cases — CRUD, AI descriptions, acceptance criteria, test cases</li>
+            <li>Workflows — CRUD with steps, participants, paths, RASIC assignments</li>
+            <li>Workflow Steps — agent assignments, tool bindings, cost bindings, HITL gates</li>
+            <li>Agent Specs — supervision model, trust level, tool list</li>
+            <li>Functional &amp; Non-Functional Requirements — CRUD with traceability links</li>
+            <li>Data Sources &amp; Guardrails — BRD-level design elements</li>
+            <li>User Stories — AI-generated from use cases</li>
+            <li>Quality Review — AI-powered assessment per entity</li>
+            <li>Design Repair — automated fix suggestions for orphaned entities</li>
+          </ul>
+          <p><strong>Known gaps:</strong></p>
+          <ul class="gaps-list">
+            <li><span class="gap-label">#17</span> Change packet action buttons remain active after terminal action (approve/reject)</li>
+            <li><span class="gap-label">#57</span> Full page re-renders on single item edits — performance issue under load</li>
+          </ul>
+        </div>
+      </div>
+
+      <div id="d-snsync" class="module-detail">
+        <div class="module-detail-header" onclick="toggleDetail('d-snsync')">
+          <h4>🔄 ServiceNow Sync <span class="badge partial">⚠️ Partial</span></h4><span>▼</span>
+        </div>
+        <div class="module-detail-body">
+          <span class="detail-file">frontend/modules/servicenow_sync.js</span>
+          <ul class="works-list">
+            <li>Connect to SN instance (per-project AES-256-GCM encrypted credentials)</li>
+            <li>Reverse-engineer SN app configuration into Level-1 design entities</li>
+            <li>Assess alignment between SN config and Workbench design</li>
+            <li>Delta export: generate set of changes to be applied to SN</li>
+            <li>Reconciliation: detect differences between SN and design</li>
+            <li>Instance catalog management</li>
+          </ul>
+          <p><strong>Known gaps:</strong></p>
+          <ul class="gaps-list">
+            <li><span class="gap-label">Incomplete</span> SN sys_id write-back — pushing approved changes back into SN (most important missing piece)</li>
+            <li><span class="gap-label">Not built</span> Net-new conflict detection — SN changes since last ingest are not detected</li>
+            <li><span class="gap-label">#41</span> SN sync error detail leaked to client response — may expose SN instance URL</li>
+            <li><span class="gap-label">#62</span> SN-conflict approval silently drops the accepted value</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Remaining accordion entries (collapsed by default) -->
+      <div id="d-reports" class="module-detail">
+        <div class="module-detail-header" onclick="toggleDetail('d-reports')">
+          <h4>📊 Reports <span class="badge stub">🔲 Stub</span></h4><span>▼</span>
+        </div>
+        <div class="module-detail-body">
+          <span class="detail-file">frontend/modules/reports.js</span>
+          <div class="callout warn"><span class="callout-icon">🔲</span><div>This module is a <strong>stub</strong>. The report list and template definitions exist in the UI, but "Preview" and "Generate" buttons show fake success toasts with no real API call. No report generation engine is built. This is a v2 feature.</div></div>
+          <p>Planned report types: Design Summary, Traceability Matrix, BRD Output, Change Log, Test Coverage Report.</p>
+        </div>
+      </div>
+
+      <div id="d-trust" class="module-detail">
+        <div class="module-detail-header" onclick="toggleDetail('d-trust')">
+          <h4>🛡️ Trust &amp; Supervision <span class="badge partial">⚠️ Partial</span></h4><span>▼</span>
+        </div>
+        <div class="module-detail-body">
+          <span class="detail-file">frontend/modules/trust.js</span>
+          <p>Configures AI agent trust levels and HITL (Human-In-The-Loop) gate requirements per workflow. Supervision models: Autonomous / Supervised / Human-Delegated.</p>
+          <ul class="works-list"><li>Trust level display and configuration UI</li><li>HITL gate definition per workflow step</li></ul>
+          <ul class="gaps-list"><li><span class="gap-label">Not built</span> Runtime enforcement of HITL gates in workflow execution</li></ul>
+        </div>
+      </div>
+
+      <!-- Collapsed stubs for remaining modules -->
+      <div id="d-home"    class="module-detail"><div class="module-detail-header" onclick="toggleDetail('d-home')"><h4>🏠 Dashboard <span class="badge working">✅ Working</span></h4><span>▼</span></div><div class="module-detail-body"><span class="detail-file">frontend/modules/home.js</span><p>Project summary stats: use case count, workflow count, open change packets, AI token usage. Recent audit activity feed. Quick-navigation cards to main modules.</p></div></div>
+      <div id="d-projects" class="module-detail"><div class="module-detail-header" onclick="toggleDetail('d-projects')"><h4>🗂️ Projects &amp; Clients <span class="badge working">✅ Working</span></h4><span>▼</span></div><div class="module-detail-body"><span class="detail-file">frontend/modules/projects.js</span><p>Full CRUD for <code>asdlc_client</code> and <code>asdlc_project</code>. Project settings include SN connection (instance URL, username, encrypted password), AI model overrides, and cost parameters (cost per assist, overage rate, annual entitlement). This is the entry point for configuring a new client engagement.</p></div></div>
+      <div id="d-cp"     class="module-detail"><div class="module-detail-header" onclick="toggleDetail('d-cp')"><h4>📋 Change Packets <span class="badge working">✅ Working</span></h4><span>▼</span></div><div class="module-detail-body"><span class="detail-file">frontend/modules/change_packets.js</span><p>Full governance workflow: create a change packet → link design entities → submit → review → approve / reject / send-back. Supports mass-approve (multiple packets at once) and split (break one large CP into smaller ones). Full history and audit trail.</p><ul class="gaps-list"><li><span class="gap-label">#17</span> Action buttons stay active after terminal state</li><li><span class="gap-label">#62</span> SN-conflict approval silently drops accepted value</li></ul></div></div>
+      <div id="d-snassess" class="module-detail"><div class="module-detail-header" onclick="toggleDetail('d-snassess')"><h4>📊 SN Assessment <span class="badge working">✅ Working</span></h4><span>▼</span></div><div class="module-detail-body"><span class="detail-file">frontend/modules/servicenow_assessment.js</span><p>AI-powered assessment of a SN application's design quality, completeness, and alignment with best practices. Produces a scored report with categorized findings.</p></div></div>
+      <div id="d-sncat"  class="module-detail"><div class="module-detail-header" onclick="toggleDetail('d-sncat')"><h4>📦 SN Catalog <span class="badge working">✅ Working</span></h4><span>▼</span></div><div class="module-detail-body"><span class="detail-file">frontend/modules/servicenow_catalog.js</span><p>Exports catalog item designs from the Workbench into SN-compatible format. Covers catalog item structure, variables, and workflow bindings.</p></div></div>
+      <div id="d-snart"  class="module-detail"><div class="module-detail-header" onclick="toggleDetail('d-snart')"><h4>🔬 SN Artifacts <span class="badge partial">⚠️ Partial</span></h4><span>▼</span></div><div class="module-detail-body"><span class="detail-file">frontend/modules/sn_artifacts.js</span><p>Phase 4 feature. Generic viewer and editor for SN artifacts (scripts, flows, tables) captured from a live SN instance. Core viewing works; full editing pipeline is partial.</p></div></div>
+      <div id="d-cost"   class="module-detail"><div class="module-detail-header" onclick="toggleDetail('d-cost')"><h4>💰 Cost Projections <span class="badge working">✅ Working</span></h4><span>▼</span></div><div class="module-detail-body"><span class="detail-file">frontend/modules/cost_projections.js</span><p>Now Assist cost modeling. Per-step cost bindings × Deloitte rate cards = projected engagement cost. Previous bug (120x overestimate from AI omitting descriptions in prompt) was fixed June 2026.</p><ul class="gaps-list"><li><span class="gap-label">#43</span> <code>/cost-estimate</code> API hardcodes <code>claude-opus-4-5</code> model instead of reading from admin settings</li></ul></div></div>
+      <div id="d-costmgmt" class="module-detail"><div class="module-detail-header" onclick="toggleDetail('d-costmgmt')"><h4>⚙️ Cost Management <span class="badge partial">⚠️ Partial</span></h4><span>▼</span></div><div class="module-detail-body"><span class="detail-file">frontend/modules/cost_management.js</span><p>CRUD for per-project cost parameters. Core functionality works.</p><ul class="gaps-list"><li><span class="gap-label">#51</span> Cost management modal is missing CSS classes — functional but visually broken</li></ul></div></div>
+      <div id="d-testing" class="module-detail"><div class="module-detail-header" onclick="toggleDetail('d-testing')"><h4>🧪 Testing <span class="badge partial">⚠️ Partial</span></h4><span>▼</span></div><div class="module-detail-body"><span class="detail-file">frontend/modules/testing.js</span><p>Test case management: list, create, edit, AI "infer gaps", coverage matrix view. Core features work.</p><ul class="gaps-list"><li><span class="gap-label">#54</span> Assumes unpaginated <code>/projects</code> response — breaks when pagination is active</li></ul></div></div>
+      <div id="d-build"  class="module-detail"><div class="module-detail-header" onclick="toggleDetail('d-build')"><h4>📄 Build Export <span class="badge partial">⚠️ Partial</span></h4><span>▼</span></div><div class="module-detail-body"><span class="detail-file">frontend/modules/build_export.js</span><p>Generates a Build Specification document from the finalized design and exports as DOCX. Generation and export work. SN write-back (auto-deploying to SN) requires the sys_id write-back capability in the SN sync module — not yet production-ready.</p></div></div>
+      <div id="d-baseline" class="module-detail"><div class="module-detail-header" onclick="toggleDetail('d-baseline')"><h4>📸 Baselines <span class="badge partial">⚠️ Partial</span></h4><span>▼</span></div><div class="module-detail-body"><span class="detail-file">frontend/modules/baseline.js</span><p>Design snapshot management. Create and lock baselines at milestones; compare two baselines to track evolution. Create, lock, and comparison views work.</p><ul class="gaps-list"><li><span class="gap-label">#49</span> Baseline detail fetch uses undefined ID field — detail view is broken</li></ul></div></div>
+      <div id="d-library" class="module-detail"><div class="module-detail-header" onclick="toggleDetail('d-library')"><h4>📚 Library <span class="badge working">✅ Working</span></h4><span>▼</span></div><div class="module-detail-body"><span class="detail-file">frontend/modules/library.js</span><p>Cross-project entity reuse. Browse design artifacts from other projects and copy them into the current project. Useful for templating common workflows and agents across engagements.</p><ul class="gaps-list"><li><span class="gap-label">#39</span> One library endpoint uses manual string escaping instead of parameterized queries — SQL injection risk (Phase 1 fast-win fix)</li></ul></div></div>
+      <div id="d-evidence" class="module-detail"><div class="module-detail-header" onclick="toggleDetail('d-evidence')"><h4>🔗 Evidence <span class="badge partial">⚠️ Partial</span></h4><span>▼</span></div><div class="module-detail-body"><span class="detail-file">frontend/modules/evidence.js</span><p>Links evidence sources (documents, requirements, meeting notes) to specific design entities for traceability. View linked evidence and navigate to source documents.</p><ul class="gaps-list"><li><span class="gap-label">Stub</span> "Re-run Extraction" button shows a fake success toast with no real API call</li></ul></div></div>
+      <div id="d-valid"  class="module-detail"><div class="module-detail-header" onclick="toggleDetail('d-valid')"><h4>✔️ Validation <span class="badge partial">⚠️ Partial</span></h4><span>▼</span></div><div class="module-detail-body"><span class="detail-file">frontend/modules/validation.js</span><p>Design validation rules — checks completeness, consistency, and best practices. Rule definition and display work. Basic validation runs work. Some rule types and the natural language rule engine are partially implemented.</p></div></div>
+      <div id="d-audit"  class="module-detail"><div class="module-detail-header" onclick="toggleDetail('d-audit')"><h4>🔍 Audit Log <span class="badge working">✅ Working</span></h4><span>▼</span></div><div class="module-detail-body"><span class="detail-file">frontend/modules/audit.js</span><p>Read-only viewer for <code>asdlc_audit_log</code>. Every create/update/delete operation throughout the system writes an audit entry with before/after state. Filter by entity type, user, and date range.</p></div></div>
+      <div id="d-adminai" class="module-detail"><div class="module-detail-header" onclick="toggleDetail('d-adminai')"><h4>⚙️ Admin — AI Settings <span class="badge working">✅ Working</span></h4><span>▼</span></div><div class="module-detail-body"><span class="detail-file">frontend/modules/admin_ai.js</span><p>Override which Claude model is used for each role (extraction, synthesis, quality review, cost estimation, reconciliation, lightweight). Settings stored in <code>asdlc_app_setting</code> key/value table and read by <code>agent/ai-config.js</code> at runtime. Also shows AI token usage stats.</p></div></div>
+      <div id="d-adminbp" class="module-detail"><div class="module-detail-header" onclick="toggleDetail('d-adminbp')"><h4>📖 Admin — Best Practices <span class="badge working">✅ Working</span></h4><span>▼</span></div><div class="module-detail-body"><span class="detail-file">frontend/modules/admin_best_practices.js</span><p>Manage the library of best practices injected into AI prompts during ingestion and quality review. Add, edit, categorize, activate/deactivate. Best practices steer AI output toward Deloitte SN standards.</p></div></div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════ -->
+    <!-- SECTION: CODE MAP                                      -->
+    <!-- ══════════════════════════════════════════════════════ -->
+    <div id="codemap" class="section">
+      <div class="section-title">Code Map</div>
+      <div class="section-lead">Find what you're looking for in the first 30 seconds.</div>
+
+      <div class="card" style="overflow:hidden;">
+        <table class="data-table">
+          <thead><tr><th>What you need</th><th>Where it is</th></tr></thead>
+          <tbody>
+            <tr><td><strong>All API routes (188)</strong></td><td><code>backend-node/server.js</code> — search <code>app.get(</code>, <code>app.post(</code>, <code>app.put(</code>, <code>app.delete(</code></td></tr>
+            <tr><td><strong>Database schema (68 tables)</strong></td><td><code>backend-node/schema.sql</code></td></tr>
+            <tr><td><strong>DB helpers</strong> (generateId, nextSlug, auditLog)</td><td><code>backend-node/db.js</code> lines 1–300</td></tr>
+            <tr><td><strong>Schema migrations</strong> (ALTER TABLE history)</td><td><code>backend-node/db.js</code> lines 27–160</td></tr>
+            <tr><td><strong>AI model routing</strong> (which model for which role)</td><td><code>backend-node/agent/ai-config.js</code></td></tr>
+            <tr><td><strong>AI ingestion orchestration</strong></td><td><code>backend-node/agent/</code> directory</td></tr>
+            <tr><td><strong>AI prompt templates</strong></td><td><code>backend-node/agent/prompts/*.md</code></td></tr>
+            <tr><td><strong>SN REST client &amp; credentials</strong></td><td><code>backend-node/server.js</code> — search <code>sn_instance</code></td></tr>
+            <tr><td><strong>Credential encryption</strong></td><td><code>backend-node/crypto-util.js</code></td></tr>
+            <tr><td><strong>SN wiki context injection</strong></td><td><code>backend-node/agent/wiki-context.js</code></td></tr>
+            <tr><td><strong>Frontend SPA bootstrap &amp; shared utils</strong></td><td><code>frontend/app.js</code></td></tr>
+            <tr><td><strong>Frontend module entry points</strong></td><td><code>frontend/modules/&lt;name&gt;.js</code> — each exports <code>render(container)</code></td></tr>
+            <tr><td><strong>All CSS</strong></td><td><code>frontend/styles.css</code></td></tr>
+            <tr><td><strong>Known issues backlog</strong></td><td><code>BACKLOG.md</code></td></tr>
+            <tr><td><strong>Architecture overview</strong></td><td><code>ARCHITECTURE.md</code> / <code>ARCHITECTURE.html</code></td></tr>
+            <tr><td><strong>This document</strong></td><td><code>docs/KT_ONBOARDING.html</code></td></tr>
+            <tr><td><strong>Production work plan</strong></td><td><code>docs/PRODUCTION_WORKPLAN.md</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════ -->
+    <!-- SECTION: DATA MODEL                                    -->
+    <!-- ══════════════════════════════════════════════════════ -->
+    <div id="datamodel" class="section">
+      <div class="section-title">Data Model</div>
+      <div class="section-lead">68 tables. Here's what you'll touch most, organized by domain.</div>
+
+      <div class="dm-grid">
+
+        <!-- TENANCY -->
+        <div class="dm-domain">
+          <div class="dm-head blue">Tenancy</div>
+          <div class="dm-body">
+            <div class="dm-row"><span class="dm-t b">asdlc_client</span><span class="dm-d">Organisation (Deloitte client)</span></div>
+            <div class="dm-row l1"><span class="dm-conn">└─</span><span class="dm-t b">asdlc_project</span><span class="dm-d">Engagement / application scope</span></div>
+            <div class="dm-row l2"><span class="dm-conn">└─</span><span class="dm-t s">asdlc_project_member</span><span class="dm-d">User ↔ Project membership</span><span class="dm-warn">⚠ not enforced</span></div>
+          </div>
+        </div>
+
+        <!-- DESIGN CORE -->
+        <div class="dm-domain">
+          <div class="dm-head green">Design Core</div>
+          <div class="dm-body">
+            <div class="dm-row"><span class="dm-t g">asdlc_use_case</span><span class="dm-d">Discrete business capability</span></div>
+            <div class="dm-row l1"><span class="dm-conn">└─</span><span class="dm-t g">asdlc_workflow</span><span class="dm-d">Process fulfilling a use case</span></div>
+            <div class="dm-row l2"><span class="dm-conn">└─</span><span class="dm-t g">asdlc_workflow_step</span><span class="dm-d">Steps in the process</span></div>
+            <div class="dm-row l3"><span class="dm-conn">├─</span><span class="dm-t s">asdlc_agent_spec</span><span class="dm-d">AI agent executing the step</span></div>
+            <div class="dm-row l3"><span class="dm-conn">├─</span><span class="dm-t s">asdlc_tool</span><span class="dm-d">Tools available to the agent</span></div>
+            <div class="dm-row l3"><span class="dm-conn">└─</span><span class="dm-t s">asdlc_hitl_gate</span><span class="dm-d">Human approval checkpoints</span></div>
+          </div>
+        </div>
+
+        <!-- REQUIREMENTS & TESTING -->
+        <div class="dm-domain">
+          <div class="dm-head amber">Requirements &amp; Testing</div>
+          <div class="dm-body">
+            <div class="dm-row"><span class="dm-t a">asdlc_functional_req</span><span class="dm-d">Functional requirements</span></div>
+            <div class="dm-row"><span class="dm-t a">asdlc_nonfunctional_req</span><span class="dm-d">Non-functional requirements</span></div>
+            <div class="dm-row"><span class="dm-t a">asdlc_acceptance_criterion</span><span class="dm-d">Acceptance criteria per use case</span></div>
+            <div class="dm-row"><span class="dm-t a">asdlc_test_case</span><span class="dm-d">Manual and automated test cases</span></div>
+          </div>
+        </div>
+
+        <!-- AI INGESTION -->
+        <div class="dm-domain">
+          <div class="dm-head purple">AI Ingestion</div>
+          <div class="dm-body">
+            <div class="dm-row"><span class="dm-t p">asdlc_ingest_document</span><span class="dm-d">Uploaded source document</span></div>
+            <div class="dm-row l1"><span class="dm-conn">├─</span><span class="dm-t p">asdlc_ingest_extraction</span><span class="dm-d">AI-extracted entity (staged, pre-promotion)</span></div>
+            <div class="dm-row l1"><span class="dm-conn">├─</span><span class="dm-t p">asdlc_ingest_clarification</span><span class="dm-d">AI follow-up Q&amp;A during ingestion</span></div>
+            <div class="dm-row l1"><span class="dm-conn">└─</span><span class="dm-t p">asdlc_ingest_feedback</span><span class="dm-d">User thumbs up/down on extractions</span></div>
+          </div>
+        </div>
+
+        <!-- GOVERNANCE -->
+        <div class="dm-domain">
+          <div class="dm-head teal">Governance</div>
+          <div class="dm-body">
+            <div class="dm-row"><span class="dm-t c">asdlc_change_packet</span><span class="dm-d">Tracked change proposal</span></div>
+            <div class="dm-row l1"><span class="dm-conn">└─</span><span class="dm-t c">asdlc_change_packet_item</span><span class="dm-d">Individual entity changes within a packet</span></div>
+            <hr class="dm-sep">
+            <div class="dm-row"><span class="dm-t c">asdlc_baseline</span><span class="dm-d">Design snapshot at a milestone</span></div>
+          </div>
+        </div>
+
+        <!-- PLATFORM & CONFIG -->
+        <div class="dm-domain">
+          <div class="dm-head slate">Platform &amp; Config</div>
+          <div class="dm-body">
+            <div class="dm-row"><span class="dm-t s">asdlc_audit_log</span><span class="dm-d">Every write op — who, what, before/after</span></div>
+            <div class="dm-row"><span class="dm-t s">asdlc_ai_usage</span><span class="dm-d">Every Claude API call (tokens, cost, model)</span></div>
+            <div class="dm-row"><span class="dm-t s">asdlc_app_setting</span><span class="dm-d">Key/value config (AI model overrides)</span></div>
+            <div class="dm-row"><span class="dm-t s">asdlc_assist_rate_card</span><span class="dm-d">Now Assist pricing per skill/tier</span></div>
+            <div class="dm-row"><span class="dm-t s">asdlc_workflow_step_cost_binding</span><span class="dm-d">Cost per step for projections</span></div>
+          </div>
+        </div>
+
+      </div>
+
+      <h2 class="sub-heading">Key Patterns</h2>
+      <div class="two-col">
+        <div class="card">
+          <div class="card-header"><h3>Schema conventions</h3></div>
+          <div class="card-body">
+            <p><strong>UUID primary keys</strong> — TEXT, generated by <code>db.generateId()</code>.</p>
+            <p><strong>Slugs</strong> — human-readable IDs (<code>UC-001</code>, <code>WF-002</code>) generated by <code>db.nextSlug()</code> per project.</p>
+            <p><strong>JSON in TEXT columns</strong> — goals, fields, relationships stored as JSON strings. Migrating to <code>jsonb</code> in PostgreSQL.</p>
+            <p><strong>Soft delete</strong> — <code>lifecycle_status</code>: <code>active</code> / <code>archived</code> / <code>deprecated</code> / <code>retired</code>.</p>
+            <p><strong>Full audit trail</strong> — <code>db.auditLog()</code> called on every write; stores before/after state in <code>asdlc_audit_log</code>.</p>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>ServiceNow provenance</h3></div>
+          <div class="card-body">
+            <p>SN-sourced entities carry five columns that power the round-trip identity:</p>
+            <p><code>source_system</code> — always "ServiceNow"</p>
+            <p><code>source_sys_id</code> — the SN record's UUID</p>
+            <p><code>source_table</code> — SN table name</p>
+            <p><code>source_fluent</code> — normalized Fluent IR for round-trip matching</p>
+            <p><code>source_hash</code> — hash of SN state at time of ingest</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout danger">
+        <span class="callout-icon">🔐</span>
+        <div><strong>Multi-tenancy gap.</strong> Every design entity carries <code>project_id</code>. Projects carry <code>client_id</code>. The schema is correct but the API does <strong>not yet verify</strong> that the authenticated user belongs to the requested project. Any user can access any project's data. This is the primary security gap — fixed in Phase 4 of the production roadmap.</div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════ -->
+    <!-- SECTION: AI INTEGRATION                                -->
+    <!-- ══════════════════════════════════════════════════════ -->
+    <div id="ai" class="section">
+      <div class="section-title">AI Integration</div>
+      <div class="section-lead">Three Claude tiers, routed by task. All usage logged. Prompts externalized to Markdown files.</div>
+
+      <h2 class="sub-heading">Model Routing</h2>
+      <div class="card" style="overflow:hidden;">
+        <table class="data-table">
+          <thead><tr><th>Role</th><th>Default Model</th><th>Used For</th></tr></thead>
+          <tbody class="model-row">
+            <tr><td>EXTRACTION</td><td>claude-sonnet-4-6</td><td>Document entity extraction, parsing</td></tr>
+            <tr><td>SYNTHESIS</td><td>claude-opus-4-8</td><td>Cross-document synthesis, design generation</td></tr>
+            <tr><td>QUALITY_REVIEWER</td><td>claude-sonnet-4-6</td><td>Design quality assessment</td></tr>
+            <tr><td>COST_ESTIMATOR</td><td>claude-opus-4-8</td><td>Now Assist cost estimation</td></tr>
+            <tr><td>RECONCILER</td><td>claude-opus-4-8</td><td>SN reconciliation, conflict detection</td></tr>
+            <tr><td>LIGHTWEIGHT</td><td>claude-haiku-4-5</td><td>Simple classification, formatting tasks</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="color:var(--muted); font-size:12px; margin-top:-12px; margin-bottom:20px;">All models configurable via Admin → AI Settings. Overrides stored in <code>asdlc_app_setting</code>, read by <code>agent/ai-config.js</code> at runtime.</p>
+
+      <h2 class="sub-heading">How Prompts Work</h2>
+      <div class="two-col">
+        <div class="card">
+          <div class="card-header"><h3>Externalized Prompt Templates</h3></div>
+          <div class="card-body">
+            <p>Prompts are Markdown files in <code>backend-node/agent/prompts/*.md</code>, loaded at runtime by <code>prompt-templates.js</code>. Prompt changes don't require code deployments — just edit the <code>.md</code> file.</p>
+            <p>The ingest loop injects a small SN context block into every prompt, plus a <code>read_wiki_page</code> tool that lets Claude pull detailed SN design reference on demand (progressive disclosure — avoids loading 33K tokens unless needed).</p>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>Extended Thinking</h3></div>
+          <div class="card-body">
+            <p>Opus calls for reasoning-heavy tasks (reconciliation, synthesis) use Anthropic's <strong>extended thinking</strong> (adaptive mode) when enabled.</p>
+            <p>This adds latency but significantly improves quality on complex multi-document design generation tasks. Configurable per task type.</p>
+          </div>
+        </div>
+      </div>
+
+      <h2 class="sub-heading">Usage Tracking</h2>
+      <div class="callout success">
+        <span class="callout-icon">📊</span>
+        <div>Every Claude API call is logged to <code>asdlc_ai_usage</code> with: input tokens, output tokens, estimated cost, model used, and the role that triggered it. Viewable in Admin → AI Settings. Per-tenant cost budgeting (alerting when spend exceeds threshold) is on the production roadmap.</div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════ -->
+    <!-- SECTION: SERVICENOW                                    -->
+    <!-- ══════════════════════════════════════════════════════ -->
+    <div id="sn" class="section">
+      <div class="section-title">ServiceNow Integration</div>
+      <div class="section-lead">Per-project encrypted connections, Fluent-notation round-trip identity, and a partially-complete write-back pipeline.</div>
+
+      <div class="two-col">
+        <div class="card">
+          <div class="card-header"><h3>🔑 Connection Model</h3></div>
+          <div class="card-body">
+            <p>Each project stores its own SN connection: instance URL, username, and AES-256-GCM encrypted password in <code>asdlc_project.sn_password_enc</code>.</p>
+            <p>Encryption key: <code>ASDLC_ENCRYPT_KEY</code> environment variable. If missing, credentials fall back to plaintext storage with a <code>"plain:"</code> prefix.</p>
+            <div class="callout danger" style="margin-top:10px;"><span class="callout-icon">⚠️</span><div><strong>Always set <code>ASDLC_ENCRYPT_KEY</code></strong> — without it, SN passwords are stored in plaintext in the database (issue #76).</div></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>🌐 Corporate TLS Issue</h3></div>
+          <div class="card-body">
+            <p>Deloitte's SSL inspection proxy causes <code>SELF_SIGNED_CERT_IN_CHAIN</code> errors on SN API calls.</p>
+            <p><strong>Dev workaround:</strong> <code>SN_INSECURE_TLS=true</code> in <code>.env</code> disables certificate verification.</p>
+            <div class="callout danger" style="margin-top:10px;"><span class="callout-icon">🔒</span><div><strong>Not acceptable for production.</strong> The production fix is <code>NODE_EXTRA_CA_CERTS=&lt;path-to-deloitte-proxy-cert&gt;</code>.</div></div>
+          </div>
+        </div>
+      </div>
+
+      <h2 class="sub-heading">Fluent Notation — Round-Trip Identity</h2>
+      <div class="card">
+        <div class="card-body">
+          <p>The round-trip system uses <strong>Fluent notation</strong> — an internal intermediate representation (IR) that encodes SN design objects in a normalized form. When an entity is ingested from SN, its Fluent representation is stored in <code>source_fluent</code>.</p>
+          <p>When writing changes back to SN, Fluent is used to map Workbench design entities to the correct SN <code>sys_id</code>s. This is what makes the round-trip <strong>reliable</strong> rather than fragile name-based matching — even if the SN record name changes, the Fluent notation + sys_id maintains identity.</p>
+        </div>
+      </div>
+
+      <h2 class="sub-heading">Round-Trip Status</h2>
+      <div class="card" style="overflow:hidden;">
+        <table class="data-table">
+          <thead><tr><th>Capability</th><th>Status</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td>Read from SN (reverse-engineer)</td><td><span class="badge working">✅ Working</span></td><td>Scripts, flows, tables, catalog items → Level-1 design entities</td></tr>
+            <tr><td>Assess alignment</td><td><span class="badge working">✅ Working</span></td><td>Scored report of SN config vs. Workbench design</td></tr>
+            <tr><td>Reconcile + delta export</td><td><span class="badge working">✅ Working</span></td><td>Detect differences; generate change set</td></tr>
+            <tr><td>Write back to SN (sys_id)</td><td><span class="badge partial">⚠️ Partial</span></td><td>Partially implemented; not production-ready</td></tr>
+            <tr><td>Detect SN changes since last ingest</td><td><span class="badge stub">❌ Not built</span></td><td>Net-new conflict detection is on the roadmap</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════ -->
+    <!-- SECTION: LOCAL SETUP                                   -->
+    <!-- ══════════════════════════════════════════════════════ -->
+    <div id="setup" class="section">
+      <div class="section-title">Local Development Setup</div>
+      <div class="section-lead">From clone to running in under 10 minutes.</div>
+
+      <div class="callout info"><span class="callout-icon">📋</span><div><strong>Prerequisites:</strong> Node.js ≥ 22.5, Git. Check with <code>node --version</code> — the built-in <code>node:sqlite</code> module requires 22.5 or later.</div></div>
+
+      <pre class="code-block"><span class="cm"># 1. Clone and install</span>
+git clone &lt;repo-url&gt;
+cd agentic-sdlc-workbench/backend-node
+npm install
+
+<span class="cm"># 2. Create .env file (minimum required)</span>
+<span class="nm">ANTHROPIC_API_KEY</span>=<span class="st">sk-ant-...</span>           <span class="cm"># Get from Anthropic console — required for real AI</span>
+<span class="nm">ASDLC_ENCRYPT_KEY</span>=<span class="st">any-32-char-secret</span>   <span class="cm"># For SN credential encryption — ALWAYS set this</span>
+<span class="nm">PORT</span>=<span class="st">8000</span>                               <span class="cm"># Optional, defaults to 8000</span>
+
+<span class="cm"># Optional — for ServiceNow integration</span>
+<span class="nm">SN_INSTANCE</span>=<span class="st">https://your-instance.service-now.com</span>
+<span class="nm">SN_USER</span>=<span class="st">admin</span>
+<span class="nm">SN_PASSWORD</span>=<span class="st">...</span>
+<span class="nm">SN_INSECURE_TLS</span>=<span class="st">true</span>                  <span class="cm"># Required on Deloitte network (dev only)</span>
+
+<span class="cm"># 3. Start the server (seeds demo data automatically on first run)</span>
+node server.js
+<span class="cm"># → "Agentic SDLC Workbench running on port 8000"</span>
+
+<span class="cm"># 4. Open the frontend</span>
+<span class="cm"># Double-click: Launch Workbench.bat</span>
+<span class="cm"># Or open:       frontend/index.html directly in Chrome/Edge</span>
+
+<span class="cm"># 5. Select any demo user (no password in dev)</span>
+<span class="cm"># Demo users: Alice Chen, Bob Martinez, Carol Johnson, David Lee, Emma Wilson</span></pre>
+
+      <h2 class="sub-heading">Manual Test Scripts</h2>
+      <p style="color:#334155; margin-bottom:12px;">11 manual exploration scripts in <code>backend-node/</code> — useful for debugging specific subsystems. These are <strong>not a test suite</strong> (no assertions, no framework).</p>
+      <pre class="code-block">node test-reverse-l1.js          <span class="cm"># SN reverse-engineering</span>
+node test-sn-sync.js             <span class="cm"># SN sync pipeline</span>
+node test-roundtrip-inbound.js   <span class="cm"># Inbound round-trip</span>
+node test-instance-catalog.js    <span class="cm"># Instance catalog</span>
+node test-req-linker.js          <span class="cm"># Requirement linking</span></pre>
+
+      <div class="callout warn"><span class="callout-icon">⚠️</span><div>No real test suite exists yet. The <code>package.json</code> test script is literally <code>echo "Error: no test specified" &amp;&amp; exit 1</code>. A proper test framework (Jest/Vitest + Playwright) is Phase 6 of the production roadmap.</div></div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════ -->
+    <!-- SECTION: KNOWN ISSUES                                  -->
+    <!-- ══════════════════════════════════════════════════════ -->
+    <div id="issues" class="section">
+      <div class="section-title">Known Issues</div>
+      <div class="section-lead">Full backlog in <code>BACKLOG.md</code>. These are the ones that matter most before production use.</div>
+
+      <h2 class="sub-heading">Critical — Fix Before Any Multi-User Use</h2>
+      <div class="card" style="overflow:hidden;">
+        <table class="data-table">
+          <thead><tr><th>#</th><th>Issue</th><th>Impact</th></tr></thead>
+          <tbody>
+            <tr class="sev-critical"><td><span class="issue-num">#2</span></td><td>No real authentication — only HTTP header with user UUID</td><td>Anyone can impersonate any user</td></tr>
+            <tr class="sev-critical"><td><span class="issue-num">#37</span></td><td>Non-transactional multi-writes in promote and SN sync (<code>server.js</code> ~6943, ~7201)</td><td>Data corruption on mid-loop failure</td></tr>
+            <tr class="sev-critical"><td><span class="issue-num">#38</span></td><td>No Express error middleware — bare 500s on exception</td><td>Silent failures; no useful error messages</td></tr>
+            <tr class="sev-critical"><td><span class="issue-num">#39</span></td><td><code>/library</code> uses manual string escaping, not parameterized queries</td><td>SQL injection risk on one endpoint</td></tr>
+            <tr class="sev-critical"><td><span class="issue-num">#42</span></td><td>Migration error swallowing in <code>db.js</code> (<code>catch {}</code>)</td><td>Failed schema changes go unnoticed</td></tr>
+            <tr class="sev-critical"><td><span class="issue-num">#73</span></td><td>No write serialization on concurrent promote/approve/sync</td><td>Data corruption under concurrent load</td></tr>
+            <tr class="sev-critical"><td><span class="issue-num">#76</span></td><td><code>ASDLC_ENCRYPT_KEY</code> optional — plaintext fallback if missing</td><td>SN credentials stored in plaintext</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 class="sub-heading">High — Functional Failures</h2>
+      <div class="card" style="overflow:hidden;">
+        <table class="data-table">
+          <thead><tr><th>#</th><th>Issue</th><th>Module</th></tr></thead>
+          <tbody>
+            <tr class="sev-high"><td><span class="issue-num">#17</span></td><td>Action buttons stay active after terminal action</td><td>Design Review, Change Packets</td></tr>
+            <tr class="sev-high"><td><span class="issue-num">#36</span></td><td>RASIC not populated (recurring AI regression)</td><td>Ingestion</td></tr>
+            <tr class="sev-high"><td><span class="issue-num">#40</span></td><td>Clarification auto-apply overwrites cost params project-wide</td><td>Ingestion</td></tr>
+            <tr class="sev-high"><td><span class="issue-num">#41</span></td><td>SN sync error detail leaked to client response</td><td>SN Sync</td></tr>
+            <tr class="sev-high"><td><span class="issue-num">#43</span></td><td><code>/cost-estimate</code> hardcodes <code>claude-opus-4-5</code> model</td><td>Cost Projections</td></tr>
+            <tr class="sev-high"><td><span class="issue-num">#49</span></td><td>Baseline detail fetch uses undefined ID field</td><td>Baselines</td></tr>
+            <tr class="sev-high"><td><span class="issue-num">#54</span></td><td>testing.js assumes unpaginated <code>/projects</code> response</td><td>Testing</td></tr>
+            <tr class="sev-high"><td><span class="issue-num">#62</span></td><td>SN-conflict approval silently drops accepted value</td><td>SN Sync</td></tr>
+            <tr class="sev-high"><td><span class="issue-num">#64</span></td><td>PDF ingest produces garbage output</td><td>Ingestion</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 class="sub-heading">Medium — Code Quality &amp; Performance</h2>
+      <div class="card" style="overflow:hidden;">
+        <table class="data-table">
+          <thead><tr><th>#</th><th>Issue</th></tr></thead>
+          <tbody>
+            <tr class="sev-medium"><td><span class="issue-num">#44</span></td><td><code>server.js</code> is 9,935 lines — needs route modularization into <code>routes/</code> subdirectory</td></tr>
+            <tr class="sev-medium"><td><span class="issue-num">#45</span></td><td>N+1 query loop in design-report endpoint (7 hot loops re-preparing identical statements)</td></tr>
+            <tr class="sev-medium"><td><span class="issue-num">#46</span></td><td>Missing indexes: <code>workflow_step(workflow_id)</code>, <code>agent_spec(project_id)</code>, <code>tool(project_id)</code></td></tr>
+            <tr class="sev-medium"><td><span class="issue-num">#51</span></td><td>Cost management modal missing CSS classes — visually broken</td></tr>
+            <tr class="sev-medium"><td><span class="issue-num">#55</span></td><td><code>design_review.js</code> is 6,151 lines — needs modularization</td></tr>
+            <tr class="sev-medium"><td><span class="issue-num">#57</span></td><td>Full page re-renders on single-item edits (performance)</td></tr>
+            <tr class="sev-medium"><td><span class="issue-num">#58</span></td><td>No debounce on list search filters — O(rows × payload) per keystroke</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════ -->
+    <!-- SECTION: DEFERRED                                      -->
+    <!-- ══════════════════════════════════════════════════════ -->
+    <div id="deferred" class="section">
+      <div class="section-title">Deferred (v2) Features</div>
+      <div class="section-lead">Designed or partially built, but not in scope for the first production release. Don't try to finish these for v1.</div>
+
+      <div class="card" style="overflow:hidden;">
+        <table class="data-table">
+          <thead><tr><th>Feature</th><th>Current State</th><th>Why Deferred</th></tr></thead>
+          <tbody>
+            <tr><td><strong>SN write-back (full round-trip)</strong></td><td><span class="badge partial">⚠️ Partially built</span></td><td>Needs sys_id write-back + conflict detection + full test coverage before production use</td></tr>
+            <tr><td><strong>AI quality redesign (Suggestion Level slider)</strong></td><td><span class="badge stub">Designed (backlog #28–31)</span></td><td>Significant AI pipeline change — defer for v1 stability</td></tr>
+            <tr><td><strong>Two-tier Sonnet+Opus synthesis pass</strong></td><td><span class="badge stub">Designed</span></td><td>Adds latency and cost — validate quality baseline first</td></tr>
+            <tr><td><strong>Reports</strong> (design summary, traceability matrix)</td><td><span class="badge stub">🔲 UI stubbed</span></td><td>Report generation engine not built</td></tr>
+            <tr><td><strong>HITL gate runtime enforcement</strong></td><td><span class="badge partial">⚠️ UI built</span></td><td>Workflow execution model not implemented</td></tr>
+            <tr><td><strong>Natural language validation rules</strong></td><td><span class="badge partial">⚠️ Partially built</span></td><td>Rule engine incomplete</td></tr>
+            <tr><td><strong>Real-time collaboration</strong></td><td><span class="badge stub">Not started</span></td><td>Requires WebSockets + conflict resolution architecture</td></tr>
+            <tr><td><strong>PDF document ingestion</strong></td><td><span class="badge stub">Not started</span></td><td>Needs proper PDF-to-text (pdfjs-dist or similar)</td></tr>
+            <tr><td><strong>Audit log export</strong> (CSV/Excel)</td><td><span class="badge stub">Not started</span></td><td>Viewing works; export not built</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════ -->
+    <!-- SECTION: KT SESSIONS                                   -->
+    <!-- ══════════════════════════════════════════════════════ -->
+    <div id="sessions" class="section">
+      <div class="section-title">KT Session Guide</div>
+      <div class="section-lead">Six structured sessions to get a new team member fully oriented. Run sessions 1–3 in week one, 4–6 as the developer sets up and starts contributing.</div>
+
+      <div class="session-grid">
+
+        <!-- SESSION 1 -->
+        <div class="session-card">
+          <div class="session-card-head">
+            <div class="session-num">Session 1 · Week 1</div>
+            <div class="session-title">Architecture &amp; Data Model</div>
+            <div class="session-meta"><span class="session-tag">⏱ 2 hours</span><span class="session-tag">👥 All team</span></div>
+          </div>
+          <div class="session-body">
+            <div class="session-pre">
+              <h4>Before this session</h4>
+              <ul class="pre-list">
+                <li>Read: <strong>Architecture</strong> and <strong>Data Model</strong> sections of this guide</li>
+                <li>Open: <code>backend-node/schema.sql</code> — skim the table names</li>
+                <li>Have running: <code>node server.js</code> and confirm the home dashboard loads</li>
+                <li>Bring: any questions from your first scan of the repo</li>
+              </ul>
+            </div>
+            <p>Big picture first — how the pieces fit together and how data is structured.</p>
+            <ul class="session-topics">
+              <li>System architecture diagram and request flows</li>
+              <li>Tech stack decisions and why (no framework, no build step)</li>
+              <li>68-table schema — key entities and relationships</li>
+              <li>Multi-tenancy model (schema vs. enforcement gap)</li>
+              <li>Audit trail and soft-delete patterns</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- SESSION 2 -->
+        <div class="session-card">
+          <div class="session-card-head">
+            <div class="session-num">Session 2 · Week 1</div>
+            <div class="session-title">Working Features Demo</div>
+            <div class="session-meta"><span class="session-tag">⏱ 2 hours</span><span class="session-tag">👥 All team</span></div>
+          </div>
+          <div class="session-body">
+            <div class="session-pre">
+              <h4>Before this session</h4>
+              <ul class="pre-list">
+                <li>Read: <strong>Feature Inventory</strong> section of this guide — know what to expect</li>
+                <li>Have running: the app with a demo project open</li>
+                <li>Have ready: a sample DOCX or TXT file to upload during the demo</li>
+                <li>Confirm: access to a SN dev instance, or presenter will share screen</li>
+              </ul>
+            </div>
+            <p>Live walkthrough of what works today — run real user journeys end to end.</p>
+            <ul class="session-topics">
+              <li>Create project, configure SN connection</li>
+              <li>Upload a document → AI extracts → review staged → promote</li>
+              <li>Review design in Design Review module</li>
+              <li>Create and approve a change packet</li>
+              <li>Run SN assessment on a live instance</li>
+              <li>Admin: AI settings, best practices, audit log</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- SESSION 3 -->
+        <div class="session-card">
+          <div class="session-card-head">
+            <div class="session-num">Session 3 · Week 1</div>
+            <div class="session-title">Stubs, Gaps &amp; Roadmap</div>
+            <div class="session-meta"><span class="session-tag">⏱ 1 hour</span><span class="session-tag">👥 All team</span></div>
+          </div>
+          <div class="session-body">
+            <div class="session-pre">
+              <h4>Before this session</h4>
+              <ul class="pre-list">
+                <li>Read: <strong>Known Issues</strong> and <strong>Deferred (v2)</strong> sections of this guide</li>
+                <li>Open: <code>BACKLOG.md</code> in your editor</li>
+                <li>Skim: production work plan — the Critical Path table</li>
+              </ul>
+            </div>
+            <p>Know what's fake before you spend time on it. Context for what's in v1 vs. v2.</p>
+            <ul class="session-topics">
+              <li>Walk through every ⚠️ Partial and 🔲 Stub module</li>
+              <li>Explain each stub: why it's fake, what the real version requires</li>
+              <li>Review the 7 critical issues in BACKLOG.md</li>
+              <li>Overview of production roadmap phases</li>
+              <li>v1 vs. v2 scope decision (still open — to be decided in Phase 2)</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- SESSION 4 -->
+        <div class="session-card">
+          <div class="session-card-head">
+            <div class="session-num">Session 4 · Week 2</div>
+            <div class="session-title">AI Pipeline Deep-Dive</div>
+            <div class="session-meta"><span class="session-tag">⏱ 2 hours</span><span class="session-tag">👩‍💻 Developers</span></div>
+          </div>
+          <div class="session-body">
+            <div class="session-pre">
+              <h4>Before this session</h4>
+              <ul class="pre-list">
+                <li>Read: <strong>AI Integration</strong> section of this guide</li>
+                <li>Open: <code>backend-node/agent/</code> — note the directory structure</li>
+                <li>Skim: any <code>.md</code> file in <code>backend-node/agent/prompts/</code></li>
+                <li>Have running: app with browser devtools (Network tab) open</li>
+              </ul>
+            </div>
+            <p>How the AI integration actually works — follow an ingestion call from HTTP to token.</p>
+            <ul class="session-topics">
+              <li>Model routing: ai-config.js + asdlc_app_setting</li>
+              <li>Prompt templates: agent/prompts/*.md + prompt-templates.js</li>
+              <li>SN wiki context injection (wiki-context.js)</li>
+              <li>Extended thinking configuration for Opus</li>
+              <li>Usage tracking: asdlc_ai_usage table</li>
+              <li>Fallback behavior when ANTHROPIC_API_KEY is missing</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- SESSION 5 -->
+        <div class="session-card">
+          <div class="session-card-head">
+            <div class="session-num">Session 5 · Week 2</div>
+            <div class="session-title">ServiceNow Integration</div>
+            <div class="session-meta"><span class="session-tag">⏱ 1 hour</span><span class="session-tag">👩‍💻 Developers</span></div>
+          </div>
+          <div class="session-body">
+            <div class="session-pre">
+              <h4>Before this session</h4>
+              <ul class="pre-list">
+                <li>Read: <strong>ServiceNow</strong> section of this guide</li>
+                <li>Open: <code>backend-node/crypto-util.js</code></li>
+                <li>Confirm: access to a SN dev instance for the live connection demo</li>
+              </ul>
+            </div>
+            <p>How the SN connection and round-trip identity system work.</p>
+            <ul class="session-topics">
+              <li>SN connection config and credential encryption (crypto-util.js)</li>
+              <li>The TLS workaround and production fix</li>
+              <li>Fluent notation — what it is and why it matters</li>
+              <li>Round-trip status: what works vs. what doesn't</li>
+              <li>SN provenance columns on design entities</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- SESSION 6 -->
+        <div class="session-card">
+          <div class="session-card-head">
+            <div class="session-num">Session 6 · Week 2</div>
+            <div class="session-title">Local Setup &amp; First Contribution</div>
+            <div class="session-meta"><span class="session-tag">⏱ Half-day</span><span class="session-tag">👩‍💻 Developers</span></div>
+          </div>
+          <div class="session-body">
+            <div class="session-pre">
+              <h4>Before this session</h4>
+              <ul class="pre-list">
+                <li>Complete: sessions 1–5 first</li>
+                <li>Verify: <code>node --version</code> returns 22.5 or higher</li>
+                <li>Have: <code>.env</code> file with <code>ANTHROPIC_API_KEY</code> set</li>
+                <li>Read: <strong>Local Setup</strong> section of this guide</li>
+              </ul>
+            </div>
+            <p>Get running and make a real commit — best way to internalize the codebase.</p>
+            <ul class="session-topics">
+              <li>Run through setup commands in this guide</li>
+              <li>Explore server.js route structure with a guide</li>
+              <li>Pick one of the critical/high issues from BACKLOG.md</li>
+              <li>Write the fix, test manually, open a PR</li>
+              <li>Q&amp;A on anything unclear from sessions 1–5</li>
+            </ul>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="callout warn" style="margin-top:20px;">
+        <span class="callout-icon">❓</span>
+        <div>
+          <strong>Open Questions — Session 0.0.8 (Q&amp;A &amp; doc update).</strong>
+          Collect unanswered questions below as sessions run. Bring them to the 1-hour Q&amp;A session in Week 3, then update this document with the answers so the next person doesn't have to ask them again.
+          <ul style="margin:8px 0 0; padding-left:18px; font-size:12.5px; color:#78350f;">
+            <li><em>Add questions here as they arise during sessions 1–6…</em></li>
+          </ul>
+        </div>
+      </div>
+
+    </div>
+
+  </div><!-- /content -->
+</main>
+</div><!-- /app -->
+
+<script>
+  function show(id) {
+    document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+    const sec = document.getElementById(id);
+    if (sec) sec.classList.add('active');
+    event.currentTarget.classList.add('active');
+    window.scrollTo(0, 0);
+  }
+
+  function toggleDetail(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const body = el.querySelector('.module-detail-body');
+    const arrow = el.querySelector('.module-detail-header span:last-child');
+    if (body) {
+      const isOpen = body.classList.contains('open');
+      body.classList.toggle('open', !isOpen);
+      if (arrow) arrow.textContent = isOpen ? '▼' : '▲';
+    }
+  }
+</script>
+</body>
+</html>
