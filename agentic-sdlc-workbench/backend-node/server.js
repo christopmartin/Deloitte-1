@@ -9041,7 +9041,7 @@ app.post('/api/v1/ingest-documents/:id/promote', async (req, res) => {
 //   fall back to the project link + SN_INSTANCE/SN_USER/SN_PASSWORD env.
 // ═══════════════════════════════════════════════════════════════════════════
 const snSync = require('./agent/sn-sync');
-const { WB_PROVENANCE_TABLES } = require('./agent/sn-capture');
+const { WB_PROVENANCE_TABLES, persistChangeSignals } = require('./agent/sn-capture');
 // wb table name → { pk } for the R1 link self-heal (covers L1 tables + asdlc_sn_artifact).
 const PK_BY_WB_TABLE = {};
 WB_PROVENANCE_TABLES.forEach(t => { PK_BY_WB_TABLE[t.table] = t.pk; });
@@ -9263,6 +9263,8 @@ function snPlanItemToCpSpec(pl, scope) {
   const parts = [`[SN sync · ${proposal.action || 'changed'}] ${dec.reason}${conf}`];
   if (filled.length)   parts.push(`fills: ${filled.join(', ')}`);
   if (deferred.length) parts.push(`needs human: ${deferred.join(', ')}`);
+  if (pl.sn_updated_by || pl.sn_updated_on)   // #86b: deterministic who/when for the human
+    parts.push(`SN last changed by ${pl.sn_updated_by || 'unknown'} on ${pl.sn_updated_on || 'unknown'}`);
   if (proposal.rationale) parts.push(proposal.rationale);
   return {
     entity_type: etype, operation: 'update', entity_id: pl.wb_id,
@@ -9296,7 +9298,7 @@ app.post('/api/v1/projects/:id/servicenow/sync', async (req, res) => {
   let plan;
   try {
     plan = await snSync.runSyncPlan(
-      { projectId: project.project_id, scope, instance, user, pw, artifacts, mode: modeOverride, threshold: thresholdOverride },
+      { projectId: project.project_id, scope, instance, user, pw, artifacts, metadataSweep: body.metadataSweep, mode: modeOverride, threshold: thresholdOverride },
       { projectId: project.project_id }
     );
   } catch (err) {
@@ -9321,6 +9323,7 @@ app.post('/api/v1/projects/:id/servicenow/sync', async (req, res) => {
       issues: (pl.review && pl.review.issues) || [],
       field_changes: (pl.proposal && pl.proposal.field_changes) || [],
       wb_edited_since_sync: !!pl.wb_edited_since_sync, wb_updated_at: pl.wb_updated_at || null,
+      sn_unmoved: !!pl.sn_unmoved, sn_updated_by: pl.sn_updated_by || null, sn_updated_on: pl.sn_updated_on || null,
       decision: pl.decision,
     })),
   };
@@ -9402,6 +9405,24 @@ app.post('/api/v1/projects/:id/servicenow/sync', async (req, res) => {
     result.hash_advanced++;
   }
 
+  // 3b. #86b: refresh the stored hash+snapshot for GENERIC artifacts whose ServiceNow copy
+  //     was UNMOVED (sys_mod_count stable) but whose capture-formula hash drifted, so they
+  //     classify tier-0 next cycle. The rich loop above already covers Tier-A twins via
+  //     TYPE_BY_WB_TABLE; a pure generic (no L1 twin) is handled here. Non-destructive —
+  //     only provenance moves; keep source_hash↔payload consistent (hash is over payload).
+  for (const pl of plan.planned) {
+    if (!pl.generic || !pl.sn_unmoved || !pl.decision || pl.decision.target !== 'none' || !pl.artifact) continue;
+    const a = pl.artifact;
+    if (!a.source_sys_id || !a.hash) continue;
+    try {
+      const body = JSON.stringify(a.payload || a.salient || {});
+      const r = db.prepare(`UPDATE asdlc_sn_artifact SET source_hash=?, payload=?, updated_at=datetime('now')
+                            WHERE project_id=? AND source_sys_id=? AND (source_hash IS NULL OR source_hash != ?)`)
+        .run(a.hash, body, project.project_id, a.source_sys_id, a.hash);
+      if (r.changes) result.hash_advanced++;
+    } catch { /* no twin row — nothing to advance */ }
+  }
+
   // 4. R1 LINK SELF-HEAL. A Workbench-authored entity deployed to SN and re-captured
   //    matches here either by its sys_id (already linked) or by its embedded
   //    [[wb:project/slug]] tag (classifyArtifacts → findWbBySlug). The tag match heals
@@ -9440,6 +9461,14 @@ app.post('/api/v1/projects/:id/servicenow/sync', async (req, res) => {
       }
     } catch { /* table without provenance columns — skip */ }
   }
+
+  // #86b: record each swept record's sys_mod_count / who / when so the NEXT sync can tell a
+  // real ServiceNow change from our own capture-formula drift (and name who/when in conflicts).
+  // Only on a real apply (never dry-run), and only when the sweep actually ran.
+  try {
+    const n = persistChangeSignals(project.project_id, plan.sn_signals || []);
+    if (n) result.signals_recorded = n;
+  } catch (e) { console.error('[sn-sync] persistChangeSignals', e.message); }
 
   try { require('./agent/fluent-ingest').markSynced(project.project_id); } catch (e) { console.error('[sn-sync] markSynced', e.message); }
   res.json({ dry_run: false, plan: planView, result });

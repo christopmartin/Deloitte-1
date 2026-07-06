@@ -269,9 +269,33 @@ const SWEEP_FIELDS = [
  * degrades to `{available:false, error}` and NEVER breaks the sync. Paged via fetchAllRows.
  * @returns {Promise<{available:boolean, capped:boolean, total:number, bySysId:Map, byClass:object, error?:string}>}
  */
-async function sweepScopeMetadata({ scope, instance, user, pw, fetchImpl }) {
+/** Build a sweep object ({available, bySysId:Map, byClass, total}) from raw sys_metadata rows. */
+function buildSweep(rows) {
   const bySysId = new Map();
   const byClass = {};
+  for (const r of (rows || [])) {
+    if (!r || !r.sys_id) continue;
+    bySysId.set(r.sys_id, r);
+    const c = r.sys_class_name || '(unknown)';
+    byClass[c] = (byClass[c] || 0) + 1;
+  }
+  return { available: true, capped: false, total: bySysId.size, bySysId, byClass };
+}
+
+/**
+ * Normalize an injected sweep into a sweep object with a real Map. Accepts a ready sweep
+ * (Map preserved), a raw rows array, or {rows:[...]} — the last two are how a sweep survives
+ * JSON (a Map does not), so tests/dry-runs can inject one over HTTP. null passes through.
+ */
+function normalizeSweep(s) {
+  if (!s) return null;
+  if (s.bySysId instanceof Map) return s;
+  if (Array.isArray(s)) return buildSweep(s);
+  if (Array.isArray(s.rows)) return buildSweep(s.rows);
+  return s;
+}
+
+async function sweepScopeMetadata({ scope, instance, user, pw, fetchImpl }) {
   try {
     const f = makeFetch(fetchImpl);
     const auth = 'Basic ' + Buffer.from(`${user}:${pw}`).toString('base64');
@@ -280,15 +304,11 @@ async function sweepScopeMetadata({ scope, instance, user, pw, fetchImpl }) {
     const q = 'sys_scope.scope=' + scope + '^ORDERBYsys_id';
     const baseUrl = `${base}/api/now/table/sys_metadata?sysparm_query=${encodeURIComponent(q)}&sysparm_fields=${encodeURIComponent(SWEEP_FIELDS.join(','))}&sysparm_exclude_reference_link=true`;
     const { rows, capped } = await fetchAllRows(f, baseUrl, headers);
-    for (const r of rows) {
-      if (!r.sys_id) continue;
-      bySysId.set(r.sys_id, r);
-      const c = r.sys_class_name || '(unknown)';
-      byClass[c] = (byClass[c] || 0) + 1;
-    }
-    return { available: true, capped, total: bySysId.size, bySysId, byClass };
+    const sweep = buildSweep(rows);
+    sweep.capped = capped;
+    return sweep;
   } catch (e) {
-    return { available: false, error: e.message, capped: false, total: 0, bySysId, byClass };
+    return { available: false, error: e.message, capped: false, total: 0, bySysId: new Map(), byClass: {} };
   }
 }
 
@@ -361,6 +381,74 @@ function analyzeCompleteness(sweep, classified, opts = {}) {
   };
 }
 
+// ── #86 part (b): per-record change signals (needs the asdlc_sn_change_signal table) ────
+// Read the last-synced sys_metadata signals for a project as a Map(sys_id → row). Tolerates
+// the table being absent (pre-migration DB) → empty Map, so classify degrades to part-(a)
+// behavior rather than throwing.
+function readChangeSignals(projectId) {
+  const m = new Map();
+  if (!projectId) return m;
+  try {
+    const rows = db.prepare(
+      'SELECT source_sys_id, sys_class_name, sys_mod_count, sys_updated_on, sys_updated_by FROM asdlc_sn_change_signal WHERE project_id = ?'
+    ).all(projectId);
+    for (const r of rows) m.set(r.source_sys_id, r);
+  } catch { /* table absent — no stored signals */ }
+  return m;
+}
+
+/**
+ * Upsert the change signals for every swept record (called on a successful non-dry-run sync,
+ * NEVER on dry-run). `signals` is a plain array of {source_sys_id, sys_class_name,
+ * sys_mod_count, sys_updated_on, sys_updated_by}. Returns rows written. Best-effort — a
+ * failure is logged, not thrown (signals are an optimization, not correctness-critical).
+ */
+function persistChangeSignals(projectId, signals) {
+  if (!projectId || !Array.isArray(signals) || !signals.length) return 0;
+  const up = db.prepare(`
+    INSERT INTO asdlc_sn_change_signal
+      (project_id, source_sys_id, sys_class_name, sys_mod_count, sys_updated_on, sys_updated_by, first_seen_at, last_seen_at)
+    VALUES (?,?,?,?,?,?,datetime('now'),datetime('now'))
+    ON CONFLICT(project_id, source_sys_id) DO UPDATE SET
+      sys_class_name = excluded.sys_class_name,
+      sys_mod_count  = excluded.sys_mod_count,
+      sys_updated_on = excluded.sys_updated_on,
+      sys_updated_by = excluded.sys_updated_by,
+      last_seen_at   = datetime('now')`);
+  let n = 0;
+  db.exec('BEGIN');
+  try {
+    for (const s of signals) {
+      if (!s || !s.source_sys_id) continue;
+      const modRaw = s.sys_mod_count;
+      const mod = (modRaw === null || modRaw === undefined || modRaw === '') ? null : parseInt(modRaw, 10);
+      up.run(projectId, s.source_sys_id, s.sys_class_name || null,
+        Number.isFinite(mod) ? mod : null, s.sys_updated_on || null, s.sys_updated_by || null);
+      n++;
+    }
+    db.exec('COMMIT');
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* ignore */ }
+    console.error('[sn-capture] persistChangeSignals', e.message);
+    return 0;
+  }
+  return n;
+}
+
+/** Flatten a metadata sweep into the compact signal-row array persistChangeSignals expects. */
+function sweepSignals(sweep) {
+  if (!sweep || !sweep.available || !sweep.bySysId) return [];
+  const out = [];
+  for (const [sysId, r] of sweep.bySysId) {
+    out.push({
+      source_sys_id: sysId, sys_class_name: r.sys_class_name || null,
+      sys_mod_count: r.sys_mod_count, sys_updated_on: r.sys_updated_on || null,
+      sys_updated_by: r.sys_updated_by || null,
+    });
+  }
+  return out;
+}
+
 /** Find the Workbench record for a ServiceNow sys_id within a project (across provenance tables). */
 function findWbBySysId(projectId, sysId) {
   for (const t of WB_PROVENANCE_TABLES) {
@@ -422,7 +510,7 @@ function findWbBySlug(projectId, slug) {
  * Workbench project. Only `changed` + `new` (+ later `ambiguous`) need Opus; `unchanged`
  * skip the LLM; `drift` (in Workbench, absent from SN) is flagged and NEVER deleted.
  */
-function classifyArtifacts(artifacts, projectId) {
+function classifyArtifacts(artifacts, projectId, opts = {}) {
   const res = { unchanged: [], changed: [], new: [], drift: [], errors: [], warnings: [] };
   const seen = new Set();
   // Both-side-edit detection (#84): the one deterministic fact the reconciler can't infer.
@@ -434,6 +522,14 @@ function classifyArtifacts(artifacts, projectId) {
     const p = db.prepare('SELECT sn_last_synced_at FROM asdlc_project WHERE project_id = ?').get(projectId);
     lastSync = (p && p.sn_last_synced_at) || null;
   } catch { /* project row unavailable — treat as never-synced */ }
+  // #86 part (b): the live sweep gives each record's CURRENT sys_mod_count / who / when;
+  // stored signals give the value AS OF the last sync. When both exist and the counter is
+  // UNMOVED, the ServiceNow record demonstrably was not written since we last saw it — so a
+  // content-hash difference is our OWN salient-formula drift, not a real change. Flagging it
+  // `sn_unmoved` lets the plan refresh the stored hash without spending Opus (prevents a
+  // capture-logic change from mass-reclassifying the whole scope as "changed").
+  const swBy = (opts.sweep && opts.sweep.available && opts.sweep.bySysId) ? opts.sweep.bySysId : null;
+  const storedSig = readChangeSignals(projectId);
   const surface_counts = {};   // per-surface CAPTURED count (completeness signal)
   for (const a of artifacts) {
     if (a.__error) { res.errors.push(a.__error); continue; }
@@ -454,11 +550,21 @@ function classifyArtifacts(artifacts, projectId) {
     if (wb.source_hash && wb.source_hash === a.hash) {
       res.unchanged.push({ ...a, wb_id: wb.id, wb_table: wb.table });
     } else {
+      const cur = swBy ? swBy.get(a.source_sys_id) : null;
+      const prevSig = storedSig.get(a.source_sys_id);
+      const curMod  = (cur && cur.sys_mod_count != null && cur.sys_mod_count !== '') ? Number(cur.sys_mod_count) : null;
+      const prevMod = (prevSig && prevSig.sys_mod_count != null) ? Number(prevSig.sys_mod_count) : null;
+      const snUnmoved = (curMod !== null && prevMod !== null && curMod === prevMod);
       res.changed.push({
         ...a, wb_id: wb.id, wb_table: wb.table, prev_hash: wb.source_hash || null,
         wb_updated_at: wb.wb_updated_at || null,
         sn_last_synced_at: lastSync,
         wb_edited_since_sync: !!(lastSync && wb.wb_updated_at && wb.wb_updated_at > lastSync),
+        sn_mod_count: curMod,
+        sn_prev_mod_count: prevMod,
+        sn_updated_on: cur ? (cur.sys_updated_on || null) : null,
+        sn_updated_by: cur ? (cur.sys_updated_by || null) : null,
+        sn_unmoved: snUnmoved,
       });
     }
   }
@@ -488,8 +594,9 @@ function classifyArtifacts(artifacts, projectId) {
     new: res.new.length, drift: res.drift.length, errors: res.errors.length,
     warnings: res.warnings.length,
     both_side_edits: res.changed.filter(c => c.wb_edited_since_sync).length,
+    sn_unmoved: res.changed.filter(c => c.sn_unmoved).length,
   };
   return res;
 }
 
-module.exports = { SN_SURFACES, WB_PROVENANCE_TABLES, hashArtifact, captureScope, fetchAllRows, findWbBySysId, findWbBySlug, parseWbTag, classifyArtifacts, makeFetch, sweepScopeMetadata, analyzeCompleteness };
+module.exports = { SN_SURFACES, WB_PROVENANCE_TABLES, hashArtifact, captureScope, fetchAllRows, findWbBySysId, findWbBySlug, parseWbTag, classifyArtifacts, makeFetch, sweepScopeMetadata, buildSweep, normalizeSweep, analyzeCompleteness, readChangeSignals, persistChangeSignals, sweepSignals };

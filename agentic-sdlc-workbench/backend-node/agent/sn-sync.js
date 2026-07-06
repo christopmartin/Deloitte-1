@@ -32,7 +32,7 @@
 // makes it offline-testable in stub mode exactly like Phases C–E.
 'use strict';
 const { db, getSetting } = require('../db');
-const { captureScope, classifyArtifacts, sweepScopeMetadata, analyzeCompleteness, WB_PROVENANCE_TABLES } = require('./sn-capture');
+const { captureScope, classifyArtifacts, sweepScopeMetadata, normalizeSweep, analyzeCompleteness, sweepSignals, WB_PROVENANCE_TABLES } = require('./sn-capture');
 const { reverseEngineer } = require('./sn-reverse-engineer');
 const { reconcile } = require('./sn-reconcile');
 const { review } = require('./sn-review');
@@ -43,9 +43,14 @@ const { buildArtifactRecord } = require('./sn-artifact');
 // so they bypass the Opus reverse-engineer/reconcile/review stages entirely. ServiceNow
 // is the source of truth for these Level-2 technical bodies, so a new/changed generic
 // artifact is a safe additive create/refresh; drift is flagged for human awareness only.
-function genericDecision(classification, mode, wbEditedSinceSync) {
+function genericDecision(classification, mode, wbEditedSinceSync, snUnmoved) {
   if (classification === 'drift') {
     return { target: 'hitl', auto_apply: false, reason: 'drift — generic artifact in Workbench, absent from ServiceNow; flagged, never deleted' };
+  }
+  // #86 part (b): ServiceNow record demonstrably unmoved (sys_mod_count stable) — the diff is
+  // our own capture-formula drift, not a real change. Nothing to refresh; just re-hash.
+  if (classification === 'changed' && snUnmoved) {
+    return { target: 'none', auto_apply: false, reason: 'ServiceNow record unchanged (sys_mod_count stable since last sync) — capture-formula drift only; hash refreshed, nothing re-applied' };
   }
   if (mode === 'review_all') {
     return { target: 'hitl', auto_apply: false, reason: 'apply mode = review_all — human reviews every change' };
@@ -68,7 +73,8 @@ function buildGenericPlan(items, classification, scope, mode) {
       classification, source_sys_id: a.source_sys_id, generic: true, generic_record: rec,
       artifact: a, wb_table: a.wb_table || null, wb_id: a.wb_id || null, name: rec.name,
       wb_edited_since_sync: !!a.wb_edited_since_sync, wb_updated_at: a.wb_updated_at || null,
-      decision: genericDecision(classification, mode, a.wb_edited_since_sync),
+      sn_unmoved: !!a.sn_unmoved,
+      decision: genericDecision(classification, mode, a.wb_edited_since_sync, a.sn_unmoved),
     };
   });
 }
@@ -309,28 +315,48 @@ async function runSyncPlan(opts = {}, ctx = {}) {
   const artifacts = opts.artifacts ||
     await captureScope({ scope, instance: opts.instance, user: opts.user, pw: opts.pw, fetchImpl: opts.fetchImpl });
 
-  // 2. Deterministic tier-0 classification against the linked project.
-  const classified = classifyArtifacts(artifacts, projectId);
-
-  // 2b. Completeness backbone (#86 part a): ONE read-only sys_metadata sweep enumerates
+  // 1b. Completeness backbone (#86 part a): ONE read-only sys_metadata sweep enumerates
   //     EVERY application file in the scope — the authority for blind-spot classes the
-  //     curated capture surfaces never read, and for telling a truly-deleted upstream record
-  //     apart from one that merely lives under an unmonitored class. Best-effort: a sweep
-  //     failure (e.g. no read access) degrades to available:false and never breaks the sync.
-  //     Skipped when artifacts are pre-supplied (offline tests/dry-runs) unless a sweep is
-  //     injected via opts.metadataSweep. NO gating change — analyzeCompleteness only reports
-  //     and annotates drift with exists_in_sn.
-  const sweep = opts.metadataSweep || (opts.artifacts
+  //     curated capture surfaces never read, for telling a truly-deleted upstream record
+  //     apart from one under an unmonitored class, and (part b) for each record's live
+  //     sys_mod_count / who / when. Best-effort: a sweep failure (e.g. no read access)
+  //     degrades to available:false and never breaks the sync. Skipped when artifacts are
+  //     pre-supplied (offline tests/dry-runs) unless a sweep is injected via
+  //     opts.metadataSweep. Computed BEFORE classify so classify can consult the signals.
+  const sweep = normalizeSweep(opts.metadataSweep) || (opts.artifacts
     ? { available: false, error: 'sweep skipped (pre-supplied artifacts)', capped: false, total: 0, bySysId: new Map(), byClass: {} }
     : await sweepScopeMetadata({ scope, instance: opts.instance, user: opts.user, pw: opts.pw, fetchImpl: opts.fetchImpl }));
+
+  // 2. Deterministic tier-0 classification against the linked project (sweep-aware: #86b
+  //    sn_unmoved / who-when annotations attach to `changed` items when signals exist).
+  const classified = classifyArtifacts(artifacts, projectId, { sweep });
+
+  // 2b. Completeness report + drift disambiguation (NO gating change — annotates only).
   const completeness = analyzeCompleteness(sweep, classified);
 
   // 2a. Partition: Tier-B/C GENERIC artifacts take the deterministic path (no Opus);
   //     Tier-A RICH artifacts flow through reverse-engineer → reconcile → review → gate.
   const isGen = x => !!x.generic;
   const richNew     = classified.new.filter(a => !isGen(a));
-  const richChanged = classified.changed.filter(a => !isGen(a));
+  const richChangedAll = classified.changed.filter(a => !isGen(a));
   const richDrift   = classified.drift.filter(d => d.wb_type !== 'sn_artifact');
+
+  // #86 part (b): a `changed` rich artifact whose ServiceNow copy is DEMONSTRABLY unmoved
+  // (sys_mod_count stable since the last sync) differs only because our own salient-hash
+  // formula changed — reasoning it with Opus would be pure waste and would mass-reclassify
+  // the whole scope after any capture-logic change. Route these straight to a deterministic
+  // no_change (target 'none'); the shared hash-advance path (server.js sync step 3) then
+  // refreshes the stored hash so the next cycle is a clean tier-0 match.
+  const richUnmoved = richChangedAll.filter(a => a.sn_unmoved);
+  const richChanged = richChangedAll.filter(a => !a.sn_unmoved);
+  const unmovedPlanned = richUnmoved.map(a => ({
+    classification: 'changed', source_sys_id: a.source_sys_id, wb_table: a.wb_table, wb_id: a.wb_id,
+    name: a.name, artifact: a, inferred: null, sn_unmoved: true,
+    proposal: { action: 'no_change', destructive: false, field_changes: [] },
+    review: { verdict: 'approve', destructive_confirmed: false, final_confidence: 1, issues: [] },
+    decision: { target: 'none', auto_apply: false, reason: 'ServiceNow record unchanged (sys_mod_count stable since last sync) — content-hash difference is capture-formula drift; hash refreshed, nothing re-applied' },
+  }));
+
   const genericPlanned = [
     ...buildGenericPlan(classified.new.filter(isGen), 'new', scope, mode),
     ...buildGenericPlan(classified.changed.filter(isGen), 'changed', scope, mode),
@@ -381,22 +407,32 @@ async function runSyncPlan(opts = {}, ctx = {}) {
   for (const a of artifacts) if (a.source_sys_id) artBySysId[a.source_sys_id] = a;
   const infItemBySysId = {};
   for (const it of [...changedWithInf, ...newWithInf]) infItemBySysId[it.source_sys_id] = it.inferred;
+  // #86b: carry the deterministic who/when signal onto the planned item so the Change Packet
+  // rationale can name who last changed the record in ServiceNow, and when.
+  const changeMetaBySysId = {};
+  for (const a of classified.changed) changeMetaBySysId[a.source_sys_id] = {
+    sn_updated_by: a.sn_updated_by || null, sn_updated_on: a.sn_updated_on || null, sn_mod_count: a.sn_mod_count != null ? a.sn_mod_count : null,
+  };
 
   const richPlanned = reviewed.map(rv => ({
     ...rv,
+    ...(changeMetaBySysId[rv.source_sys_id] || {}),
     inferred: infItemBySysId[rv.source_sys_id] || rv.inferred || null,
     artifact: artBySysId[rv.source_sys_id] || null,
     decision: gateProposal(rv, { mode, threshold }),
   }));
 
-  // Rich (Opus-reasoned) + generic (deterministic) plans share one materialization path.
-  const planned = [...richPlanned, ...genericPlanned];
+  // Rich (Opus-reasoned) + deterministic no-change (sn_unmoved) + generic plans share one
+  // materialization path. Unmoved items carry decision.target='none' → skipped at apply,
+  // hash refreshed by sync step 3.
+  const planned = [...richPlanned, ...unmovedPlanned, ...genericPlanned];
 
   const summary = summarize(planned, classified);
   summary.elevated_new = newWithInf.length;
   summary.captured_not_elevated = captured_not_elevated.length;
   summary.skipped_disallowed = skipped_disallowed.length;
   summary.generic = genericPlanned.length;
+  summary.sn_unmoved = planned.filter(p => p.sn_unmoved).length;   // #86b: re-hashed, not re-reasoned
 
   // Surface completeness findings as human-readable warnings (the scope inventory is the
   // authority; a blind-spot class or a confirmed upstream deletion is worth flagging).
@@ -414,6 +450,9 @@ async function runSyncPlan(opts = {}, ctx = {}) {
       warnings.push('sys_metadata sweep hit the row ceiling — completeness figures are PARTIAL (raise SN_CAPTURE_MAX_ROWS).');
     }
   }
+  if (summary.sn_unmoved > 0) {
+    warnings.push(`#86b: ${summary.sn_unmoved} record(s) had a content-hash change but an UNMOVED ServiceNow modification counter — treated as capture-formula drift (hash refreshed, no re-reasoning).`);
+  }
 
   return {
     project_id: projectId, scope, mode, threshold,
@@ -423,6 +462,8 @@ async function runSyncPlan(opts = {}, ctx = {}) {
     errors: classified.errors,
     warnings,
     completeness,
+    // #86b: compact per-record signals for the endpoint to persist on a successful apply.
+    sn_signals: sweepSignals(sweep),
     surface_counts: classified.surface_counts || {},
     preflight: buildPreflight(planned, classified),
     materiality: {
