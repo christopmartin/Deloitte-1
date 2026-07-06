@@ -1582,3 +1582,22 @@ CREATE TABLE IF NOT EXISTS asdlc_sn_catalog_run (
   updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_sn_catalog_project ON asdlc_sn_catalog_run(project_id, created_at);
+
+-- ServiceNow per-record change signals (#86 part b). One row per (project, sys_id): the
+-- last-synced sys_metadata modification counter + audit fields. Lets the sync (a) skip
+-- re-reasoning a record whose ServiceNow copy demonstrably did NOT move (sys_mod_count
+-- stable) even when our own salient-hash formula changed — preventing a mass re-classify;
+-- and (b) tell a human WHO changed a record and WHEN. Additive & standalone: no existing
+-- table is altered. Populated on every successful (non-dry-run) sync.
+CREATE TABLE IF NOT EXISTS asdlc_sn_change_signal (
+  project_id     TEXT NOT NULL,
+  source_sys_id  TEXT NOT NULL,
+  sys_class_name TEXT,
+  sys_mod_count  INTEGER,
+  sys_updated_on TEXT,
+  sys_updated_by TEXT,
+  first_seen_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (project_id, source_sys_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sn_signal_project ON asdlc_sn_change_signal(project_id);

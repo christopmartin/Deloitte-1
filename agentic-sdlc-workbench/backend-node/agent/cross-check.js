@@ -102,6 +102,71 @@ function salientTokens(entityType, current, proposed) {
   return [...out];
 }
 
+// ── merge / duplicate-consolidation awareness ──────────────────────────────────
+// A delete that consolidates a duplicate into a surviving same-type sibling does NOT
+// remove that capability from the design — the sibling still provides it. Without
+// this, the deleted record's incidental mentions (e.g. a DockTrak tool whose contract
+// names "SAP") look like design-wide removals and spray false ripple across every
+// element that happens to share the token. So: tokens the survivor still carries are
+// not salient, and only a structured interface field the survivor entirely lacks is
+// worth a targeted question.
+const MERGE_NAME_SIM = 0.5;   // name-token overlap that marks two same-type records as a merge pair
+const MERGE_DIFF_SKIP = new Set(['requirement_refs', 'goals', 'done_criteria', 'implements_requirements']);
+
+function nameTokenSet(entityType, data) {
+  const e = registry.byEntityType[entityType];
+  const key = (e && e.nameKeys && e.nameKeys[0]) || 'name';
+  return new Set(tokenize(asText(data && data[key])));
+}
+function nameJaccard(a, b) {
+  if (!a.size || !b.size) return 0;
+  let inter = 0; for (const t of a) if (b.has(t)) inter++;
+  return inter / (a.size + b.size - inter);
+}
+
+/** For a delete, find the surviving same-type sibling it is being merged into — a
+ *  same-round staged create/update (the merge target) preferred over an existing row —
+ *  matched by name-token overlap. Returns { survivorData } or null. */
+function findMergeSurvivor(projectId, deletedType, deletedCurrent, stagedSurvivors) {
+  const delNames = nameTokenSet(deletedType, deletedCurrent);
+  if (!delNames.size) return null;
+  let best = null, bestSim = 0;
+  for (const s of stagedSurvivors) {
+    if (s.entity_type !== deletedType) continue;
+    const sim = nameJaccard(delNames, nameTokenSet(deletedType, s.data));
+    if (sim > bestSim) { bestSim = sim; best = s.data; }
+  }
+  if (best && bestSim >= MERGE_NAME_SIM) return { survivorData: best };
+  const e = registry.byEntityType[deletedType];
+  if (e && e.table) {
+    try {
+      for (const r of db.prepare(`SELECT * FROM ${e.table} WHERE project_id=? AND slug!=? AND (lifecycle_status IS NULL OR lifecycle_status NOT IN ('retired','deleted'))`).all(projectId, deletedCurrent.slug)) {
+        const sim = nameJaccard(delNames, nameTokenSet(deletedType, r));
+        if (sim > bestSim) { bestSim = sim; best = r; }
+      }
+    } catch { /* table without a name column — skip */ }
+    if (best && bestSim >= MERGE_NAME_SIM) return { survivorData: best };
+  }
+  return null;
+}
+
+/** Structured (array-valued) interface fields the deleted record populated but the
+ *  surviving merged record entirely lacks. Conservative on purpose — item-level diffs
+ *  of short interface strings ("PO number" vs "PO / receipt identifier") are noise-prone
+ *  and left to the human; only a wholly-dropped field is raised deterministically. */
+function droppedInterfaceFields(deletedCurrent, survivorData) {
+  const out = [];
+  for (const [k, raw] of Object.entries(deletedCurrent || {})) {
+    if (MERGE_DIFF_SKIP.has(k)) continue;
+    const delVal = tryParse(raw);
+    if (!Array.isArray(delVal) || delVal.length === 0) continue;
+    const survVal = tryParse(survivorData[k]);
+    const survHas = Array.isArray(survVal) ? survVal.length > 0 : (survVal != null && asText(survVal).trim() !== '');
+    if (!survHas) out.push({ field: k, items: delVal.map(asText) });
+  }
+  return out;
+}
+
 // ── design corpus (scope-aware) ───────────────────────────────────────────────────
 // Returns flat rows: { entity_type, id, slug, workflow_id, fields: {field: text} }.
 // scopeWfIds: null = whole project; Set = restrict workflow-bound tables to those workflows.
@@ -397,7 +462,11 @@ async function runCrossCheck({ doc, round }) {
       "SELECT entity_type, entity_data FROM asdlc_ingest_extraction WHERE ingest_id=? AND round=? AND status='staged'"
     ).all(doc.ingest_id, round).map(r => ({ entity_type: r.entity_type, data: tryParse(r.entity_data) || {} }));
 
+    // Survivors for merge detection = staged create/update ops this round.
+    const stagedSurvivors = staged.filter(s => s.data.operation !== 'delete');
     const changes = [];
+    const mergeFollowups = [];   // precise "the survivor is missing X" questions
+    let mergeDeletes = 0;
     for (const s of staged) {
       const op = s.data.operation;
       if (op !== 'update' && op !== 'delete') continue;
@@ -410,9 +479,39 @@ async function runCrossCheck({ doc, round }) {
         current = db.prepare(`SELECT * FROM ${e.table} WHERE project_id=? AND slug=? AND (lifecycle_status IS NULL OR lifecycle_status NOT IN ('retired','deleted'))`).get(doc.project_id, slug);
       } catch { current = null; }
       if (!current) continue;
-      const tokens = salientTokens(s.entity_type, current, s.data);
+      let tokens = salientTokens(s.entity_type, current, s.data);
+
+      // Merge/consolidation: if this delete folds a duplicate into a surviving sibling,
+      // tokens the survivor still carries are NOT design-wide removals — suppress them so
+      // they don't spray false ripple (e.g. an incidental "SAP" mention). Genuinely-dropped
+      // structured interface fields still surface as one precise question.
+      if (op === 'delete') {
+        const merged = findMergeSurvivor(doc.project_id, s.entity_type, current, stagedSurvivors);
+        if (merged) {
+          mergeDeletes++;
+          const survText = Object.values(merged.survivorData).map(asText).join(' ').toLowerCase();
+          tokens = tokens.filter(t => !wordHit(survText, t));
+          const nameKey = (e.nameKeys || ['name'])[0];
+          for (const d of droppedInterfaceFields(current, merged.survivorData)) {
+            mergeFollowups.push({
+              question: `Merge: ${s.entity_type} ${slug} ("${asText(current[nameKey])}") is being consolidated into a surviving sibling, ` +
+                `but that sibling defines no ${d.field} while ${slug} had: ${d.items.slice(0, 8).join('; ')}. ` +
+                `Carry these into the survivor, or confirm they are intentionally dropped.`,
+              target_entity_type: s.entity_type, target_field: `merge:${slug}.${d.field}`,
+              context: d.items.slice(0, 8).join('; '),
+            });
+          }
+        }
+      }
       if (tokens.length === 0) continue;
       changes.push({ entityType: s.entity_type, slug, current, proposed: s.data, tokens });
+    }
+    summary.merge_deletes = mergeDeletes;
+
+    // Surface precise merge-divergence questions (independent of the ripple pipeline,
+    // so they are raised even when every merge fully covered its salient tokens).
+    for (const f of mergeFollowups) {
+      if (writeMarkedClarification(doc.ingest_id, round, CONFLICT_PREFIX, f)) summary.conflicts_raised++;
     }
 
     // ── Net-new requirement conflict scan (runs regardless of update/delete changes) ──
@@ -557,4 +656,5 @@ function runPostApplyCheck(cpId) {
 }
 
 module.exports = { runCrossCheck, hasOpenConflicts, runPostApplyCheck, CONFLICT_PREFIX, FYI_PREFIX,
-  _internal: { salientTokens, scanDesignDrift, synthesiseFollowups, loadDesignCorpus } };
+  _internal: { salientTokens, scanDesignDrift, synthesiseFollowups, loadDesignCorpus,
+    findMergeSurvivor, droppedInterfaceFields } };

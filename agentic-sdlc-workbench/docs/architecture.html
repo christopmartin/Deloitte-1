@@ -290,7 +290,7 @@
       <span class="num">03</span>
       <div>
         <h2>Technology Stack</h2>
-        <p>Deliberately zero-install: the active backend runs on Node's built-in SQLite, with a PostgreSQL + FastAPI path reserved for scale.</p>
+        <p>Deliberately zero-install: the active (and only) backend runs on Node's built-in SQLite. An early Python/FastAPI + Postgres prototype remains in <code>backend/</code> but is abandoned — superseded by <code>backend-node/</code> and slated for removal (backlog #90).</p>
       </div>
     </div>
     <div class="grid">
@@ -319,8 +319,8 @@
         <div class="main">Anthropic Claude</div>
         <ul>
           <li><code>@anthropic-ai/sdk</code> tool-use</li>
-          <li>Opus 4.8 · Sonnet 4.6 · Haiku 4.5</li>
-          <li>Per-role model + thinking budget</li>
+          <li>Data-driven model registry (Opus 4.8 · Sonnet 4.6 · Haiku 4.5 defaults; Fable 5 / Sonnet 5 selectable)</li>
+          <li>Per-role model + thinking effort</li>
         </ul>
       </div>
       <div class="tcard">
@@ -333,9 +333,9 @@
         </ul>
       </div>
       <div class="tcard">
-        <h4>Alternate Backend</h4>
+        <h4>Legacy Prototype (abandoned)</h4>
         <div class="main">FastAPI + PostgreSQL 16</div>
-        <div class="sub">Full SQL schema, triggers &amp; row-level security in <code>backend/</code> — for when Docker/Python are available.</div>
+        <div class="sub">Early Python scaffold in <code>backend/</code>, predating the pivot to <code>backend-node/</code>; referenced by nothing and slated for removal (backlog #90). Not a live alternate.</div>
       </div>
       <div class="tcard">
         <h4>Config &amp; Ops</h4>
@@ -382,7 +382,8 @@
 
       <div class="step">
         <div class="step-top"><span class="n">05</span><h4>Promote to a Change Packet</h4><span class="badge det">Deterministic</span></div>
-        <p>Promotion resolves target slugs and bundles all staged entities into <b>one</b> Change Packet (<code>pending_review</code>) with per-item create / update / delete diff items.</p>
+        <p>Before promoting, <code>agent/quality-check.js</code> runs a deterministic gate over the staged batch — the same rule set as the AI's ad-hoc quality review, made repeatable: same real-world entity extracted twice under different names (e.g. a workflow split across two rounds with children divided between them), duplicate tools/integrations, unresolved "TBD" placeholders, AI-invented agents/workflows/tools not named in the source, and functional requirements with no acceptance criterion or test case. Structural ("block") findings can never be bypassed; advisory ("warn") findings require one explicit acknowledgment (<code>acknowledge_warnings:true</code>) before promotion proceeds. This is separate from and runs before the post-promotion <b>Quality Reviewer AI Agent</b> (step 06) — deterministic and free vs. an LLM pass over the finished Change Packet.</p>
+        <p>Promotion itself resolves target slugs and bundles all staged entities into <b>one</b> Change Packet (<code>pending_review</code>) with per-item create / update / delete diff items.</p>
       </div>
 
       <div class="step ai">
@@ -445,6 +446,7 @@
           <li><b>applyChangePacket()</b> — materializer</li>
           <li><b>audit log</b> — field-level history</li>
           <li><b>capture · gate · seed</b> — pipeline plumbing</li>
+          <li><b>sys_metadata sweep</b> — completeness + per-record change signals (#86)</li>
         </ul>
       </div>
     </div>

@@ -129,6 +129,12 @@ function editContextLines(item) {
     lines.push(` - The Workbench record has NOT been edited since the last ServiceNow sync (${item.sn_last_synced_at}) —`);
     lines.push('   any difference originates on the ServiceNow side.');
   }
+  // #86b: who/when on the ServiceNow side (from sys_metadata), when known — lets the agent
+  // reference the actual author/date in its plain-language rationale.
+  if (item.sn_updated_by || item.sn_updated_on) {
+    lines.push(` - ServiceNow last modified by ${item.sn_updated_by || 'unknown'} on ${item.sn_updated_on || 'unknown date'}` +
+               (item.sn_mod_count != null ? ` (modification #${item.sn_mod_count}).` : '.'));
+  }
   return lines;
 }
 

@@ -269,11 +269,15 @@ export async function apiFetch(path, options = {}) {
 
   if (!res.ok) {
     let errMsg = `HTTP ${res.status}`;
+    let errBody = null;
     try {
-      const body = await res.json();
-      errMsg = body.detail || body.message || errMsg;
+      errBody = await res.json();
+      errMsg = errBody.error || errBody.detail || errBody.message || errMsg;
     } catch {}
-    throw new Error(errMsg);
+    const err = new Error(errMsg);
+    err.status = res.status;
+    err.body = errBody;
+    throw err;
   }
 
   // Handle 204 No Content
