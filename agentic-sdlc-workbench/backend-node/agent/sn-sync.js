@@ -32,7 +32,7 @@
 // makes it offline-testable in stub mode exactly like Phases C–E.
 'use strict';
 const { db, getSetting } = require('../db');
-const { captureScope, classifyArtifacts, WB_PROVENANCE_TABLES } = require('./sn-capture');
+const { captureScope, classifyArtifacts, sweepScopeMetadata, analyzeCompleteness, WB_PROVENANCE_TABLES } = require('./sn-capture');
 const { reverseEngineer } = require('./sn-reverse-engineer');
 const { reconcile } = require('./sn-reconcile');
 const { review } = require('./sn-review');
@@ -312,6 +312,19 @@ async function runSyncPlan(opts = {}, ctx = {}) {
   // 2. Deterministic tier-0 classification against the linked project.
   const classified = classifyArtifacts(artifacts, projectId);
 
+  // 2b. Completeness backbone (#86 part a): ONE read-only sys_metadata sweep enumerates
+  //     EVERY application file in the scope — the authority for blind-spot classes the
+  //     curated capture surfaces never read, and for telling a truly-deleted upstream record
+  //     apart from one that merely lives under an unmonitored class. Best-effort: a sweep
+  //     failure (e.g. no read access) degrades to available:false and never breaks the sync.
+  //     Skipped when artifacts are pre-supplied (offline tests/dry-runs) unless a sweep is
+  //     injected via opts.metadataSweep. NO gating change — analyzeCompleteness only reports
+  //     and annotates drift with exists_in_sn.
+  const sweep = opts.metadataSweep || (opts.artifacts
+    ? { available: false, error: 'sweep skipped (pre-supplied artifacts)', capped: false, total: 0, bySysId: new Map(), byClass: {} }
+    : await sweepScopeMetadata({ scope, instance: opts.instance, user: opts.user, pw: opts.pw, fetchImpl: opts.fetchImpl }));
+  const completeness = analyzeCompleteness(sweep, classified);
+
   // 2a. Partition: Tier-B/C GENERIC artifacts take the deterministic path (no Opus);
   //     Tier-A RICH artifacts flow through reverse-engineer → reconcile → review → gate.
   const isGen = x => !!x.generic;
@@ -385,13 +398,31 @@ async function runSyncPlan(opts = {}, ctx = {}) {
   summary.skipped_disallowed = skipped_disallowed.length;
   summary.generic = genericPlanned.length;
 
+  // Surface completeness findings as human-readable warnings (the scope inventory is the
+  // authority; a blind-spot class or a confirmed upstream deletion is worth flagging).
+  const warnings = [...(classified.warnings || [])];
+  if (completeness.available) {
+    if (completeness.uncaptured_count > 0) {
+      const top = completeness.uncaptured_by_class.slice(0, 5)
+        .map(c => `${c.sys_class_name} (${c.count})`).join(', ');
+      warnings.push(`sys_metadata completeness: ${completeness.uncaptured_count} in-scope record(s) across ${completeness.uncaptured_by_class.length} class(es) are NOT read by the current capture surfaces — top: ${top}`);
+    }
+    if (completeness.vanished.length) {
+      warnings.push(`sys_metadata: ${completeness.vanished.length} Workbench record(s) are absent from the full scope inventory (confirmed deleted upstream, not just uncaptured).`);
+    }
+    if (completeness.capped) {
+      warnings.push('sys_metadata sweep hit the row ceiling — completeness figures are PARTIAL (raise SN_CAPTURE_MAX_ROWS).');
+    }
+  }
+
   return {
     project_id: projectId, scope, mode, threshold,
     classified_summary: classified.summary,
     unchanged: classified.unchanged,
     planned,
     errors: classified.errors,
-    warnings: classified.warnings || [],
+    warnings,
+    completeness,
     surface_counts: classified.surface_counts || {},
     preflight: buildPreflight(planned, classified),
     materiality: {

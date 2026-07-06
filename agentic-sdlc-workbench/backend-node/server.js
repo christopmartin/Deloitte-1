@@ -9309,6 +9309,7 @@ app.post('/api/v1/projects/:id/servicenow/sync', async (req, res) => {
     project_id: plan.project_id, scope: plan.scope, mode: plan.mode, threshold: plan.threshold,
     summary: plan.summary, classified_summary: plan.classified_summary, errors: plan.errors,
     warnings: plan.warnings || [], surface_counts: plan.surface_counts || {},
+    completeness: plan.completeness || null,
     preflight: plan.preflight || null,
     materiality: plan.materiality || null,
     items: plan.planned.map(pl => ({

@@ -246,6 +246,121 @@ async function captureScope({ scope, instance, user, pw, fetchImpl }) {
   return artifacts;
 }
 
+// ── #86 part (a): sys_metadata completeness backbone (read-only, no schema change) ──────
+// ServiceNow keeps ONE registry — sys_metadata — of every application-file record in a
+// scope (all business rules, ACLs, ATF steps, flow-action wiring, UI sections, docs, …).
+// The curated `SN_SURFACES`/`genericSurfaces` capture reads ~24 hand-listed tables; a live
+// probe of the MIM pilot found 705 records across ~40 classes, so the capture is blind to
+// whole categories. A single scope-filtered sweep of sys_metadata is the authority for:
+//   (1) blind-spot classes the curated surfaces never read (completeness gap, per-class);
+//   (2) disambiguating WB-side drift — a Workbench record whose sys_id is absent from the
+//       capture is either truly deleted upstream (also absent from the sweep) or merely under
+//       a class we don't monitor (present in the sweep). Only the sweep can tell them apart.
+// Storing per-record change signals (sys_mod_count/sys_updated_on) to skip payload downloads
+// is #86 part (b) — it needs new provenance columns and is intentionally NOT done here.
+const SWEEP_FIELDS = [
+  'sys_id', 'sys_class_name', 'sys_name', 'sys_update_name',
+  'sys_updated_on', 'sys_updated_by', 'sys_mod_count',
+];
+
+/**
+ * One read-only sweep of `sys_metadata` for a scope — the authoritative inventory of every
+ * application file. BEST-EFFORT: any failure (e.g. the sync user lacks read on sys_metadata)
+ * degrades to `{available:false, error}` and NEVER breaks the sync. Paged via fetchAllRows.
+ * @returns {Promise<{available:boolean, capped:boolean, total:number, bySysId:Map, byClass:object, error?:string}>}
+ */
+async function sweepScopeMetadata({ scope, instance, user, pw, fetchImpl }) {
+  const bySysId = new Map();
+  const byClass = {};
+  try {
+    const f = makeFetch(fetchImpl);
+    const auth = 'Basic ' + Buffer.from(`${user}:${pw}`).toString('base64');
+    const base = normalizeInstanceUrl(instance);
+    const headers = { Authorization: auth, Accept: 'application/json' };
+    const q = 'sys_scope.scope=' + scope + '^ORDERBYsys_id';
+    const baseUrl = `${base}/api/now/table/sys_metadata?sysparm_query=${encodeURIComponent(q)}&sysparm_fields=${encodeURIComponent(SWEEP_FIELDS.join(','))}&sysparm_exclude_reference_link=true`;
+    const { rows, capped } = await fetchAllRows(f, baseUrl, headers);
+    for (const r of rows) {
+      if (!r.sys_id) continue;
+      bySysId.set(r.sys_id, r);
+      const c = r.sys_class_name || '(unknown)';
+      byClass[c] = (byClass[c] || 0) + 1;
+    }
+    return { available: true, capped, total: bySysId.size, bySysId, byClass };
+  } catch (e) {
+    return { available: false, error: e.message, capped: false, total: 0, bySysId, byClass };
+  }
+}
+
+/**
+ * PURE completeness analysis: the sys_metadata sweep vs what the curated capture returned
+ * and what the Workbench already tracks. No I/O, no mutation of the sweep. Annotates each
+ * `classified.drift` item with `exists_in_sn` (informational only — does NOT change gating;
+ * drift is already never auto-deleted). `sampleCap` bounds the per-report row samples.
+ */
+function analyzeCompleteness(sweep, classified, opts = {}) {
+  if (!sweep || !sweep.available) {
+    return { available: false, reason: (sweep && sweep.error) || 'sys_metadata sweep unavailable' };
+  }
+  const sampleCap = opts.sampleCap || 50;
+  // sys_ids the curated capture actually returned (rich + generic + children all carry one).
+  const captured = new Set();
+  for (const a of [...classified.unchanged, ...classified.changed, ...classified.new]) {
+    if (a.source_sys_id) captured.add(a.source_sys_id);
+  }
+  // Blind spots: records the scope registry lists that the capture never returned.
+  const uncapturedByClass = {};
+  const uncaptured_sample = [];
+  for (const [sysId, row] of sweep.bySysId) {
+    if (captured.has(sysId)) continue;
+    const cls = row.sys_class_name || '(unknown)';
+    uncapturedByClass[cls] = (uncapturedByClass[cls] || 0) + 1;
+    if (uncaptured_sample.length < sampleCap) {
+      uncaptured_sample.push({
+        sys_id: sysId, sys_class_name: cls, name: row.sys_name || null,
+        updated_on: row.sys_updated_on || null, updated_by: row.sys_updated_by || null,
+      });
+    }
+  }
+  const uncaptured_count = Object.values(uncapturedByClass).reduce((a, b) => a + b, 0);
+  // Disambiguate WB-side drift with the authoritative sweep.
+  const vanished = [], present_uncaptured = [];
+  for (const d of classified.drift) {
+    const hit = sweep.bySysId.get(d.source_sys_id);
+    d.exists_in_sn = !!hit;   // informational annotation; gating unchanged
+    const rec = {
+      source_sys_id: d.source_sys_id, name: d.name, wb_table: d.wb_table, wb_type: d.wb_type,
+      sys_class_name: hit ? (hit.sys_class_name || null) : null,
+    };
+    (hit ? present_uncaptured : vanished).push(rec);
+  }
+  // Class coverage — resolve each captured sys_id's class via the authoritative sweep.
+  const capturedClasses = new Set();
+  for (const sysId of captured) {
+    const row = sweep.bySysId.get(sysId);
+    if (row && row.sys_class_name) capturedClasses.add(row.sys_class_name);
+  }
+  const classes_in_scope = Object.entries(sweep.byClass)
+    .map(([sys_class_name, count]) => ({ sys_class_name, count, captured: capturedClasses.has(sys_class_name) }))
+    .sort((a, b) => b.count - a.count);
+  const uncaptured_by_class = Object.entries(uncapturedByClass)
+    .map(([sys_class_name, count]) => ({ sys_class_name, count }))
+    .sort((a, b) => b.count - a.count);
+  return {
+    available: true,
+    capped: !!sweep.capped,
+    total_in_scope: sweep.total,
+    class_count: classes_in_scope.length,
+    captured_class_count: capturedClasses.size,
+    classes_in_scope,
+    uncaptured_count,
+    uncaptured_by_class,
+    uncaptured_sample,
+    vanished,
+    present_uncaptured,
+  };
+}
+
 /** Find the Workbench record for a ServiceNow sys_id within a project (across provenance tables). */
 function findWbBySysId(projectId, sysId) {
   for (const t of WB_PROVENANCE_TABLES) {
@@ -377,4 +492,4 @@ function classifyArtifacts(artifacts, projectId) {
   return res;
 }
 
-module.exports = { SN_SURFACES, WB_PROVENANCE_TABLES, hashArtifact, captureScope, fetchAllRows, findWbBySysId, findWbBySlug, parseWbTag, classifyArtifacts, makeFetch };
+module.exports = { SN_SURFACES, WB_PROVENANCE_TABLES, hashArtifact, captureScope, fetchAllRows, findWbBySysId, findWbBySlug, parseWbTag, classifyArtifacts, makeFetch, sweepScopeMetadata, analyzeCompleteness };
