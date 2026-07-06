@@ -456,7 +456,10 @@ flowchart TD
     O --> R
     R --> G
     P --> Q
-    Q --> S["POST .../promote\nCreate asdlc_change_packet\n+ change_packet_items"]
+    Q --> S0{"Design Quality Check\nquality-check.js — split/duplicate\nentities, placeholders, AI-invented\nstructure, requirement coverage gaps"}
+    S0 -->|"Blocking finding"| S2(["409 — fix required, never bypassable"])
+    S0 -->|"Warnings, not yet acknowledged"| S3(["409 — review; retry with\nacknowledge_warnings=true"])
+    S0 -->|"Clean, or warnings acknowledged"| S["POST .../promote\nCreate asdlc_change_packet\n+ change_packet_items"]
     S --> T["quality-reviewer.js\nFlag exceptions per entity"]
     T --> U(["User reviews CP"])
     U --> V{"Decision"}
@@ -781,6 +784,7 @@ erDiagram
     <div class="decision-content">
       <h4>Cross-Check Tiers (Plan C)</h4>
       <p><strong>Tier 0 (always free):</strong> deterministic salient-token drift scan — extract key identifiers from changed entities and scan the design corpus for references. <strong>Tier 1 (bounded LLM):</strong> check new/changed extractions against all FR/NFR. <strong>Tier 2 (conditional):</strong> deep scan + new clarifications, only when Tier 0 or 1 found something with non-trivial severity. Never skip Tier 0.</p>
+      <p><strong>Merge/duplicate-consolidation awareness:</strong> a <code>delete</code> that folds a duplicate into a surviving same-type sibling (matched by name-token overlap, staged merge target preferred over an existing row) does not remove that capability from the design. Tokens the survivor still carries are suppressed before Tier 0, so a deleted record's incidental mentions (e.g. a DockTrak tool naming "SAP") no longer spray false ripple across every element sharing the token. Only a structured interface field the survivor entirely lacks is raised — as one precise <code>conflict:merge:&lt;slug&gt;.&lt;field&gt;</code> question. Guarded by <code>test-merge-reconcile.js</code>.</p>
     </div>
   </div>
 

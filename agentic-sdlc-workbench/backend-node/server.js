@@ -1134,29 +1134,33 @@ function snWouldShrink(current, incoming) {
 }
 
 /** Resolve a child entity's parent FK columns to real ids (same-packet → DB → fallback). */
+/** Resolve one parent link's name value → parent id: same-packet idMap first, then an
+ *  active existing row by name. Returns null when unresolvable (no fallback). */
+function lookupParentId(link, nameVal, projectId, idMap) {
+  if (!nameVal) return null;
+  let parentId = (idMap && idMap[`${link.parentType}::${nameVal}`]) || null;
+  if (!parentId) {
+    const pe = registry.byEntityType[link.parentType];
+    const pNameKey = pe && pe.nameKeys && pe.nameKeys[0];
+    const pNameCol = pe && pNameKey && pe.fieldMap[pNameKey] ? pe.fieldMap[pNameKey].col : null;
+    if (pe && pNameCol) {
+      const row = db.prepare(
+        `SELECT ${pe.pk} AS id FROM ${pe.table}
+         WHERE project_id = ? AND ${pNameCol} = ?
+           AND (lifecycle_status IS NULL OR lifecycle_status != 'retired')
+         ORDER BY created_at LIMIT 1`
+      ).get(projectId, nameVal);
+      if (row) parentId = row.id;
+    }
+  }
+  return parentId;
+}
+
 function resolveParents(entity, data, projectId, idMap) {
   const fks = {};
   for (const link of (entity.parentLinks || [])) {
     const nameVal = data[link.nameKeyInData];
-    let parentId = null;
-
-    if (nameVal) {
-      parentId = idMap[`${link.parentType}::${nameVal}`] || null;
-      if (!parentId) {
-        const pe = registry.byEntityType[link.parentType];
-        const pNameKey = pe && pe.nameKeys && pe.nameKeys[0];
-        const pNameCol = pe && pNameKey && pe.fieldMap[pNameKey] ? pe.fieldMap[pNameKey].col : null;
-        if (pe && pNameCol) {
-          const row = db.prepare(
-            `SELECT ${pe.pk} AS id FROM ${pe.table}
-             WHERE project_id = ? AND ${pNameCol} = ?
-               AND (lifecycle_status IS NULL OR lifecycle_status != 'retired')
-             ORDER BY created_at LIMIT 1`
-          ).get(projectId, nameVal);
-          if (row) parentId = row.id;
-        }
-      }
-    }
+    let parentId = lookupParentId(link, nameVal, projectId, idMap);
     if (!parentId && link.required) parentId = fallbackParent(link.parentType, projectId, idMap);
     if (!parentId && link.required) {
       throw new SoftSkip(`${entity.entity_type}: could not resolve required parent ${link.parentType} (${link.nameKeyInData}="${nameVal || ''}")`);
@@ -1248,7 +1252,7 @@ function mtCreate(entity, data, projectId, uid, idMap, item) {
   return id;
 }
 
-function mtUpdate(entity, data, item, uid, forceCols) {
+function mtUpdate(entity, data, item, uid, forceCols, projectId, idMap) {
   const id = item.entity_id;
   const before = mtRow(entity.table, entity.pk, id);
   if (!before) throw new SoftSkip(`${entity.entity_type}: update target ${id} no longer exists`);
@@ -1264,6 +1268,19 @@ function mtUpdate(entity, data, item, uid, forceCols) {
       if (SN_PROVENANCE_COLS.has(col)) continue;
       if (forceCols && forceCols.has(col)) continue;
       if (snWouldShrink(before[col], mapped[col])) { delete mapped[col]; protectedCols.push(col); }
+    }
+  }
+  // Re-parenting on update: mapFields only maps fieldMap columns, so a changed parent
+  // reference (e.g. agent_spec.workflow_name → workflow_id) would otherwise be silently
+  // dropped — the FK keeps pointing at the old parent, which then blocks that parent's
+  // deletion in a merge. Re-resolve each parent link the update actually supplies a name
+  // for, and apply the resolved FK when it genuinely differs. Only runs when the caller
+  // provides resolution context (CP apply passes projectId + idMap); never nulls an FK.
+  if (projectId) {
+    for (const link of (entity.parentLinks || [])) {
+      if (!Object.prototype.hasOwnProperty.call(data, link.nameKeyInData)) continue;
+      const newFk = lookupParentId(link, data[link.nameKeyInData], projectId, idMap || {});
+      if (newFk && newFk !== before[link.col]) mapped[link.col] = newFk;
     }
   }
   const setCols = Object.keys(mapped);
@@ -1405,7 +1422,7 @@ function applyOneItem(item, cp, uid, forceKeys) {
       // as-is by this approval — promote + force them too (#62).
       const promotedCols = promoteSnProposed(entity, data, item);
       if (promotedCols) forceCols = new Set([...(forceCols || []), ...promotedCols]);
-      const r = mtUpdate(entity, data, item, uid, forceCols);
+      const r = mtUpdate(entity, data, item, uid, forceCols, cp.project_id, idMap);
       result.updated++;
       if (r && r.protected && r.protected.length) {
         markItemApplied(item.change_packet_item_id, `[non-destructive: kept richer Workbench values for ${r.protected.join(', ')}]`);
@@ -1752,7 +1769,7 @@ function applyChangePacket(cpId, uid) {
         // promote them to real fields and force-apply (#62; previously they were
         // silently dropped and the "successful" approval wrote nothing).
         const forceCols = promoteSnProposed(entity, data, item);
-        const r = mtUpdate(entity, data, item, uid, forceCols); result.updated++;
+        const r = mtUpdate(entity, data, item, uid, forceCols, projectId, idMap); result.updated++;
         if (r && r.protected && r.protected.length) {
           markItemApplied(item.change_packet_item_id, `[non-destructive: kept richer Workbench values for ${r.protected.join(', ')}]`);
         }
@@ -8754,6 +8771,15 @@ app.post('/api/v1/ingest-documents/:id/clarifications/answer', async (req, res) 
   }
 });
 
+// Design quality check — read-only report the UI can fetch and display on the
+// staged-extractions screen, before the user ever clicks Create Change Packets.
+app.get('/api/v1/ingest-documents/:id/quality-check', (req, res) => {
+  const doc = db.prepare('SELECT * FROM asdlc_ingest_document WHERE ingest_id=?').get(req.params.id);
+  if (!doc) return res.status(404).json({ error: 'Ingest document not found' });
+  const { runQualityCheck } = require('./agent/quality-check');
+  res.json(runQualityCheck(db, req.params.id));
+});
+
 // Promote staged extractions → Change Packets
 app.post('/api/v1/ingest-documents/:id/promote', async (req, res) => {
   const uid = userId(req);
@@ -8846,6 +8872,29 @@ app.post('/api/v1/ingest-documents/:id/promote', async (req, res) => {
         error: 'Cannot promote: required parent(s) are unresolved — promoting would orphan their children and leave a half-materialized design. ' +
           'Answer/dismiss the parent\'s clarification (or raise its confidence) so it can be staged, then promote.',
         orphans,
+      });
+    }
+  }
+
+  // ── Design quality gate: deterministic checks for duplicate/split entities,
+  // unresolved placeholders, AI-invented structural additions, and requirement
+  // coverage gaps. 'block' findings can never be bypassed. 'warn' findings
+  // require the caller to acknowledge them once (acknowledge_warnings:true in
+  // the request body) before promotion proceeds — 'info' findings never block.
+  {
+    const { runQualityCheck } = require('./agent/quality-check');
+    const quality = runQualityCheck(db, req.params.id);
+    if (quality.summary.blocking > 0) {
+      return res.status(409).json({
+        error: 'Design quality check found blocking issues — resolve them before promoting.',
+        quality,
+      });
+    }
+    if (quality.summary.warnings > 0 && !(req.body && req.body.acknowledge_warnings)) {
+      return res.status(409).json({
+        error: 'Design quality check found issues worth a look before promoting.',
+        quality,
+        requires_acknowledgment: true,
       });
     }
   }

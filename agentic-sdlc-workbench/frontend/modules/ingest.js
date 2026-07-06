@@ -957,27 +957,128 @@ function buildClarificationForm(doc, questions, round, pane) {
       : 'Happy with the staged design as-is? You can promote now and keep the remaining questions as open suggestions — they won\'t block the Change Packets.'
   ));
 
+  const promoteNowLabel = '✓ Promote now — keep questions open';
   const promoteNowBtn = el('button',
     { className: 'btn btn-secondary', disabled: hasOpenConflict },
-    '✓ Promote now — keep questions open');
+    promoteNowLabel);
   if (hasOpenConflict) promoteNowBtn.style.opacity = '0.5';
-  promoteNowBtn.addEventListener('click', async () => {
-    if (!confirm('Promote the staged extractions to Change Packets now?\n\nThe open clarifying questions stay on the document as suggestions — they will not be applied automatically. You can still answer them later before approval.')) return;
-    promoteNowBtn.disabled = true; promoteNowBtn.textContent = 'Creating…';
-    try {
-      const result = await apiFetch(`/ingest-documents/${doc.ingest_id}/promote`, { method: 'POST' });
-      const cpList = result.change_packets || [];
-      showToast(`${cpList.length} Change Packet${cpList.length !== 1 ? 's' : ''} created — ready for approval.`, 'success');
-      await renderDetail(doc, pane);
-    } catch (err) {
-      showToast(`Error: ${err.message}`, 'error');
-      promoteNowBtn.disabled = false; promoteNowBtn.textContent = '✓ Promote now — keep questions open';
-    }
+  const qualityPanel = setupQualityGatedPromote(promoteNowBtn, doc, pane, promoteNowLabel, {
+    preConfirm: () => confirm('Promote the staged extractions to Change Packets now?\n\nThe open clarifying questions stay on the document as suggestions — they will not be applied automatically. You can still answer them later before approval.'),
   });
+  promoteRow.appendChild(qualityPanel);
   promoteRow.appendChild(promoteNowBtn);
   sec.appendChild(promoteRow);
 
   return sec;
+}
+
+// Fetches the design-quality report for this ingest (agent/quality-check.js on
+// the backend) and wires a promote button against it: 'block' findings
+// permanently disable the button; 'warn' findings require one explicit
+// "proceed anyway" acknowledgment before the promote call is made. The server
+// re-runs the same check independently, so this is a UX convenience, not the
+// enforcement point — the gate cannot be bypassed by calling the API directly.
+// Shared by both promote entry points (the main Create Change Packets button
+// and the "Promote now — keep questions open" button) so neither can skip it.
+function setupQualityGatedPromote(btn, doc, pane, defaultLabel, opts = {}) {
+  const { preConfirm } = opts;
+  const panel = el('div', {}, el('p', { style: { fontSize: '12px', color: 'var(--color-text-muted)' } }, 'Running design quality check…'));
+  const reportPromise = apiFetch(`/ingest-documents/${doc.ingest_id}/quality-check`).catch(() => null);
+
+  reportPromise.then(report => {
+    panel.innerHTML = '';
+    if (!report) return; // fail-soft — don't block promotion if the check itself errors
+    panel.appendChild(renderQualityFindings(report));
+    if (report.summary.blocking > 0) {
+      btn.disabled = true;
+      btn.title = 'Resolve the blocking design-quality issue(s) above before promoting.';
+    }
+  });
+
+  btn.addEventListener('click', async () => {
+    if (preConfirm && !(await preConfirm())) return;
+    const report = await reportPromise;
+    if (report && report.summary.blocking > 0) {
+      showToast('Resolve the blocking design-quality issue(s) before promoting.', 'error');
+      return;
+    }
+    let acknowledgeWarnings = false;
+    if (report && report.summary.warnings > 0) {
+      const lines = report.findings.filter(f => f.severity === 'warn').map(f => `• ${f.title}`).join('\n');
+      if (!confirm(`Design quality check found ${report.summary.warnings} item(s) worth a look before promoting:\n\n${lines}\n\nProceed anyway?`)) return;
+      acknowledgeWarnings = true;
+    }
+    btn.disabled = true; btn.textContent = 'Creating…';
+    try {
+      const result = await apiFetch(`/ingest-documents/${doc.ingest_id}/promote`, {
+        method: 'POST',
+        body: acknowledgeWarnings ? JSON.stringify({ acknowledge_warnings: true }) : undefined,
+      });
+      const cpList = result.change_packets || [];
+      showToast(`${cpList.length} Change Packet${cpList.length !== 1 ? 's' : ''} created — ready for approval.`, 'success');
+      await renderDetail(doc, pane);
+    } catch (err) {
+      // The server re-checks independently — if its verdict differs from what
+      // we showed (state changed since our fetch), surface its findings.
+      if (err.body && err.body.quality) {
+        panel.innerHTML = '';
+        panel.appendChild(renderQualityFindings(err.body.quality));
+      }
+      showToast(`Error: ${err.message}`, 'error');
+      btn.disabled = false; btn.textContent = defaultLabel;
+    }
+  });
+
+  return panel;
+}
+
+function renderQualityFindings(report) {
+  const wrap = el('div', { style: { marginBottom: '14px' } });
+  const { summary, findings } = report;
+  if (!findings.length) {
+    wrap.appendChild(el('p', { style: { fontSize: '12px', color: 'var(--color-ok)' } }, '✓ Design quality check found no issues.'));
+    return wrap;
+  }
+
+  const hdr = el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' } });
+  hdr.appendChild(el('span', { style: { fontSize: '13px', fontWeight: '600' } }, 'Design Quality Check'));
+  if (summary.blocking) hdr.appendChild(tag(`${summary.blocking} blocking`, 'danger'));
+  if (summary.warnings) hdr.appendChild(tag(`${summary.warnings} to review`, 'warn'));
+  if (summary.info) hdr.appendChild(tag(`${summary.info} FYI`, 'muted'));
+  wrap.appendChild(hdr);
+
+  const bySeverity = { block: [], warn: [], info: [] };
+  for (const f of findings) (bySeverity[f.severity] || bySeverity.info).push(f);
+
+  const renderGroup = (sev, label, open) => {
+    if (!bySeverity[sev].length) return;
+    const color = sev === 'block' ? 'var(--color-danger)' : sev === 'warn' ? 'var(--color-warn)' : 'var(--color-text-muted)';
+    // el() always calls setAttribute even for undefined values (which stringifies
+    // to "open=\"undefined\"" and forces every <details> open) — only include the
+    // key at all when it should be present.
+    const details = el('details', open ? { open: '', style: { marginBottom: '8px' } } : { style: { marginBottom: '8px' } });
+    details.appendChild(el('summary', { style: { cursor: 'pointer', fontSize: '12px', fontWeight: '500', color } },
+      `${label} (${bySeverity[sev].length})`));
+    bySeverity[sev].forEach(f => {
+      const item = el('div', { style: {
+        borderLeft: `3px solid ${color}`, padding: '6px 10px', margin: '6px 0 0',
+        background: 'var(--color-bg)', borderRadius: '4px',
+      }});
+      item.appendChild(el('div', { style: { fontSize: '12px', fontWeight: '600', marginBottom: '2px' } }, f.title));
+      item.appendChild(el('div', { style: { fontSize: '11px', color: 'var(--color-text-muted)', lineHeight: '1.5' } }, f.detail));
+      if (f.suggested_action) {
+        item.appendChild(el('div', { style: { fontSize: '11px', color: 'var(--color-accent)', marginTop: '2px' } }, `→ ${f.suggested_action}`));
+      }
+      details.appendChild(item);
+    });
+    wrap.appendChild(details);
+  };
+
+  renderGroup('block', '⛔ Blocking', true);
+  renderGroup('warn', '⚠ Needs review', false);
+  renderGroup('info', 'ℹ FYI', false);
+
+  return wrap;
 }
 
 function buildExtractionsSection(extractions, showPromote, doc, pane) {
@@ -1076,22 +1177,12 @@ function buildExtractionsSection(extractions, showPromote, doc, pane) {
   table.appendChild(tbody);
   sec.appendChild(table);
 
-  // Promote button
+  // Promote button — gated by the design quality check (agent/quality-check.js)
   if (showPromote) {
-    const promoteBtn = el('button', { className: 'btn btn-primary', style: { marginTop: '16px' } },
-      `✓ Create Change Packets (${extractions.length} items)`);
-    promoteBtn.addEventListener('click', async () => {
-      promoteBtn.disabled = true; promoteBtn.textContent = 'Creating…';
-      try {
-        const result = await apiFetch(`/ingest-documents/${doc.ingest_id}/promote`, { method: 'POST' });
-        const cpList = result.change_packets || [];
-        showToast(`${cpList.length} Change Packet${cpList.length !== 1 ? 's' : ''} created — ready for approval.`, 'success');
-        await renderDetail(doc, pane);
-      } catch (err) {
-        showToast(`Error: ${err.message}`, 'error');
-        promoteBtn.disabled = false; promoteBtn.textContent = `✓ Create Change Packets (${extractions.length} items)`;
-      }
-    });
+    const defaultLabel = `✓ Create Change Packets (${extractions.length} items)`;
+    const promoteBtn = el('button', { className: 'btn btn-primary', style: { marginTop: '16px' } }, defaultLabel);
+    const qualityPanel = setupQualityGatedPromote(promoteBtn, doc, pane, defaultLabel);
+    sec.appendChild(qualityPanel);
     sec.appendChild(promoteBtn);
   }
 
