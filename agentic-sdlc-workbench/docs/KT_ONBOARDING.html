@@ -1063,7 +1063,8 @@
             <tr><td>Assess alignment</td><td><span class="badge working">✅ Working</span></td><td>Scored report of SN config vs. Workbench design</td></tr>
             <tr><td>Reconcile + delta export</td><td><span class="badge working">✅ Working</span></td><td>Detect differences; generate change set</td></tr>
             <tr><td>Write back to SN (sys_id)</td><td><span class="badge partial">⚠️ Partial</span></td><td>Partially implemented; not production-ready</td></tr>
-            <tr><td>Detect SN changes since last ingest</td><td><span class="badge stub">❌ Not built</span></td><td>Net-new conflict detection is on the roadmap</td></tr>
+            <tr><td>Detect SN changes since last ingest</td><td><span class="badge working">✅ Working</span></td><td>Deterministic tier-0 (content hash) + <code>sys_metadata</code> change signals (per-record <code>sys_mod_count</code> + who/when) + completeness sweep flags blind-spot classes and confirmed-deleted records across all ~40 SN classes (#86)</td></tr>
+            <tr><td>Both-side-edit protection</td><td><span class="badge working">✅ Working</span></td><td>A record edited in both the Workbench and ServiceNow since the last sync can never auto-apply — forced to human review (#84)</td></tr>
           </tbody>
         </table>
       </div>
@@ -1109,6 +1110,8 @@ node server.js
       <p style="color:#334155; margin-bottom:12px;">11 manual exploration scripts in <code>backend-node/</code> — useful for debugging specific subsystems. These are <strong>not a test suite</strong> (no assertions, no framework).</p>
       <pre class="code-block">node test-reverse-l1.js          <span class="cm"># SN reverse-engineering</span>
 node test-sn-sync.js             <span class="cm"># SN sync pipeline</span>
+node test-sn-completeness.js     <span class="cm"># sys_metadata completeness backbone (#86a)</span>
+node test-sn-change-signal.js    <span class="cm"># Per-record change signals (#86b)</span>
 node test-roundtrip-inbound.js   <span class="cm"># Inbound round-trip</span>
 node test-instance-catalog.js    <span class="cm"># Instance catalog</span>
 node test-req-linker.js          <span class="cm"># Requirement linking</span></pre>
