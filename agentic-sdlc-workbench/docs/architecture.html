@@ -290,7 +290,7 @@
       <span class="num">03</span>
       <div>
         <h2>Technology Stack</h2>
-        <p>Deliberately zero-install: the active backend runs on Node's built-in SQLite, with a PostgreSQL + FastAPI path reserved for scale.</p>
+        <p>Deliberately zero-install: the active (and only) backend runs on Node's built-in SQLite. An early Python/FastAPI + Postgres prototype remains in <code>backend/</code> but is abandoned — superseded by <code>backend-node/</code> and slated for removal (backlog #90).</p>
       </div>
     </div>
     <div class="grid">
@@ -319,8 +319,8 @@
         <div class="main">Anthropic Claude</div>
         <ul>
           <li><code>@anthropic-ai/sdk</code> tool-use</li>
-          <li>Opus 4.8 · Sonnet 4.6 · Haiku 4.5</li>
-          <li>Per-role model + thinking budget</li>
+          <li>Data-driven model registry (Opus 4.8 · Sonnet 4.6 · Haiku 4.5 defaults; Fable 5 / Sonnet 5 selectable)</li>
+          <li>Per-role model + thinking effort</li>
         </ul>
       </div>
       <div class="tcard">
@@ -333,9 +333,9 @@
         </ul>
       </div>
       <div class="tcard">
-        <h4>Alternate Backend</h4>
+        <h4>Legacy Prototype (abandoned)</h4>
         <div class="main">FastAPI + PostgreSQL 16</div>
-        <div class="sub">Full SQL schema, triggers &amp; row-level security in <code>backend/</code> — for when Docker/Python are available.</div>
+        <div class="sub">Early Python scaffold in <code>backend/</code>, predating the pivot to <code>backend-node/</code>; referenced by nothing and slated for removal (backlog #90). Not a live alternate.</div>
       </div>
       <div class="tcard">
         <h4>Config &amp; Ops</h4>
