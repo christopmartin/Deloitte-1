@@ -17,7 +17,7 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const aiConfig = require('./ai-config');
 const { withWiki } = require('./wiki-context');
-const { loadCanonical, canonicalForPrompt } = require('./sn-reconcile');
+const { loadCanonical, canonicalForPrompt, editContextLines } = require('./sn-reconcile');
 
 let _client;
 function getClient() {
@@ -81,6 +81,7 @@ async function reviewChanged(item, ctx) {
   const userMsg = [
     'EXISTING Workbench record (the content you must protect):',
     JSON.stringify(canonicalForPrompt(canonical), null, 2),
+    ...editContextLines(item),
     '',
     'ServiceNow-inferred candidate:',
     JSON.stringify(item.inferred || {}, null, 2),

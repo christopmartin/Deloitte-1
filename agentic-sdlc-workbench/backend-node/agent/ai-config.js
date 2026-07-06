@@ -4,42 +4,104 @@
 // best-practice fetching. Backed by global settings (asdlc_app_setting) with env
 // var + hardcoded fallbacks so the existing CLAUDE_*_MODEL env vars keep working.
 //
+// Model choices are DATA, not code: the selectable models (ids, display names,
+// pricing, thinking behavior) live in model-registry.json, extendable at runtime
+// via the 'model_registry_custom' setting (JSON array merged over the file by id).
+// Adding a new Claude family = a registry entry, never a call-site edit.
+//
 'use strict';
 
 const { db, generateId, getSetting } = require('../db');
 
-// ── Model catalog (shown in the Admin AI Settings dropdowns) ──────────────────
-const AVAILABLE_MODELS = [
-  { id: 'claude-opus-4-8',           label: 'Claude Opus 4.8 (most capable)' },
-  { id: 'claude-opus-4-7',           label: 'Claude Opus 4.7' },
-  { id: 'claude-sonnet-4-6',         label: 'Claude Sonnet 4.6 (balanced)' },
-  { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5 (fast/cheap)' },
+// ── Model registry (file defaults + optional DB overlay) ─────────────────────
+const FILE_REGISTRY = require('./model-registry.json');
+
+// The 11 AI roles ("slots") — every Claude call site resolves through one of these.
+const ROLES = [
+  'extraction', 'synthesis', 'quality_reviewer', 'prompt_drafter', 'build_review',
+  'req_linker', 'rasic_deriver', 'cost_estimate',
+  'reverse_engineer', 'reconciler', 'reconcile_reviewer',
 ];
 
-// ── Approximate USD pricing per 1M tokens (informational cost estimate) ───────
-// input / output / cache-read. Unknown models → null cost (tokens still recorded).
-const MODEL_PRICING = {
-  'claude-opus-4-8':           { in: 5,  out: 25, cacheRead: 0.5 },
-  'claude-opus-4-7':           { in: 5,  out: 25, cacheRead: 0.5 },
-  'claude-sonnet-4-6':         { in: 3,  out: 15, cacheRead: 0.3 },
-  'claude-haiku-4-5-20251001': { in: 1,  out: 5,  cacheRead: 0.1 },
-};
+// Roles whose pipelines actually consume getThinkingConfig() (effort applies).
+const THINKING_ROLES = ['extraction', 'synthesis', 'rasic_deriver', 'reverse_engineer', 'reconciler', 'reconcile_reviewer'];
+
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+// Tracks whether the last model_registry_custom parse failed (surfaced in validation).
+let registryCustomError = null;
+const warnedOnce = new Set();
+function warnOnce(key, msg) {
+  if (warnedOnce.has(key)) return;
+  warnedOnce.add(key);
+  console.error(msg);
+}
+
+/**
+ * The merged model registry: model-registry.json entries overlaid (by id) with the
+ * 'model_registry_custom' setting — a JSON array of partial entries. DB fields win;
+ * unmatched ids append; {"id": X, "remove": true} hides an entry. A malformed
+ * overlay NEVER breaks resolution — it is ignored with a warning.
+ * @returns {Array<object>}
+ */
+function getRegistry() {
+  const byId = new Map();
+  for (const m of (FILE_REGISTRY.models || [])) byId.set(m.id, { ...m });
+  const raw = getSetting('model_registry_custom', '');
+  registryCustomError = null;
+  if (raw && String(raw).trim()) {
+    try {
+      const overlay = JSON.parse(raw);
+      if (!Array.isArray(overlay)) throw new Error('must be a JSON array');
+      for (const e of overlay) {
+        if (!e || typeof e.id !== 'string' || !e.id) continue;
+        if (e.remove === true) { byId.delete(e.id); continue; }
+        byId.set(e.id, { ...(byId.get(e.id) || {}), ...e });
+      }
+    } catch (err) {
+      registryCustomError = err.message;
+      warnOnce('registry_custom', `[ai-config] model_registry_custom is invalid (${err.message}) — using built-in registry only`);
+    }
+  }
+  return [...byId.values()];
+}
+
+/** Look up one registry entry by model id. @returns {object|null} */
+function getRegistryEntry(modelId) {
+  if (!modelId) return null;
+  return getRegistry().find(m => m.id === modelId) || null;
+}
+
+/** The registry's designated fallback entry (default:true, else DEFAULT_MODEL, else first usable). */
+function getDefaultEntry() {
+  const reg = getRegistry();
+  return reg.find(m => m.default === true && m.status !== 'retired')
+      || reg.find(m => m.id === DEFAULT_MODEL && m.status !== 'retired')
+      || reg.find(m => m.status !== 'retired')
+      || reg[0]
+      || { id: DEFAULT_MODEL };
+}
 
 const ROLE_ENV = {
-  extraction:       'CLAUDE_EXTRACTION_MODEL',
-  quality_reviewer: 'CLAUDE_QUALITY_REVIEWER_MODEL',
-  prompt_drafter:   'CLAUDE_PROMPT_DRAFTER_MODEL',
-  build_review:     'CLAUDE_BUILD_REVIEW_MODEL',
-  req_linker:       'CLAUDE_REQ_LINKER_MODEL',
-  rasic_deriver:    'CLAUDE_RASIC_DERIVER_MODEL',   // RASIC matrix inference; Sonnet default, Opus configurable
-  synthesis:        'CLAUDE_SYNTHESIS_MODEL',       // Opus design-synthesis/enrichment pass (Phase 1)
+  extraction:         'CLAUDE_EXTRACTION_MODEL',
+  quality_reviewer:   'CLAUDE_QUALITY_REVIEWER_MODEL',
+  prompt_drafter:     'CLAUDE_PROMPT_DRAFTER_MODEL',
+  build_review:       'CLAUDE_BUILD_REVIEW_MODEL',
+  req_linker:         'CLAUDE_REQ_LINKER_MODEL',
+  rasic_deriver:      'CLAUDE_RASIC_DERIVER_MODEL',   // RASIC matrix inference; Sonnet default, Opus configurable
+  synthesis:          'CLAUDE_SYNTHESIS_MODEL',       // Opus design-synthesis/enrichment pass (Phase 1)
+  cost_estimate:      'CLAUDE_COST_ESTIMATE_MODEL',
+  reverse_engineer:   'CLAUDE_REVERSE_ENGINEER_MODEL',
+  reconciler:         'CLAUDE_RECONCILER_MODEL',
+  reconcile_reviewer: 'CLAUDE_RECONCILE_REVIEWER_MODEL',
 };
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
 // ── ServiceNow reconciliation roles (Phase C–E) ──────────────────────────────
 // These do the heavy reverse-engineering / reconciliation / review reasoning, so
 // they default to Opus + extended thinking ON. All still admin-overridable via
-// asdlc_app_setting (`<role>_model`, `<role>_thinking_enabled`, `<role>_thinking_budget`).
+// asdlc_app_setting (`<role>_model`, `<role>_thinking_effort`, and the legacy
+// `<role>_thinking_enabled` / `<role>_thinking_budget` pair).
 const ROLE_DEFAULTS = {
   reverse_engineer:   'claude-opus-4-8',
   reconciler:         'claude-opus-4-8',
@@ -53,9 +115,21 @@ const ROLE_DEFAULTS = {
 const ROLE_THINKING_DEFAULT = { reverse_engineer: 'true', reconciler: 'true', reconcile_reviewer: 'true', synthesis: 'true' };
 const ROLE_THINKING_BUDGET  = { reverse_engineer: '8000', reconciler: '8000', reconcile_reviewer: '8000', synthesis: '8000' }; // ≥8000 → effort 'high'
 
-/** Resolve the model for a role: setting `<role>_model` → env var → per-role default → global default. */
+/**
+ * Resolve the model for a role: setting `<role>_model` → env var → per-role default
+ * → global default. An id that is unknown to the registry (or retired) resolves to
+ * the registry's default entry with a loud once-per-key console.error — never a
+ * silent wrong model, never a crash at the API boundary.
+ */
 function resolveModel(role) {
-  return getSetting(`${role}_model`, ROLE_DEFAULTS[role] || DEFAULT_MODEL, ROLE_ENV[role]);
+  const configured = getSetting(`${role}_model`, ROLE_DEFAULTS[role] || DEFAULT_MODEL, ROLE_ENV[role]);
+  const entry = getRegistryEntry(configured);
+  if (entry && entry.status !== 'retired') return configured;
+  const fallback = getDefaultEntry().id;
+  warnOnce(`resolve:${role}:${configured}`,
+    `[ai-config] ERROR: role "${role}" is configured with ${entry ? 'RETIRED' : 'UNKNOWN'} model "${configured}" — falling back to "${fallback}". ` +
+    `Fix it in Admin ▸ AI Settings or add the model to the registry.`);
+  return fallback;
 }
 
 /** Max output tokens (global setting, default 8192). */
@@ -71,44 +145,147 @@ function getMaxExtractionLoops() {
 }
 
 /**
- * Extended-thinking config for a role.
- * Returns null when disabled, otherwise an object shaped for the model generation:
- *   Claude 3.x → { thinking: { type:'enabled', budget_tokens }, outputConfig: null }
- *   Claude 4.x → { thinking: { type:'adaptive' }, outputConfig: { effort:'high' } }
- * The caller must spread both onto the API request.
+ * Resolve the thinking effort for a role. Precedence:
+ *   1. `<role>_thinking_effort` setting ('off' | low|medium|high|xhigh|max) — authoritative;
+ *   2. legacy pair: `<role>_thinking_enabled` (default per ROLE_THINKING_DEFAULT) +
+ *      `<role>_thinking_budget` (numeric <4000→low <8000→medium else high; an effort
+ *      string maps to itself; junk → medium);
+ *   3. off.
+ * @returns {string|null} effort level, or null = thinking off
  */
-function getThinkingConfig(role = 'extraction') {
+function resolveEffort(role) {
+  const explicit = String(getSetting(`${role}_thinking_effort`, '') || '').trim().toLowerCase();
+  if (explicit === 'off') return null;
+  if (EFFORT_LEVELS.includes(explicit)) return explicit;
+  // (an invalid non-empty value falls through to legacy — flagged by validateAiConfig)
   const enabled = String(getSetting(`${role}_thinking_enabled`, ROLE_THINKING_DEFAULT[role] || 'false')) === 'true';
   if (!enabled) return null;
-  const model = resolveModel(role);
-  // Claude 4 models: 'claude-opus-4-*', 'claude-sonnet-4-*', 'claude-haiku-4-*'
-  const isClaude4 = /^claude-[a-z]+-4[-.]/.test(model);
-  if (isClaude4) {
-    // Map budget tiers to effort levels: <4k→low, <8k→medium, else high
-    let budget = parseInt(getSetting(`${role}_thinking_budget`, ROLE_THINKING_BUDGET[role] || '4000'), 10);
-    if (!Number.isFinite(budget) || budget < 1024) budget = 4000;
-    const effort = budget < 4000 ? 'low' : budget < 8000 ? 'medium' : 'high';
-    return { thinking: { type: 'adaptive' }, outputConfig: { effort } };
-  }
-  // Claude 3.x
-  let budget = parseInt(getSetting(`${role}_thinking_budget`, '4000'), 10);
-  if (!Number.isFinite(budget) || budget < 1024) budget = 4000;
-  return { thinking: { type: 'enabled', budget_tokens: budget }, outputConfig: null };
+  const rawBudget = String(getSetting(`${role}_thinking_budget`, ROLE_THINKING_BUDGET[role] || '4000')).trim().toLowerCase();
+  if (EFFORT_LEVELS.includes(rawBudget)) return rawBudget;  // legacy UI stored the effort word
+  const n = parseInt(rawBudget, 10);
+  if (!Number.isFinite(n)) return 'medium';
+  return n < 4000 ? 'low' : n < 8000 ? 'medium' : 'high';
 }
 
-/** Compute an estimated USD cost from an Anthropic usage object. */
+/** Clamp a requested effort to what the model supports (highest supported ≤ requested, else lowest). */
+function clampEffort(effort, entry) {
+  const supported = entry && Array.isArray(entry.efforts) && entry.efforts.length ? entry.efforts : EFFORT_LEVELS;
+  if (supported.includes(effort)) return effort;
+  const reqIdx = EFFORT_LEVELS.indexOf(effort);
+  for (let i = reqIdx; i >= 0; i--) if (supported.includes(EFFORT_LEVELS[i])) return EFFORT_LEVELS[i];
+  return supported[0];
+}
+
+/**
+ * Extended-thinking config for a role, shaped per the model's registry thinking_style:
+ *   adaptive / always_on → { thinking:{type:'adaptive'}, outputConfig:{effort} }
+ *   budget (Haiku, 3.x)  → { thinking:{type:'enabled', budget_tokens}, outputConfig:null }
+ * Off → null (param omitted), EXCEPT models flagged explicit_off (thinking runs by
+ * default there, e.g. Sonnet 5) → { thinking:{type:'disabled'}, outputConfig:null }.
+ * The caller must spread both onto the API request (existing call-site contract).
+ */
+function getThinkingConfig(role = 'extraction') {
+  const model = resolveModel(role);
+  const entry = getRegistryEntry(model);
+  // Unknown family fallback: infer style from the id so new models need data, not code.
+  const style = entry ? (entry.thinking_style || 'adaptive')
+                      : (/^claude-[a-z]+-([4-9]|\d\d)[-.]/.test(model) ? 'adaptive' : 'budget');
+  const effort = resolveEffort(role);
+
+  if (!effort) {
+    if (style === 'adaptive' && entry && entry.explicit_off === true) {
+      // Thinking runs by default on this model — "off" must be sent explicitly.
+      return { thinking: { type: 'disabled' }, outputConfig: null };
+    }
+    return null; // omit the param (always_on models think anyway; classic models stay off)
+  }
+
+  if (style === 'budget') {
+    // budget_tokens must stay below max_tokens (claude-processor bumps its own
+    // maxTokens; other call sites don't, so cap defensively here).
+    const map = { low: 2000, medium: 4000, high: 8000, xhigh: 12000, max: 16000 };
+    let budget = map[effort] || 4000;
+    budget = Math.max(1024, Math.min(budget, getMaxTokens() - 1024));
+    return { thinking: { type: 'enabled', budget_tokens: budget }, outputConfig: null };
+  }
+
+  // adaptive + always_on (explicit {type:'adaptive'} is documented-accepted on always-on models)
+  return { thinking: { type: 'adaptive' }, outputConfig: { effort: clampEffort(effort, entry) } };
+}
+
+/**
+ * Validate the effective AI configuration against the registry. Never throws.
+ * Levels: error (unknown/retired model — fallback applies), warn (deprecated model,
+ * missing pricing, invalid effort value, broken registry overlay), info (legacy
+ * model, clamped effort).
+ * @returns {{ok:boolean, checked_at:string, model_count:number, issues:Array}}
+ */
+function validateAiConfig() {
+  const issues = [];
+  let registry = [];
+  try {
+    registry = getRegistry();
+    if (registryCustomError) {
+      issues.push({ role: null, level: 'warn', message: `model_registry_custom setting is invalid (${registryCustomError}) — using the built-in registry only` });
+    }
+    for (const role of ROLES) {
+      const configured = getSetting(`${role}_model`, ROLE_DEFAULTS[role] || DEFAULT_MODEL, ROLE_ENV[role]);
+      const entry = registry.find(m => m.id === configured) || null;
+      const resolved = resolveModel(role);
+      if (!entry) {
+        issues.push({ role, configured, resolved, level: 'error', message: `Unknown model "${configured}" — falling back to "${resolved}"` });
+      } else if (entry.status === 'retired') {
+        issues.push({ role, configured, resolved, level: 'error', message: `Model "${configured}" is retired — falling back to "${resolved}"` });
+      } else {
+        if (entry.status === 'deprecated') issues.push({ role, configured, resolved, level: 'warn', message: `Model "${configured}" is deprecated — plan a migration (still honored as configured)` });
+        else if (entry.status === 'legacy') issues.push({ role, configured, resolved, level: 'info', message: `Model "${configured}" is a legacy entry — a newer model in this family exists` });
+        if (!entry.pricing || typeof entry.pricing.in !== 'number') {
+          issues.push({ role, configured, resolved, level: 'warn', message: `No pricing configured for "${configured}" — cost tracking will record tokens but no dollar cost` });
+        }
+      }
+      const explicit = String(getSetting(`${role}_thinking_effort`, '') || '').trim().toLowerCase();
+      if (explicit && explicit !== 'off' && !EFFORT_LEVELS.includes(explicit)) {
+        issues.push({ role, configured, resolved, level: 'warn', message: `Invalid thinking effort "${explicit}" — ignored (legacy/default behavior applies)` });
+      } else if (explicit && explicit !== 'off' && entry && entry.thinking_style !== 'budget'
+                 && Array.isArray(entry.efforts) && entry.efforts.length && !entry.efforts.includes(explicit)) {
+        issues.push({ role, configured, resolved, level: 'info', message: `Effort "${explicit}" not supported by "${configured}" — clamped to "${clampEffort(explicit, entry)}"` });
+      }
+    }
+  } catch (err) {
+    issues.push({ role: null, level: 'error', message: `validation itself failed: ${err.message}` });
+  }
+  return {
+    ok: !issues.some(i => i.level === 'error'),
+    checked_at: new Date().toISOString(),
+    model_count: registry.length,
+    issues,
+  };
+}
+
+// ── Cost estimation (pricing rides the registry — swap a model, keep the math) ─
+const warnedPricing = new Set();
+
+/** Compute an estimated USD cost from an Anthropic usage object. Missing pricing → null + one-time warn. */
 function estimateCost(model, usage) {
-  const p = MODEL_PRICING[model];
-  if (!p || !usage) return null;
+  const entry = getRegistryEntry(model);
+  const p = entry && entry.pricing;
+  if (!p || typeof p.in !== 'number' || !usage) {
+    if (model && usage && !warnedPricing.has(model)) {
+      warnedPricing.add(model);
+      console.warn(`[ai-config] no pricing for model "${model}" — usage recorded with cost_usd = NULL (add pricing to the model registry)`);
+    }
+    return null;
+  }
   const inTok    = (usage.input_tokens || 0);
   const outTok   = (usage.output_tokens || 0);
   const cacheR   = (usage.cache_read_input_tokens || 0);
   const cacheW   = (usage.cache_creation_input_tokens || 0);
+  const cacheReadRate = typeof p.cacheRead === 'number' ? p.cacheRead : p.in * 0.1;
   return (
-    (inTok  * p.in)        / 1e6 +
-    (outTok * p.out)       / 1e6 +
-    (cacheR * p.cacheRead) / 1e6 +
-    (cacheW * p.in * 1.25) / 1e6
+    (inTok  * p.in)          / 1e6 +
+    (outTok * p.out)         / 1e6 +
+    (cacheR * cacheReadRate) / 1e6 +
+    (cacheW * p.in * 1.25)   / 1e6
   );
 }
 
@@ -203,9 +380,15 @@ function getProjectPlatform(projectId) {
 }
 
 module.exports = {
-  AVAILABLE_MODELS,
-  MODEL_PRICING,
+  ROLES,
+  THINKING_ROLES,
+  EFFORT_LEVELS,
+  getRegistry,
+  getRegistryEntry,
+  getDefaultEntry,
+  validateAiConfig,
   resolveModel,
+  resolveEffort,
   getMaxTokens,
   getMaxExtractionLoops,
   getThinkingConfig,
@@ -215,3 +398,21 @@ module.exports = {
   getActiveBestPractices,
   getProjectPlatform,
 };
+
+// ── Legacy exports (registry-derived getters; keep sn-assess.js + old callers working) ─
+Object.defineProperty(module.exports, 'AVAILABLE_MODELS', {
+  enumerable: true,
+  get() {
+    return getRegistry()
+      .filter(m => m.status !== 'retired')
+      .map(m => ({ id: m.id, label: m.display || m.id }));
+  },
+});
+Object.defineProperty(module.exports, 'MODEL_PRICING', {
+  enumerable: true,
+  get() {
+    const out = {};
+    for (const m of getRegistry()) if (m.pricing) out[m.id] = m.pricing;
+    return out;
+  },
+});

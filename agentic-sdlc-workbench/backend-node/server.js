@@ -1276,6 +1276,29 @@ function mtUpdate(entity, data, item, uid, forceCols) {
   return { protected: protectedCols };
 }
 
+// #88 — apply a baseline-restore item: write the snapshot's COLUMN values directly.
+// Restore items deliberately bypass mapFields/fieldMap: snapshots hold post-transform
+// column values (e.g. tool.contract already '{"text":…}'), so routing them through the
+// field transforms again would double-wrap. Still CP-gated (a human approved the
+// restore) + audited; provenance/audit/identity columns are never restored.
+const RESTORE_SKIP_COLS = new Set(['project_id', 'created_at', 'created_by', 'updated_at', 'updated_by',
+  'version', 'lifecycle_status', 'visibility_scope',
+  'source_system', 'source_sys_id', 'source_table', 'source_scope', 'source_fluent', 'source_hash']);
+function mtRestore(entity, data, item, uid) {
+  const id = item.entity_id;
+  const before = mtRow(entity.table, entity.pk, id);
+  if (!before) throw new SoftSkip(`${entity.entity_type}: restore target ${id} no longer exists`);
+  const setCols = Object.keys(data || {}).filter(c =>
+    c !== entity.pk && !RESTORE_SKIP_COLS.has(c) && Object.prototype.hasOwnProperty.call(before, c));
+  if (!setCols.length) return { restored: [] };
+  const sql = setCols.map(c => `${c} = ?`).join(', ');
+  db.prepare(
+    `UPDATE ${entity.table} SET ${sql}, version=version+1, updated_by=?, updated_at=datetime('now') WHERE ${entity.pk}=?`
+  ).run(...setCols.map(c => data[c]), uid, id);
+  auditLog(entity.table, id, 'RESTORE', before, mtRow(entity.table, entity.pk, id), uid);
+  return { restored: setCols };
+}
+
 function mtDelete(entity, item, uid) {
   const id = item.entity_id;
   const before = mtRow(entity.table, entity.pk, id);
@@ -1291,6 +1314,37 @@ function mtDelete(entity, item, uid) {
   ).run(uid, id);
   auditLog(entity.table, id, 'UPDATE', before, mtRow(entity.table, entity.pk, id), uid);
   return { blocked: false };
+}
+
+/**
+ * #62 fix — promote SN-proposed conflict values into real fields on approval.
+ * HITL sync items stash the ServiceNow-proposed values under entity_data._sn_proposed
+ * (never a fieldMap key), so applying the item used to write NOTHING for exactly the
+ * fields the human was ratifying — the approval looked successful while the accepted
+ * values were silently dropped, and the conflict re-surfaced on the next sync.
+ * Approving an item (individually or with the whole packet) accepts the proposed
+ * values as displayed, so: merge them into `data`, persist the merged new_value on
+ * the item (audit truth), and return their columns as force-apply targets (the same
+ * shrink-guard exception used for reviewer-typed field_overrides).
+ * Mutates `data`. Returns a Set of column names to force, or null.
+ */
+function promoteSnProposed(entity, data, item) {
+  if (!data || !data._sn_proposed || typeof data._sn_proposed !== 'object') return null;
+  const validKeys = entity.fieldMap ? new Set(Object.keys(entity.fieldMap)) : null;
+  const promoted = [];
+  for (const [k, v] of Object.entries(data._sn_proposed)) {
+    if (validKeys && !validKeys.has(k)) continue;
+    data[k] = v;
+    promoted.push(k);
+  }
+  delete data._sn_proposed;
+  if (!promoted.length) return null;
+  db.prepare(`UPDATE asdlc_change_packet_item
+              SET new_value = ?, item_decision_notes = COALESCE(item_decision_notes, ?)
+              WHERE change_packet_item_id = ?`)
+    .run(JSON.stringify(data), `SN-proposed values accepted on approval: ${promoted.join(', ')}`, item.change_packet_item_id);
+  item.new_value = JSON.stringify(data);
+  return new Set(promoted.map(k => (entity.fieldMap && entity.fieldMap[k] && entity.fieldMap[k].col) || k));
 }
 
 function markItemApplied(itemId, note) {
@@ -1313,7 +1367,7 @@ function applyOneItem(item, cp, uid, forceKeys) {
   const result = { applied: 0, updated: 0, deleted: 0, skipped: 0, evidence: 0, errors: [], createdTestable: [] };
 
   const fp = item.field_path || '';
-  if (!new RegExp(`^${item.entity_type}\\.(new_record|create|update|delete)$`).test(fp)) {
+  if (!new RegExp(`^${item.entity_type}\\.(new_record|create|update|delete|restore)$`).test(fp)) {
     result.skipped++;
     return result;
   }
@@ -1330,7 +1384,12 @@ function applyOneItem(item, cp, uid, forceKeys) {
   const op = item.operation || 'create';
   const idMap = {};
   try {
-    if (op === 'delete') {
+    if (fp === `${item.entity_type}.restore`) {
+      // Baseline restore (#88): snapshot columns applied verbatim — human-approved rollback.
+      const r = mtRestore(entity, data, item, uid);
+      result.updated++;
+      if (r.restored.length) markItemApplied(item.change_packet_item_id, `[baseline restore: ${r.restored.join(', ')}]`);
+    } else if (op === 'delete') {
       const r = mtDelete(entity, item, uid);
       if (r.blocked) {
         result.errors.push({ item: item.change_packet_item_id, entity_type: item.entity_type, reason: r.reason });
@@ -1339,9 +1398,13 @@ function applyOneItem(item, cp, uid, forceKeys) {
       result.deleted++;
     } else if (op === 'update') {
       // Translate human-resolved data-keys → columns so mtUpdate applies them verbatim.
-      const forceCols = (forceKeys && forceKeys.size)
+      let forceCols = (forceKeys && forceKeys.size)
         ? new Set([...forceKeys].map(k => (entity.fieldMap && entity.fieldMap[k] && entity.fieldMap[k].col) || k))
         : null;
+      // Any REMAINING SN-proposed values (not individually overridden) are accepted
+      // as-is by this approval — promote + force them too (#62).
+      const promotedCols = promoteSnProposed(entity, data, item);
+      if (promotedCols) forceCols = new Set([...(forceCols || []), ...promotedCols]);
       const r = mtUpdate(entity, data, item, uid, forceCols);
       result.updated++;
       if (r && r.protected && r.protected.length) {
@@ -1638,7 +1701,7 @@ function applyChangePacket(cpId, uid) {
     // e.g. seed 'initial_import' rows or design-review field edits — so they are
     // never re-created as new rows when an old change packet is approved.
     const fp = item.field_path || '';
-    if (!new RegExp(`^${item.entity_type}\\.(new_record|create|update|delete)$`).test(fp)) {
+    if (!new RegExp(`^${item.entity_type}\\.(new_record|create|update|delete|restore)$`).test(fp)) {
       result.skipped++;
       continue;
     }
@@ -1675,12 +1738,21 @@ function applyChangePacket(cpId, uid) {
 
     const op = item.operation || 'create';
     try {
-      if (op === 'delete') {
+      if (fp === `${item.entity_type}.restore`) {
+        // Baseline restore (#88): snapshot columns applied verbatim — human-approved rollback.
+        const r = mtRestore(entity, data, item, uid);
+        result.updated++;
+        if (r.restored.length) markItemApplied(item.change_packet_item_id, `[baseline restore: ${r.restored.join(', ')}]`);
+      } else if (op === 'delete') {
         const r = mtDelete(entity, item, uid);
         if (r.blocked) { result.errors.push({ item: item.change_packet_item_id, entity_type: item.entity_type, reason: r.reason }); continue; }
         result.deleted++;
       } else if (op === 'update') {
-        const r = mtUpdate(entity, data, item, uid); result.updated++;
+        // Approving the packet accepts any SN-proposed conflict values as displayed —
+        // promote them to real fields and force-apply (#62; previously they were
+        // silently dropped and the "successful" approval wrote nothing).
+        const forceCols = promoteSnProposed(entity, data, item);
+        const r = mtUpdate(entity, data, item, uid, forceCols); result.updated++;
         if (r && r.protected && r.protected.length) {
           markItemApplied(item.change_packet_item_id, `[non-destructive: kept richer Workbench values for ${r.protected.join(', ')}]`);
         }
@@ -1872,45 +1944,73 @@ app.post('/api/v1/change-packets/:id/send-back', async (req, res) => {
 // ──────────────────────────────────────────────
 // ADMIN — AI SETTINGS (global model / thinking / tokens)
 // ──────────────────────────────────────────────
+// Keys are generated from the role list — every role's model + thinking effort is
+// settable (plus the legacy enabled/budget pair, still honored beneath the effort key).
 const AI_SETTING_KEYS = [
-  'extraction_model', 'quality_reviewer_model', 'prompt_drafter_model', 'build_review_model',
-  'req_linker_model',
-  'extraction_thinking_enabled', 'extraction_thinking_budget', 'max_tokens',
-  'max_extraction_loops',
+  ...aiConfig.ROLES.flatMap(r => [`${r}_model`, `${r}_thinking_effort`, `${r}_thinking_enabled`, `${r}_thinking_budget`]),
+  'max_tokens', 'max_extraction_loops', 'model_registry_custom',
 ];
 
 app.get('/api/v1/settings/ai', (_req, res) => {
+  const settings = {
+    max_tokens:           aiConfig.getMaxTokens(),
+    max_extraction_loops: aiConfig.getMaxExtractionLoops(),
+    // legacy fields kept for backward compat with older clients
+    extraction_thinking_enabled: String(getSetting('extraction_thinking_enabled', 'false')) === 'true',
+    extraction_thinking_budget:  getSetting('extraction_thinking_budget', '4000'),
+  };
+  for (const role of aiConfig.ROLES) {
+    settings[`${role}_model`] = aiConfig.resolveModel(role);
+    settings[`${role}_thinking_effort`] = aiConfig.resolveEffort(role) || 'off';
+  }
   res.json({
-    available_models: aiConfig.AVAILABLE_MODELS,
-    settings: {
-      extraction_model:            aiConfig.resolveModel('extraction'),
-      quality_reviewer_model:      aiConfig.resolveModel('quality_reviewer'),
-      prompt_drafter_model:        aiConfig.resolveModel('prompt_drafter'),
-      build_review_model:          aiConfig.resolveModel('build_review'),
-      req_linker_model:            aiConfig.resolveModel('req_linker'),
-      extraction_thinking_enabled: String(getSetting('extraction_thinking_enabled', 'false')) === 'true',
-      extraction_thinking_budget:  parseInt(getSetting('extraction_thinking_budget', '4000'), 10),
-      max_tokens:                  aiConfig.getMaxTokens(),
-      max_extraction_loops:        aiConfig.getMaxExtractionLoops(),
-    },
+    available_models: aiConfig.getRegistry().filter(m => m.status !== 'retired'),
+    roles: aiConfig.ROLES,
+    thinking_roles: aiConfig.THINKING_ROLES,
+    effort_levels: aiConfig.EFFORT_LEVELS,
+    settings,
+    validation: aiConfig.validateAiConfig(),
+    registry_custom: getSetting('model_registry_custom', ''),
   });
 });
 
 app.put('/api/v1/settings/ai', (req, res) => {
   const uid = userId(req);
   const body = req.body || {};
-  const valid = new Set(aiConfig.AVAILABLE_MODELS.map(m => m.id));
+  const registry = aiConfig.getRegistry();
+  const byId = new Map(registry.map(m => [m.id, m]));
   for (const key of AI_SETTING_KEYS) {
     if (!(key in body)) continue;
     let val = body[key];
-    if (key.endsWith('_model') && val && !valid.has(val)) {
-      return res.status(400).json({ error: `Unknown model "${val}" for ${key}` });
+    if (key.endsWith('_model') && val) {
+      const entry = byId.get(val);
+      if (!entry) return res.status(400).json({ error: `Unknown model "${val}" for ${key}` });
+      if (entry.status === 'retired') return res.status(400).json({ error: `Model "${val}" is retired and cannot be selected for ${key}` });
+      // deprecated/legacy are allowed — the validation block returned below carries the warning
     }
-    if (key === 'extraction_thinking_enabled') val = val ? 'true' : 'false';
+    if (key.endsWith('_thinking_effort') && val) {
+      const v = String(val).toLowerCase();
+      if (v !== 'off' && !aiConfig.EFFORT_LEVELS.includes(v)) {
+        return res.status(400).json({ error: `Invalid thinking effort "${val}" for ${key} — use off|${aiConfig.EFFORT_LEVELS.join('|')}` });
+      }
+      val = v;
+    }
+    if (key === 'model_registry_custom' && val && String(val).trim()) {
+      try {
+        const parsed = JSON.parse(val);
+        if (!Array.isArray(parsed)) throw new Error('must be a JSON array');
+        for (const e of parsed) {
+          if (!e || typeof e.id !== 'string' || !e.id) throw new Error('every entry needs a string "id"');
+        }
+      } catch (err) {
+        return res.status(400).json({ error: `model_registry_custom rejected: ${err.message}` });
+      }
+    }
+    if (key.endsWith('_thinking_enabled')) val = val ? 'true' : 'false';
     setSetting(key, val, uid);
   }
   auditLog('asdlc_app_setting', 'ai', 'UPDATE', null, body, uid);
-  res.json({ ok: true });
+  res.json({ ok: true, validation: aiConfig.validateAiConfig() });
 });
 
 // ──────────────────────────────────────────────
@@ -1936,6 +2036,10 @@ app.get('/api/v1/usage', (req, res) => {
             COALESCE(SUM(output_tokens),0) AS output_tokens, COALESCE(SUM(cost_usd),0) AS cost_usd
      FROM asdlc_ai_usage ${whereSql} GROUP BY model ORDER BY cost_usd DESC`
   ).all(...params);
+  // Flag models whose usage can't be costed (missing from the registry / no pricing)
+  const pricing = aiConfig.MODEL_PRICING;
+  for (const r of byModel) r.has_pricing = !!(r.model && pricing[r.model]);
+  totals.pricing_missing_models = byModel.filter(r => !r.has_pricing && r.model).map(r => r.model);
   res.json({ rows, totals, by_model: byModel });
 });
 
@@ -2453,6 +2557,93 @@ app.post('/api/v1/baselines/:id/lock', (req, res) => {
   const updated = db.prepare('SELECT * FROM asdlc_baseline WHERE baseline_id = ?').get(req.params.id);
   auditLog('asdlc_baseline', req.params.id, 'UPDATE', existing, updated, uid);
   res.json(updated);
+});
+
+// #88 — Restore a project's design to a locked baseline, as a reviewable Change Packet.
+// Non-destructive posture: field values of still-existing records are restored (via
+// `.restore` items applied column-verbatim on approval — bypassing field transforms,
+// since snapshots hold post-transform column values); records MISSING since the baseline
+// and records ADDED since the baseline are REPORTED for the human, never auto-recreated
+// or auto-retired. ?dry_run=1 (or body.dry_run) returns the plan without writing.
+app.post('/api/v1/baselines/:id/restore', (req, res) => {
+  const baseline = db.prepare('SELECT * FROM asdlc_baseline WHERE baseline_id = ?').get(req.params.id);
+  if (!baseline) return res.status(404).json({ error: 'Baseline not found' });
+  const items = db.prepare('SELECT entity_type, entity_id, snapshot_value FROM asdlc_baseline_item WHERE baseline_id = ?').all(req.params.id);
+  if (!items.length) return res.status(409).json({ error: 'Baseline has no snapshot — lock it first (snapshots are captured at lock time).' });
+
+  const uid = userId(req);
+  const updates = [], missing = [];
+  let unchanged = 0;
+  const inBaseline = new Set();
+  for (const it of items) {
+    inBaseline.add(`${it.entity_type}::${it.entity_id}`);
+    const entity = registry.byEntityType[it.entity_type];
+    if (!entity || !entity.materializable || !entity.table || !entity.pk) continue;
+    let snap; try { snap = JSON.parse(it.snapshot_value) || {}; } catch { continue; }
+    const cur = mtRow(entity.table, entity.pk, it.entity_id);
+    if (!cur || ['retired', 'deleted'].includes(cur.lifecycle_status)) {
+      missing.push({ entity_type: it.entity_type, entity_id: it.entity_id, name: snap.name || snap.title || null });
+      continue;
+    }
+    const cols = {};
+    for (const [k, v] of Object.entries(snap)) {
+      if (k === entity.pk || RESTORE_SKIP_COLS.has(k)) continue;
+      if (!Object.prototype.hasOwnProperty.call(cur, k)) continue;
+      if (String(cur[k] ?? '') !== String(v ?? '')) cols[k] = { from: cur[k], to: v };
+    }
+    if (Object.keys(cols).length) {
+      updates.push({ entity_type: it.entity_type, entity_id: it.entity_id, name: cur.name || cur.title || snap.name || null, cols });
+    } else unchanged++;
+  }
+  // Records created after the baseline (present now, absent from the snapshot) — report only.
+  const added = [];
+  for (const [etype, ent] of Object.entries(registry.byEntityType)) {
+    if (!ent || !ent.materializable || !ent.table || !ent.pk) continue;
+    let rows = [];
+    try {
+      rows = db.prepare(`SELECT * FROM ${ent.table} WHERE project_id = ? AND (lifecycle_status IS NULL OR lifecycle_status NOT IN ('retired','deleted'))`).all(baseline.project_id);
+    } catch { continue; }
+    for (const r of rows) if (!inBaseline.has(`${etype}::${r[ent.pk]}`)) {
+      added.push({ entity_type: etype, entity_id: String(r[ent.pk]), name: r.name || r.title || null });
+    }
+  }
+  const plan = {
+    baseline: { id: baseline.baseline_id, name: baseline.baseline_name, locked_at: baseline.locked_at },
+    restore_updates: updates.length, unchanged,
+    missing_since_baseline: missing, added_since_baseline: added,
+    updates,
+    note: 'Only field values of still-existing records are restored. Records missing since the baseline are NOT auto-recreated and records added since are NOT auto-retired — review those manually.',
+  };
+  const dryRun = req.query.dry_run === '1' || (req.body && req.body.dry_run === true);
+  if (dryRun || !updates.length) return res.json({ dry_run: true, applied: false, plan });
+
+  db.exec('BEGIN');
+  let cp;
+  try {
+    const cpId = generateId();
+    db.prepare(`INSERT INTO asdlc_change_packet (change_packet_id, project_id, packet_code, status, summary, conflict_classification, recommended_action, created_by, updated_by)
+                VALUES (?,?,?,?,?,?,?,?,?)`)
+      .run(cpId, baseline.project_id, uniquePacketCode(), 'pending_review',
+           `Restore design to baseline "${baseline.baseline_name}" (${updates.length} record(s))`,
+           'modifies_existing', 'review', uid, uid);
+    const ins = db.prepare(`INSERT INTO asdlc_change_packet_item (change_packet_item_id, change_packet_id, entity_type, entity_id, operation, field_path, old_value, new_value, rationale)
+                            VALUES (?,?,?,?,?,?,?,?,?)`);
+    for (const u of updates) {
+      const oldVals = {}, newVals = {};
+      for (const [c, d] of Object.entries(u.cols)) { oldVals[c] = d.from; newVals[c] = d.to; }
+      ins.run(generateId(), cpId, u.entity_type, u.entity_id, 'update', `${u.entity_type}.restore`,
+              JSON.stringify(oldVals), JSON.stringify(newVals),
+              `[baseline restore] revert ${Object.keys(u.cols).join(', ')} to "${baseline.baseline_name}"`);
+    }
+    db.exec('COMMIT');
+    cp = db.prepare('SELECT * FROM asdlc_change_packet WHERE change_packet_id = ?').get(cpId);
+  } catch (err) {
+    db.exec('ROLLBACK');
+    return res.status(500).json({ error: 'Failed to create restore packet: ' + err.message });
+  }
+  auditLog('asdlc_change_packet', cp.change_packet_id, 'INSERT', null, cp, uid);
+  res.status(201).json({ dry_run: false, applied: false, change_packet: cp, item_count: updates.length, plan,
+    next: 'Review and approve the packet in the Change Packet Queue to apply the restore.' });
 });
 
 app.get('/api/v1/baselines/:id/compare/:otherId', (req, res) => {
@@ -6738,6 +6929,11 @@ function buildSNDeltaMarkdown(project, deltaCps, updates, creates, sinceTs, gene
     }
   }
 
+  // ── Deploy identity manifest (#87): known slug→sys_id mappings for keys.ts seeding ──
+  lines.push('---');
+  lines.push('');
+  lines.push(...buildKeysManifestLines(project.project_id));
+
   // ── Companion: Deployment Instructions ────────────────────────────────────────
   lines.push('---');
   lines.push('');
@@ -7104,6 +7300,9 @@ function buildExportMarkdown(project, baseline, sections, data) {
     lines.push('> **Note:** Tier-B and Tier-C artifacts use `Record()` with `sys_id` coalescing — when `source_sys_id` is set the SDK PATCHes the existing record; when absent it POSTs a new one. Child artifacts (columns, variables, actions) carry their own identity tag and are tracked independently.');
     lines.push('');
   }
+
+  // ── Deploy identity manifest (#87): known slug→sys_id mappings for keys.ts seeding ──
+  lines.push(...buildKeysManifestLines(project.project_id));
 
   lines.push('### Tool Selection Priority (highest → lowest)');
   lines.push('');
@@ -8847,6 +9046,69 @@ const { WB_PROVENANCE_TABLES } = require('./agent/sn-capture');
 const PK_BY_WB_TABLE = {};
 WB_PROVENANCE_TABLES.forEach(t => { PK_BY_WB_TABLE[t.table] = t.pk; });
 
+// ── Deploy identity: keys.ts seed manifest (#87) ─────────────────────────────
+// The SDK's keys.ts is "the source of truth for record identity": on rebuild "the record
+// is updated in place, not duplicated" — but ONLY if the deployer seeds it with the
+// sys_ids the Workbench already knows. Without this, Now.ID mints fresh sys_ids on every
+// update-deploy → duplicates that the next inbound sync imports as "new". Emitted into
+// both the full Build Spec and the SN Delta export. Deterministic Now.ID key naming:
+//   wb-<first 8 of project id>-<slug lowercase>   (stable iff the slug is stable —
+// "renaming a key creates a new record and orphans the old one", so slugs are an
+// identity invariant once deployed).
+function deployKeyFor(projectId, slug) {
+  return `wb-${String(projectId).slice(0, 8)}-${String(slug).toLowerCase()}`;
+}
+function buildKeysManifestLines(projectId) {
+  const rows = [];
+  for (const t of WB_PROVENANCE_TABLES) {
+    let recs = [];
+    try {
+      recs = db.prepare(
+        `SELECT ${t.pk} AS id, ${t.nameCol} AS name, slug, source_table, source_sys_id
+         FROM ${t.table}
+         WHERE project_id = ? AND source_sys_id IS NOT NULL AND slug IS NOT NULL
+           AND (lifecycle_status IS NULL OR lifecycle_status != 'retired')
+         ORDER BY slug`
+      ).all(projectId);
+    } catch { continue; }   // table without slug/provenance columns — skip
+    for (const r of recs) rows.push({ type: t.type, ...r });
+  }
+  const lines = [];
+  lines.push('## 🔑 Deploy Identity — keys.ts Seed Manifest');
+  lines.push('');
+  lines.push('The ServiceNow SDK tracks record identity in your project\'s `keys.ts` ("the source of truth');
+  lines.push('for record identity" — commit it). A `Now.ID[\'<key>\']` whose key already maps to a sys_id is');
+  lines.push('**updated in place, not duplicated**. Seed `keys.ts` with the known identities below BEFORE the');
+  lines.push('first build so update-deploys coalesce onto the existing records (exact file syntax:');
+  lines.push('https://servicenow.github.io/sdk/config/keys-file).');
+  lines.push('');
+  lines.push('**Identity invariants:**');
+  lines.push('- Use the EXACT `Now.ID` key shown — it is derived from the stable Workbench slug.');
+  lines.push('- **Never rename a key once deployed** — renaming a key creates a NEW record and orphans the old one.');
+  lines.push('- For records with no sys_id yet (creates), use the same naming rule: `wb-<project8>-<slug lowercase>`,');
+  lines.push('  then register the minted sys_id back via the Post-Deploy manifest so it appears here next export.');
+  lines.push('');
+  if (rows.length) {
+    lines.push('| Now.ID key | Workbench artifact | ServiceNow table | sys_id |');
+    lines.push('|---|---|---|---|');
+    for (const r of rows) {
+      lines.push(`| \`${deployKeyFor(projectId, r.slug)}\` | ${r.slug} — ${mdCell(r.name || '')} | ${r.source_table || '—'} | \`${r.source_sys_id}\` |`);
+    }
+    lines.push('');
+    lines.push('Machine-readable copy (for scripting the keys.ts seed):');
+    lines.push('```json');
+    lines.push(JSON.stringify(rows.map(r => ({
+      key: deployKeyFor(projectId, r.slug), slug: r.slug, table: r.source_table || null, sys_id: r.source_sys_id,
+    })), null, 2));
+    lines.push('```');
+  } else {
+    lines.push('_No Workbench records are linked to ServiceNow sys_ids yet — every deploy below is a CREATE._');
+    lines.push('_Use the stable key naming rule above and register the minted sys_ids back afterwards._');
+  }
+  lines.push('');
+  return lines;
+}
+
 // A reconcile field_change names a DB column; turn it back into the entity_data key
 // the materializer's fieldMap understands (or null if it isn't a mappable field).
 function colToDataKey(entity, field) {
@@ -9057,6 +9319,7 @@ app.post('/api/v1/projects/:id/servicenow/sync', async (req, res) => {
       verdict: pl.review && pl.review.verdict, confidence: pl.review && pl.review.final_confidence,
       issues: (pl.review && pl.review.issues) || [],
       field_changes: (pl.proposal && pl.proposal.field_changes) || [],
+      wb_edited_since_sync: !!pl.wb_edited_since_sync, wb_updated_at: pl.wb_updated_at || null,
       decision: pl.decision,
     })),
   };
@@ -9111,6 +9374,10 @@ app.post('/api/v1/projects/:id/servicenow/sync', async (req, res) => {
   // 3. Advance source_hash on `changed`→no_change rows (content already matches this SN
   //    version) so they classify as tier-0 "unchanged" next sync. Pure provenance write —
   //    no content change, non-destructive. (new/enrich rows get their hash via the CP above.)
+  //    #85: the hash must never claim a currency the stored snapshot doesn't have — refresh
+  //    the last-seen SN body (source_fluent, the Tier-3 "as built" snapshot written at apply
+  //    time) alongside it, and keep the generic twin's provenance in lockstep so the two
+  //    rows for one sys_id never disagree about which SN version was last synced.
   for (const pl of plan.planned) {
     if (pl.classification !== 'changed' || pl.decision.target !== 'none' || !pl.artifact) continue;
     const etype = snSync.TYPE_BY_WB_TABLE[pl.wb_table];
@@ -9118,9 +9385,19 @@ app.post('/api/v1/projects/:id/servicenow/sync', async (req, res) => {
     if (!entity) continue;
     const row = mtRow(entity.table, entity.pk, pl.wb_id);
     if (!row || row.source_hash === pl.artifact.hash) continue;
-    db.prepare(`UPDATE ${entity.table} SET source_hash=?, source_system=COALESCE(source_system,'servicenow'), source_scope=COALESCE(source_scope,?), updated_at=datetime('now') WHERE ${entity.pk}=?`)
-      .run(pl.artifact.hash, scope, pl.wb_id);
-    auditLog(entity.table, pl.wb_id, 'UPDATE', { source_hash: row.source_hash }, { source_hash: pl.artifact.hash }, uid);
+    const snapshot = snArtifactBody(pl.artifact);   // null-safe: keeps the old snapshot when capture had no salient
+    db.prepare(`UPDATE ${entity.table} SET source_hash=?, source_fluent=COALESCE(?, source_fluent), source_system=COALESCE(source_system,'servicenow'), source_scope=COALESCE(source_scope,?), updated_at=datetime('now') WHERE ${entity.pk}=?`)
+      .run(pl.artifact.hash, snapshot, scope, pl.wb_id);
+    auditLog(entity.table, pl.wb_id, 'UPDATE',
+      { source_hash: row.source_hash },
+      { source_hash: pl.artifact.hash, source_fluent_refreshed: !!snapshot }, uid);
+    if (pl.artifact.source_sys_id) {
+      try {
+        db.prepare(`UPDATE asdlc_sn_artifact SET source_hash=?, source_fluent=COALESCE(?, source_fluent), updated_at=datetime('now')
+                    WHERE project_id=? AND source_sys_id=? AND (source_hash IS NULL OR source_hash != ?)`)
+          .run(pl.artifact.hash, snapshot, project.project_id, pl.artifact.source_sys_id, pl.artifact.hash);
+      } catch { /* no twin — nothing to keep in lockstep */ }
+    }
     result.hash_advanced++;
   }
 
@@ -9928,6 +10205,21 @@ app.get('*path', (req, res) => {
 // ──────────────────────────────────────────────
 // Start
 // ──────────────────────────────────────────────
+// Boot-time AI config validation: loud on misconfiguration, never fatal
+// (offline test suites boot this server with no API key and must stay green).
+try {
+  const v = aiConfig.validateAiConfig();
+  const errs  = v.issues.filter(i => i.level === 'error');
+  const warns = v.issues.filter(i => i.level === 'warn');
+  for (const i of errs)  console.error(`[ai-config] ERROR${i.role ? ` (${i.role})` : ''}: ${i.message}`);
+  for (const i of warns) console.warn(`[ai-config] warning${i.role ? ` (${i.role})` : ''}: ${i.message}`);
+  if (!errs.length && !warns.length) {
+    console.log(`[ai-config] model config OK (${aiConfig.ROLES.length} roles, ${v.model_count} models)`);
+  }
+} catch (err) {
+  console.error('[ai-config] boot validation failed:', err.message);
+}
+
 app.listen(PORT, () => {
   console.log(`[server] Agentic SDLC Workbench API running on http://localhost:${PORT}`);
 });

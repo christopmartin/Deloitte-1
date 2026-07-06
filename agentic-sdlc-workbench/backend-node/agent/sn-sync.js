@@ -43,12 +43,17 @@ const { buildArtifactRecord } = require('./sn-artifact');
 // so they bypass the Opus reverse-engineer/reconcile/review stages entirely. ServiceNow
 // is the source of truth for these Level-2 technical bodies, so a new/changed generic
 // artifact is a safe additive create/refresh; drift is flagged for human awareness only.
-function genericDecision(classification, mode) {
+function genericDecision(classification, mode, wbEditedSinceSync) {
   if (classification === 'drift') {
     return { target: 'hitl', auto_apply: false, reason: 'drift — generic artifact in Workbench, absent from ServiceNow; flagged, never deleted' };
   }
   if (mode === 'review_all') {
     return { target: 'hitl', auto_apply: false, reason: 'apply mode = review_all — human reviews every change' };
+  }
+  // Both-side-edit floor (#84): a generic artifact edited in the Workbench (Phase-4b
+  // editor) since the last sync must never be silently overwritten by an auto-refresh.
+  if (classification === 'changed' && wbEditedSinceSync) {
+    return { target: 'hitl', auto_apply: false, reason: 'both sides changed since the last sync — the Workbench copy was edited by a human after the last sync; review before refreshing from ServiceNow' };
   }
   return classification === 'new'
     ? { target: 'auto', auto_apply: true, reason: 'new generic artifact — additive create' }
@@ -62,7 +67,8 @@ function buildGenericPlan(items, classification, scope, mode) {
     return {
       classification, source_sys_id: a.source_sys_id, generic: true, generic_record: rec,
       artifact: a, wb_table: a.wb_table || null, wb_id: a.wb_id || null, name: rec.name,
-      decision: genericDecision(classification, mode),
+      wb_edited_since_sync: !!a.wb_edited_since_sync, wb_updated_at: a.wb_updated_at || null,
+      decision: genericDecision(classification, mode, a.wb_edited_since_sync),
     };
   });
 }
@@ -188,6 +194,18 @@ function gateProposal(reviewed, opts = {}) {
   // review_all: a human signs off on every change, even purely-additive ones.
   if (mode === 'review_all') {
     return { target: 'hitl', auto_apply: false, reason: 'apply mode = review_all — every change requires human review' };
+  }
+
+  // ── Both-side-edit floor (#84) — deterministic, before any AI-based auto-grant ──
+  // The Workbench record was edited by a human AFTER the last sync AND ServiceNow changed
+  // too: the stored hash no longer represents a common ancestor, so even a "safe"
+  // fill_blank could resurrect a deliberately-cleared field. Divergent edits are never
+  // auto-merged — a human decides (the reconciler's analysis is still attached for them).
+  if (cls === 'changed' && reviewed.wb_edited_since_sync) {
+    return {
+      target: 'hitl', auto_apply: false,
+      reason: `both sides changed since the last sync — the Workbench record was edited ${reviewed.wb_updated_at ? `on ${reviewed.wb_updated_at} ` : ''}after the last sync; human review required`,
+    };
   }
 
   // ── Hard non-destructive floor (applies under ALL non-review_all modes) ──

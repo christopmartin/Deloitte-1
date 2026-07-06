@@ -252,7 +252,7 @@ function findWbBySysId(projectId, sysId) {
     let row;
     try {
       row = db.prepare(
-        `SELECT ${t.pk} AS id, ${t.nameCol} AS name, source_hash, source_sys_id
+        `SELECT ${t.pk} AS id, ${t.nameCol} AS name, source_hash, source_sys_id, updated_at AS wb_updated_at
          FROM ${t.table} WHERE source_sys_id = ? AND project_id = ?
            AND (lifecycle_status IS NULL OR lifecycle_status != 'retired') LIMIT 1`
       ).get(sysId, projectId);
@@ -292,7 +292,7 @@ function findWbBySlug(projectId, slug) {
     let row;
     try {
       row = db.prepare(
-        `SELECT ${t.pk} AS id, ${t.nameCol} AS name, source_hash, source_sys_id, slug
+        `SELECT ${t.pk} AS id, ${t.nameCol} AS name, source_hash, source_sys_id, slug, updated_at AS wb_updated_at
          FROM ${t.table} WHERE slug = ? AND project_id = ?
            AND (lifecycle_status IS NULL OR lifecycle_status != 'retired') LIMIT 1`
       ).get(slug, projectId);
@@ -310,6 +310,15 @@ function findWbBySlug(projectId, slug) {
 function classifyArtifacts(artifacts, projectId) {
   const res = { unchanged: [], changed: [], new: [], drift: [], errors: [], warnings: [] };
   const seen = new Set();
+  // Both-side-edit detection (#84): the one deterministic fact the reconciler can't infer.
+  // A Workbench row whose updated_at is AFTER the project's last sync was touched by a
+  // human (sync writes always land BEFORE markSynced() advances sn_last_synced_at), so a
+  // simultaneous ServiceNow change means BOTH sides diverged from the last-synced state.
+  let lastSync = null;
+  try {
+    const p = db.prepare('SELECT sn_last_synced_at FROM asdlc_project WHERE project_id = ?').get(projectId);
+    lastSync = (p && p.sn_last_synced_at) || null;
+  } catch { /* project row unavailable — treat as never-synced */ }
   const surface_counts = {};   // per-surface CAPTURED count (completeness signal)
   for (const a of artifacts) {
     if (a.__error) { res.errors.push(a.__error); continue; }
@@ -330,7 +339,12 @@ function classifyArtifacts(artifacts, projectId) {
     if (wb.source_hash && wb.source_hash === a.hash) {
       res.unchanged.push({ ...a, wb_id: wb.id, wb_table: wb.table });
     } else {
-      res.changed.push({ ...a, wb_id: wb.id, wb_table: wb.table, prev_hash: wb.source_hash || null });
+      res.changed.push({
+        ...a, wb_id: wb.id, wb_table: wb.table, prev_hash: wb.source_hash || null,
+        wb_updated_at: wb.wb_updated_at || null,
+        sn_last_synced_at: lastSync,
+        wb_edited_since_sync: !!(lastSync && wb.wb_updated_at && wb.wb_updated_at > lastSync),
+      });
     }
   }
   // Drift: Workbench records carrying a source_sys_id that this capture did NOT return.
@@ -358,6 +372,7 @@ function classifyArtifacts(artifacts, projectId) {
     unchanged: res.unchanged.length, changed: res.changed.length,
     new: res.new.length, drift: res.drift.length, errors: res.errors.length,
     warnings: res.warnings.length,
+    both_side_edits: res.changed.filter(c => c.wb_edited_since_sync).length,
   };
   return res;
 }

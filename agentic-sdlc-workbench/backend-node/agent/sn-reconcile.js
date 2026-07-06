@@ -109,9 +109,33 @@ function canonicalForPrompt(row) {
   return o;
 }
 
+/**
+ * Deterministic Workbench-edit context for the reconciler/reviewer prompts (#84).
+ * The classifier computes wb_edited_since_sync from updated_at vs sn_last_synced_at —
+ * the one fact the AI cannot infer from record contents. Stated explicitly so the model
+ * can distinguish "SN moved, WB stood still" from a genuine both-sides divergence
+ * (where an empty WB field may be a DELIBERATE clearing, not an unfilled blank).
+ * Returns prompt lines ([] when there is no last-sync baseline to reason from).
+ */
+function editContextLines(item) {
+  if (!item || !item.sn_last_synced_at) return [];   // never synced — no baseline to compare edits against
+  const lines = ['', 'Workbench edit history (deterministic facts from the sync engine):'];
+  if (item.wb_edited_since_sync) {
+    lines.push(` - The Workbench record WAS EDITED after the last ServiceNow sync (edited ${item.wb_updated_at || 'unknown'}; last sync ${item.sn_last_synced_at}).`);
+    lines.push('   BOTH sides have diverged from the last-synced state. Treat current Workbench values — including');
+    lines.push('   empty fields — as possibly deliberate human choices: an empty field may have been intentionally');
+    lines.push('   cleared, so prefer `conflict` over `enrich` wherever the ServiceNow value would touch it.');
+  } else {
+    lines.push(` - The Workbench record has NOT been edited since the last ServiceNow sync (${item.sn_last_synced_at}) —`);
+    lines.push('   any difference originates on the ServiceNow side.');
+  }
+  return lines;
+}
+
 function stubProposal(item) {
   return {
     source_sys_id: item.source_sys_id, wb_table: item.wb_table, wb_id: item.wb_id, classification: 'changed',
+    wb_edited_since_sync: !!item.wb_edited_since_sync, wb_updated_at: item.wb_updated_at || null, sn_last_synced_at: item.sn_last_synced_at || null,
     proposal: { action: 'no_change', destructive: false, confidence: 0.5, field_changes: [], rationale: '[stub] offline — no reconciliation performed', _stub: true },
   };
 }
@@ -127,6 +151,7 @@ async function reconcileChanged(item, ctx) {
   const userMsg = [
     'EXISTING Workbench record (canonical — may be richer than ServiceNow):',
     JSON.stringify(canonicalForPrompt(canonical), null, 2),
+    ...editContextLines(item),
     '',
     'INFERRED from the current ServiceNow artifact (Phase C reverse-engineering):',
     JSON.stringify(item.inferred || {}, null, 2),
@@ -159,7 +184,11 @@ async function reconcileChanged(item, ctx) {
   const proposal = tu ? tu.input : { action: 'conflict', destructive: true, confidence: 0.2, field_changes: [], rationale: 'model did not call the tool' };
   // Safety net: never let a non-destructive action carry a modify change.
   if ((proposal.field_changes || []).some(c => c.change_kind === 'modify')) { proposal.destructive = true; if (proposal.action !== 'conflict') proposal.action = 'conflict'; }
-  return { source_sys_id: item.source_sys_id, wb_table: item.wb_table, wb_id: item.wb_id, classification: 'changed', inferred: item.inferred || {}, proposal, usage: resp.usage, model };
+  return {
+    source_sys_id: item.source_sys_id, wb_table: item.wb_table, wb_id: item.wb_id, classification: 'changed',
+    wb_edited_since_sync: !!item.wb_edited_since_sync, wb_updated_at: item.wb_updated_at || null, sn_last_synced_at: item.sn_last_synced_at || null,
+    inferred: item.inferred || {}, proposal, usage: resp.usage, model,
+  };
 }
 
 function reconcileNew(item) {
@@ -190,4 +219,4 @@ async function reconcile(input = {}, ctx = {}) {
   return proposals;
 }
 
-module.exports = { reconcile, reconcileChanged, SYSTEM_PROMPT, EMIT_TOOL, loadCanonical, canonicalForPrompt };
+module.exports = { reconcile, reconcileChanged, SYSTEM_PROMPT, EMIT_TOOL, loadCanonical, canonicalForPrompt, editContextLines };

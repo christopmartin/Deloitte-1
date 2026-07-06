@@ -1,0 +1,165 @@
+# ServiceNow ⇄ Workbench Round-Trip — Fidelity & Integrity Assessment
+
+**Date:** 2026-07-03 · **Scope:** the full bidirectional design↔code loop (Build Spec / SN Delta outbound, capture→classify→reconcile→gate inbound) judged against four goals: (1) valid, quality pushes to SN; (2) pull-back that updates the design or flags plain-language conflicts; (3) integrity-preserving updates; (4) durable, idempotent repetition in both directions.
+**Method:** memory-independent code mapping (3 exploration passes with file:line verification), official ServiceNow docs (Australia release, fetched live from `ServiceNow/ServiceNowDocs`), SDK docs (`servicenow.github.io/sdk`), and read-only Table-API probes against the live dev instance `deloitteclient250inovation.service-now.com` (MIM scope `sn_major_inc_mgmt`). Zero writes to any instance.
+
+---
+
+## 1. Executive summary (business language)
+
+The round-trip's foundation is genuinely sound. Every design record can carry a durable link to its ServiceNow counterpart, repeat syncs recognize unchanged records without spending AI money, changes imported from ServiceNow can never bounce back out and duplicate themselves, and nothing arriving from ServiceNow can silently delete or shrink Workbench content. The inbound "magic" — capture, cheap deterministic triage, three independent AI agents proposing/checking non-destructive merges, and a human gate — is built, tested, and validated live.
+
+Four things put the goals at risk today, in order of severity:
+
+1. **One button loses human decisions.** When a reviewer resolves a ServiceNow conflict item-by-item ("Apply resolution"), their decision is honored. When they approve the whole Change Packet with the main Approve button, the values they accepted are silently discarded — the record keeps its old content and everything *looks* successful. This is a confirmed defect (backlog #62) and directly breaks the promise that a human's plain-language decision is what actually happens. It is also a small, well-localized fix — **fixed in this session (Build #2, §8)**.
+2. **The system can't tell "we changed it" from "they changed it."** Change detection only asks whether ServiceNow moved relative to the last sync; it never asks whether the Workbench design was edited since then — that timestamp is deliberately hidden from the reconciling AI. So when both sides change the same record, the merge decision rests entirely on AI judgment without the one deterministic fact that matters most. Worst case: a field a designer deliberately cleared gets silently refilled with the old ServiceNow value, because "filling a blank" is treated as always safe.
+3. **Completeness depends on a hand-maintained list, while ServiceNow keeps a master inventory we ignore.** The Workbench reads ~24 known record types. ServiceNow itself maintains a single registry (`sys_metadata`) of *every* configuration record in an app — the live probe found 705 records across ~40 types in the pilot scope, including whole categories the capture never sees (tests, field documentation, flow action wiring, report permissions). Each record also carries a modification counter, timestamp, and author that would tell us *that*, *when*, and *by whom* something changed before we spend any AI budget — none of which is used.
+4. **The dials that control AI cost and quality were half-wired.** Six of eleven AI processes — including the three expensive reasoning agents at the heart of the sync — could not be re-pointed at a different model or effort level from the admin screen, the model list was a closed hardcoded set (no Claude 5 / Fable), and an unrecognized model silently broke cost tracking. **Completed in this session (Build #1, §8).**
+
+Everything else — the manual deploy handoff, missing rollback button, non-transactional applies, prose-only "don't deploy to prod" — is real but secondary, catalogued in §5 with recommendations in §6.
+
+## 2. Verdict against the four goals
+
+| Goal | Verdict | One-line reason |
+|---|---|---|
+| 1. Design → valid SN updates via Claude Code + SDK | **Partly met** | Build Spec/Delta export with identity tags + Fluent snippets is solid; deploy identity (keys.ts seeding, sys_id write-back) is a documented manual contract, not a mechanism. |
+| 2. SN → design updates or plain-language conflicts | **Mostly met, one defect** | Inbound pipeline + HITL queue work; the whole-CP approve path dropped accepted resolutions (fixed, §8); both-side edits are under-detected (G2). |
+| 3. Integrity-preserving updates | **Mostly met** | Non-destructive floor + adversarial reviewer are real and validated; leaks at G1 (fixed), G2, G5. |
+| 4. Durable idempotent repetition | **Met with caveats** | hash-advance / cp_origin / sn_last_synced_at make repeat cycles cheap and loop-safe; completeness (G3) and salient-hash fragility (G4) erode fidelity over many cycles. |
+
+## 3. Current design (verified map)
+
+**Identity spine.** All 23 L1 design tables + the generic `asdlc_sn_artifact` carry hidden provenance (`source_system/sys_id/table/scope/fluent/hash`), indexed on `source_sys_id`. Outbound specs embed `[[wb:<project_id>/<slug>]]` tags (server.js:7066–7101); inbound capture parses them (agent/sn-capture.js:277–303) and self-heals missing sys_ids (server.js:9127–9164). `POST /projects/:id/servicenow/register-sysid` (server.js:6469–6533) accepts `{slug|entity_id, sys_id}` manifests and never overwrites a conflicting sys_id.
+
+**Inbound.** `captureScope` (sn-capture.js:155–249) pages every surface with `^ORDERBYsys_id` (silent-truncation fixed; caps produce warnings); Tier-A rich surfaces + registry-driven Tier-B/C generic surfaces + child surfaces (columns, flow actions, catalog variables). Deterministic tier-0 classify (310–363): sys_id→tag match, hash compare → unchanged/changed/new/drift (drift = flagged, never deleted). Changed/new rich artifacts go through three Opus stages — reverse-engineer → reconcile (non-destructive proposals) → adversarial review — then `gateProposal` (agent/sn-sync.js:169–224) routes auto vs HITL under `sn_sync_apply_mode`. Apply = auto CP (immediately approved) + HITL CP (pending review), both `cp_origin='sn_inbound'`.
+
+**Idempotency.** `source_hash` advances when a changed record reconciles to no-change (server.js:9114–9125) so the next cycle is tier-0. `cp_origin='sn_inbound'` CPs are excluded from outbound delta (server.js:6258, 6375) — no ping-pong. `sn_last_synced_at` scopes the outbound delta window.
+
+**Outbound.** The Workbench **never writes to ServiceNow** (verified: no PATCH/POST/PUT to `/api/now`, no SDK invocation, no `@servicenow/sdk` dependency). Delta export (server.js:6288–6350 → `buildSNDeltaMarkdown` 6537–6860) emits PATCH-by-sys_id / POST-with-tag instructions plus generated Fluent for generic artifacts (typed `new Property({...})` where `field_schema` is curated, else `Record()`), deployment guidance, and register-sysid curl examples. Deploy is a Claude Code + `now-sdk` handoff.
+
+**Versioning (corrected from the initial hypothesis).** Per-entity `version` **is** incremented by `mtUpdate`/`mtDelete` (server.js:1273, 1290); `approveAndApplyCp` bumps the project version (server.js:972); baselines snapshot the full design into `asdlc_baseline_item` (server.js:2365–2392) with a real compare endpoint (2458–2506). What's missing is only a **restore/rollback** action.
+
+**Not in scope / noted:** the environment's `DesignSync` tool is claude.ai design-system sync — unrelated to ServiceNow.
+
+## 4. How ServiceNow actually stores configuration (grounded)
+
+Citations: Australia-release docs (`application-development/c_ApplicationFiles.md` et al.) and live probes (Appendix A). Claims below marked **[doc]**, **[probe]**, or **[not independently verified]**.
+
+1. **`sys_metadata` is the universal registry of app configuration.** *"The Application File [sys_metadata] table is the parent table for all tables that contain configuration records."* **[doc]** Every business rule, ACL, notification, flow component, ATF step, etc. is a row in a table extending `sys_metadata`, and is therefore visible through it. One filtered query enumerates an entire scope: the MIM scope returned **705 application files across ~40 classes in a single sweep** — including classes the Workbench's 24-surface capture never reads (223 `sys_atf_step`, 116 `sys_documentation`, 84+24 `sys_hub_action_input/output`, `sys_report_users_groups`, `sys_ui_section/view/related_list`, `sys_app_module`, …). **[probe]**
+2. **Every application file carries deterministic change signals readable over REST:** `sys_mod_count` (monotonic per-record edit counter), `sys_updated_on`, `sys_updated_by`, plus `sys_update_name` (`<class>_<sys_id>` — the unit key ServiceNow itself uses to track that file), `sys_scope`, `sys_package`, `sys_policy`. All returned by the same Table API path the capture already uses. **[probe]** A record's class can even be resolved from a bare sys_id via `GET /api/now/table/sys_metadata/<sys_id>`. **[probe]**
+3. **Change history exists but is retention-limited.** *"Whenever you change an application file record … the system adds a corresponding record in the Customer Updates [sys_update_xml] table."* **[doc]** `sys_update_version` holds per-save snapshots (13,287 rows on the dev instance; entries observed for 2026 changes) — but returned **zero rows** for a record whose last change was 2024 (22 lifetime modifications), and its `sys_update_xml` trail was likewise absent. **[probe]** Conclusion: version/update-XML history is *opportunistic evidence*, not a foundation; `sys_mod_count`/`sys_updated_on` are the dependable signals.
+4. **sys_id is the identity anchor**: 32-hex GUID assigned at creation, unique per record; application files distributed via app repo/store retain their sys_ids across instances **[not independently verified — commonly documented behavior]**.
+5. **SDK deploy identity is a client-side contract.** `Now.ID['key']` → sys_id mappings live in the project's auto-generated `keys.ts`: *"Do commit keys.ts to version control — it's the source of truth for record identity"*; on rebuild *"the record is updated in place, not duplicated"*, but *"renaming a key creates a new record and orphans the old one."* Adopting an existing record = seeding `keys.ts` with its real sys_id (implied, not formally documented). **[doc: servicenow.github.io/sdk]** Implication: the Workbench's Build Spec should hand the deployer a ready-made keys manifest (slug → known `source_sys_id`), otherwise duplicate-prevention rests on the deployer improvising it.
+
+**Answer to the core question — the smallest, most reliable unit of identity and change:**
+- **Identity:** the record `sys_id` (with `sys_update_name` as ServiceNow's own file-tracking alias for metadata records).
+- **Change existence/direction/author:** the `(sys_id, sys_mod_count, sys_updated_on, sys_updated_by)` tuple from `sys_metadata` — obtainable for a whole scope in one paged query, *before* downloading any payloads.
+- **Net-new / vanished:** set-difference of the scope's `sys_metadata` sys_ids vs stored provenance — catching every class, not just curated surfaces.
+- **Human-modified detection:** `sys_mod_count` increased (or `sys_updated_on` advanced) since the stored value, with `sys_updated_by` identifying the author; field-level "what changed" then comes from payload diff (and `sys_update_version` when retention permits).
+
+## 5. Gap register
+
+Severity reflects blast radius across repeated cycles. Each has a failure scenario and origin.
+
+**G1 — Whole-CP approval drops human conflict resolutions (HIGH, confirmed defect; backlog #62). FIXED THIS SESSION (§8).**
+Scenario: sync flags a conflict on a tool's `contract`; SN's proposed value is stashed as `entity_data._sn_proposed` (server.js:9071 area). Reviewer accepts, clicks the packet-level **Approve**. `applyChangePacket` called `mtUpdate(entity, data, item, uid)` with **no forceKeys** (formerly server.js:1683) → `_sn_proposed` is not a fieldMap key, so nothing is written for exactly the fields being ratified; the shrink guard would drop them even if promoted → old value survives, UI reports success. Reproduction during this assessment showed the drop was WIDER than backlog #62 stated: per-item approve **without** explicit `field_overrides` (accept-as-is) dropped the values too — only the per-item path *with* reviewer-typed overrides worked. Blast radius: every approved sync conflict, every cycle; the conflict re-surfaces next sync as "changed" (hash never advances), burning Opus and reviewer patience on a decision already made.
+
+**G2 — No deterministic both-side-edit detection; base version absent (HIGH, design gap). DETECTION HALF FIXED 2026-07-04 (§8 Build #3); the full 3-way field merge remains R7.**
+Classify compares captured hash vs stored `source_hash` only (sn-capture.js:310–363); nothing consults `updated_at` vs `sn_last_synced_at` or CP/audit history, and `canonicalForPrompt` **explicitly strips `updated_at`** from what the reconciler/reviewer see (sn-reconcile.js:105–110). Scenario: designer blanks a tool's `cost_impact` on Tuesday (deliberate); SN still holds the old value; Friday's sync classifies the record changed (for unrelated reasons), reconcile proposes `fill_blank` of the "empty" field → gate auto-applies (fill_blank = always safe) → the deleted content silently returns. More broadly, all both-side divergence is adjudicated by an AI that lacks the one deterministic fact (was WB edited since last sync?) — so it either over-escalates (wasted HITL) or under-detects (silent overwrite of intent).
+
+**G3 — Completeness rests on a curated surface list while sys_metadata is ignored (MEDIUM-HIGH).**
+Capture reads ~24 curated surfaces + registry-derived generic tables; the live probe shows the pilot scope's real inventory is ~40 classes / 705 files (§4.1). Scenario: an SN developer adds an ATF test-step change or report-ACL row; no sync ever sees it; the Workbench "as-built" view claims currency it doesn't have. Net-new and vanish detection (`detectExistenceDrift`, sn-instance-catalog.js) inherit the same blind spots. Origin: sn-capture.js SN_SURFACES/genericSurfaces + sn-instance-catalog.js CATALOG_SURFACES.
+
+**G4 — Hash-only change detection: no direction, author, or cheap pre-filter (MEDIUM).**
+`hashArtifact` = SHA-256 of code-chosen salient fields (sn-capture.js:146–149). No `sys_mod_count`/`sys_updated_on`/`sys_updated_by` captured anywhere. Consequences: (a) can't distinguish "SN admin edited this yesterday" from "our salient-field selection changed in a code update" — the latter would mass-reclassify *everything* as changed in one cycle (Opus bill + review noise); (b) full payload downloads of all surfaces every sync when a two-query `sys_metadata` sweep could tier-out untouched records first; (c) conflict explanations to humans can't say *who/when* — weaker plain-language stories.
+
+**G5 — Generic artifact payload goes stale on hash-advance (MEDIUM, confirmed).**
+The changed→no_change path advances `source_hash` only (server.js:9114–9125); the `asdlc_sn_artifact.payload` keeps its creation-time capture. (L1 twins are fine — `syncL1Twin` rebuilds payload on every apply, server.js:1591–1614.) Scenario: hash says "current," payload says 3 syncs ago; any consumer treating payload as last-synced SN state (Build Spec generic sections, future 3-way merge) works from fiction. Also blocks R6 (base-snapshot merge), which needs a trustworthy base.
+
+**G6 — Deploy-identity contract is manual and fragile (MEDIUM).**
+`register-sysid` exists but nothing calls it — the spec documents curl examples and hopes. The SDK's actual identity ledger (`keys.ts`) is never seeded from Workbench knowledge, though the Workbench *knows* slug→sys_id for every previously-synced record; a deployer who lets Now.ID mint fresh sys_ids creates duplicates that the next inbound sync then imports as "new" (dup loop, partially mitigated by `[[wb:]]` tag self-heal — which only works for record types whose description field survives deploy). *"Renaming a key creates a new record and orphans the old one"* — and Workbench slugs are the natural keys, so slug stability is silently load-bearing.
+
+**G7 — Operational integrity gaps (LOW-MEDIUM, known backlog).**
+#37 promote/sync multi-writes not transaction-wrapped (crash mid-apply = partial state); #72 non-prod deploy target is prose-only; #81 `wipe-project.js` doesn't clear `asdlc_sn_artifact`/type-registry rows (orphan FK debris on re-ingest).
+
+**G8 — Misc fidelity debris (LOW).**
+`source_fluent` is `JSON.stringify` of REST fields, not Fluent — implies deployability it doesn't have (#71 decided toward dropping); net-new SN records are auto-created as "universally safe" with no semantic-contradiction check against existing design intent (name-collision only); baselines lack a restore endpoint.
+
+**AI-configurability (assessed per mission; was MEDIUM-HIGH, now closed — §8):** central `resolveModel(role)` existed with zero call-site literals, but the model list + pricing were closed hardcoded sets (no Claude 5/Fable), 6 of 11 roles (incl. all three SN reasoning agents) were absent from the admin UI *and* blocked by the `AI_SETTING_KEYS` allow-list, thinking effort for the expensive roles was locked in code, there was no boot validation, and unknown models silently zeroed cost. Two latent defects found during design: the admin effort dropdown never worked (`parseInt('high')`→NaN→always 4000), and enabling thinking on a Haiku-backed role emitted an API shape Haiku rejects.
+
+## 6. Prioritized recommendations
+
+Principle: **deterministic mechanisms for identity and integrity; AI for interpretation and plain-language explanation.** Ordered by value ÷ (risk × effort).
+
+| # | Recommendation | Closes | Effort | Status |
+|---|---|---|---|---|
+| R1 | Thread per-item `field_overrides`/forceKeys through the whole-CP approve path so bulk approval honors resolutions exactly like per-item approval | G1 | S | **Built (§8)** |
+| R2 | Complete the AI model/effort registry (data-driven models incl. Fable/Claude 5, all 11 roles + effort settable, boot validation, cost decoupling) | AI-config | M | **Built (§8)** |
+| R3 | Deterministic dirty-flag: at classify time compute `wb_edited_since_sync` (entity `updated_at` / audit log vs `sn_last_synced_at`); both-side-changed ⇒ force HITL + pass the flag and timestamps INTO the reconciler/reviewer prompts (stop stripping `updated_at`). Deterministic floor under the AI's judgment; kills the fill_blank-resurrection class. | G2 | S-M | **Built (§8 Build #3)** |
+| R4 | Refresh the last-synced SN snapshot whenever `source_hash` advances (`source_fluent` on the L1 row + twin provenance lockstep). Prerequisite for R7. | G5 | S | **Built (§8 Build #4)** |
+| R5 | Adopt `sys_metadata` as the completeness + change backbone: (a) scope sweep as tier-minus-1 pre-filter (skip payload fetch when `sys_mod_count`/`sys_updated_on` unmoved) and as net-new/vanish authority across ALL classes; (b) store `sys_mod_count`/`sys_updated_on`/`sys_updated_by` in provenance (columns ⇒ needs a migration ⇒ user confirmation) and surface who/when in conflict explanations. | G3, G4 | M | Recommended |
+| R6 | Emit a deploy keys manifest in the Build Spec: slug → known `source_sys_id` pairs formatted for `keys.ts` seeding + register-sysid manifest for the remainder; document slug-stability as an identity invariant. | G6 | S | **Built (§8 Build #5)** |
+| R7 | True 3-way field merge: with R4 in place, use the stored payload as base — deterministic per-field classification (SN-only change / WB-only change / both) before any AI, reserving Opus for semantic conflicts and plain-language explanation. | G2 (fully) | M-L | Later (after R3/R4/R5) |
+| R8 | Housekeeping: BEGIN/COMMIT around promote/sync applies (#37); hard non-prod guard on delta export target (#72); wipe-project covers sn_artifact tables (#81); baseline restore endpoint. | G7, G8 | S each | Backlog |
+
+Goal-2 preservation: R3/R5/R7 all *increase* what the human sees in plain language (who changed it, when, which side) — determinism feeds the explanation, it doesn't replace it.
+
+## 7. AI configurability — before/after
+
+Before: see §5 (AI-configurability paragraph). After Build #1 (§8): models are registry data (`agent/model-registry.json` + `model_registry_custom` DB override) including `claude-fable-5` and `claude-sonnet-5`; all 11 roles have model + thinking-effort settings, env overrides, and admin-UI controls grouped by pipeline; boot-time `validateAiConfig()` fails loud (once-per-key `console.error`) and falls back to the registry default; deprecated IDs warn without behind-the-back swaps; pricing rides the registry so an unpriced model yields a visible `pricing_missing` badge instead of silent nulls. Adding the next Claude family is a JSON entry — no code, no restart for DB-side registry edits.
+
+## 8. Build log (2026-07-03, both builds verified)
+
+**Build #1 — AI model/effort configuration completed (R2).** No schema migration; zero edits at the ~20 AI call sites.
+- `agent/model-registry.json` (NEW): 6 seed entries — `claude-fable-5`, `claude-sonnet-5` ADDED; existing 4 IDs preserved; per-entry `{display, family, tier, status, thinking_style, explicit_off, efforts[], default_effort, pricing}`. IDs/pricing/effort enum verified against the claude-api reference. Extend/override at runtime via the `model_registry_custom` setting (merge by id; `remove:true` hides; malformed overlay ignored with a warning).
+- `agent/ai-config.js`: registry-backed `resolveModel` (unknown/retired → loud once-per-key `console.error` + fallback to the registry default — never a silent wrong model); new `${role}_thinking_effort` setting (`off|low|medium|high|xhigh|max`, clamped to the model's supported list) layered over the legacy enabled/budget pair; per-`thinking_style` emission (adaptive / always_on / explicit_off / budget_tokens); `validateAiConfig()`; pricing rides the registry (`estimateCost` warns once + returns null when unpriced); legacy `AVAILABLE_MODELS`/`MODEL_PRICING` exports preserved as registry-derived getters (sn-assess.js untouched).
+- Two latent defects fixed en route: the admin effort dropdown had NEVER worked (`parseInt('high')`→NaN→always 4000), and thinking-on-a-Haiku-backed-role emitted an `output_config.effort` shape Haiku rejects (now correct `budget_tokens`, capped below max_tokens).
+- `server.js`: `AI_SETTING_KEYS` generated from the role list (all 11 roles settable — 6 were previously blocked); PUT validation data-driven (400 unknown/retired, deprecated allowed w/ warning); GET /settings/ai returns registry + validation block; GET /usage flags `pricing_missing_models`; non-fatal boot validation (one clean line, loud on misconfig). `ROLE_ENV` completed (4 missing roles).
+- `frontend/modules/admin_ai.js`: 11 roles in 4 pipeline groups, family-grouped model selects w/ legacy/deprecated badges, effort dials on the 6 thinking-wired roles, validation banner, registry JSON editor, unpriced-model badges.
+- Verified: NEW `test-ai-config.js` 51/51; regression 6/31/48 green; browser check on the live server (4 groups render, save of reverse_engineer→fable-5+xhigh persisted to the DB and was reverted, zero console errors, boot line `model config OK (11 roles, 6 models)`).
+
+**Build #2 — G1/#62 conflict-resolution value drop fixed (R1).**
+- New `promoteSnProposed(entity, data, item)` (server.js, beside the materializers): on approval, promotes remaining `_sn_proposed` values into real fields, persists the merged `new_value` + a decision note on the item (audit truth), and returns their columns as force-apply targets — the same shrink-guard exception already used for reviewer-typed `field_overrides`. Wired into BOTH update paths: `applyChangePacket` (whole-CP Approve) and `applyOneItem` (per-item accept-as-is; explicit overrides still win, remaining proposals then apply).
+- Semantics: approving a packet/item accepts the SN-proposed values exactly as displayed in the CP UI; rejecting or editing per-item first remains the override path. Unknown proposed keys are dropped, and the non-destructive guard is UNCHANGED for fields that were never proposed/ratified.
+- Verified: NEW `test-cp-conflict-apply.js` 15/15 (whole-CP apply-with-force, accept-as-is, override-wins, guard-still-protects, audit trail); full regression rerun 6/31/48/51 green.
+
+**Build #3 (2026-07-04) — deterministic both-side-edit detection (R3 / G2 / backlog #84).**
+- `agent/sn-capture.js`: `findWbBySysId`/`findWbBySlug` now return `updated_at`; `classifyArtifacts` loads the project's `sn_last_synced_at` once and stamps every `changed` item with `wb_updated_at`, `sn_last_synced_at`, and `wb_edited_since_sync` (true iff the WB row's `updated_at` is after the last sync — safe because sync writes always land before `markSynced()` advances the timestamp). Summary gains `both_side_edits`.
+- `agent/sn-sync.js`: **both-side-edit floor** in `gateProposal` — a `changed` item whose WB row was human-edited since the last sync can NEVER auto-apply, even a "perfectly safe" approved fill_blank (the deliberately-cleared-field resurrection hazard); the reconciler's analysis still attaches for the reviewer. Same floor in `genericDecision`: a Workbench-edited generic artifact goes to HITL instead of being silently auto-"refreshed from ServiceNow" (protects Phase-4b editor changes). `no_change`/hash-advance and net-new creates are untouched.
+- `agent/sn-reconcile.js` + `sn-review.js`: new `editContextLines()` injects the deterministic fact into BOTH AI agents' prompts — either "WAS EDITED after the last sync … empty fields may be deliberate; prefer conflict over enrich" or "NOT edited since the last sync — differences originate on the ServiceNow side" (silent when the project has never synced). The flag/timestamps ride the proposal through review to the gate, the plan view (`wb_edited_since_sync` in `items`), and the CP rationale, so the human explanation can say who moved.
+- Verified: NEW `test-both-side-edit.js` 21/21 (classify flag matrix incl. never-synced, gate floor under both modes, no-behavior-change without the flag, prompt-context wording, e2e over `/servicenow/sync`: WB-edited generic → HITL packet, payload NOT clobbered, hash NOT advanced). Full regression 6/31/48/51/15 green (172 total).
+- Remaining half of G2 (R7): storing a trustworthy base snapshot for a field-level 3-way merge — needs R4 (payload freshness) first.
+
+**Build #4 (2026-07-06) — snapshot freshness on hash-advance (R4 / G5 / backlog #85).**
+The changed→no_change hash-advance (server.js sync step 3) now also refreshes `source_fluent` — the Tier-3 "as built" SN body written at apply time (script body for logic artifacts, salient JSON otherwise; `COALESCE` keeps the old snapshot when a capture carries no salient) — and keeps the generic twin's `source_hash`/`source_fluent` in lockstep by sys_id. The hash can no longer claim a currency the stored snapshot doesn't have; `source_fluent` is now a faithful "last-synced SN state" across ALL paths — the base the R7 3-way merge needs. Verified: NEW `test-snapshot-refresh.js` 11/11 (salient JSON + script-body forms, twin lockstep, tier-0 idempotency preserved, never blanks on salient-less captures).
+
+**Build #5 (2026-07-06) — deploy identity keys manifest (R6 / G6 / backlog #87).**
+Both exports (SN Delta + full Build Spec) now emit a "🔑 Deploy Identity — keys.ts Seed Manifest": every synced record's stable `Now.ID` key (`wb-<project8>-<slug lowercase>`), ServiceNow table, and known sys_id — as a human table plus a machine-readable JSON block for scripting the `keys.ts` seed — with the identity invariants stated (seed before first build; never rename a key once deployed — the SDK treats a renamed key as a NEW record and orphans the old one; create-path naming rule + register-back loop for not-yet-linked records). Closes the duplicate-minting loop where a deployer without the mappings let Now.ID mint fresh sys_ids that the next inbound sync imported as "new". Verified: NEW `test-keys-manifest.js` 10/10. Full regression across all 8 suites: 193 green.
+
+**Build #6 (2026-07-06) — baseline restore (part of R8 / backlog #88).**
+`POST /api/v1/baselines/:id/restore` (`?dry_run=1` for plan-only) closes the versioning loop: diffs the locked baseline's snapshot against the live design and creates a **reviewable Change Packet** of `.restore` items — a new item type materialized column-verbatim by `mtRestore()` (bypassing field transforms, since snapshots hold post-transform column values; identity/provenance/audit columns never restored). Non-destructive posture throughout: nothing is written until a human approves the packet; records missing since the baseline are reported, never auto-recreated; records added since are reported, never auto-retired. Both apply paths (whole-CP + per-item) handle `.restore`; every write audits as `RESTORE`. Verified: NEW `test-baseline-restore.js` 17/17 (dry-run purity, approval gating, verbatim restore without transform double-wrap, survivor protection, idempotent re-run, 409 on unlocked baselines). Full regression: 9 suites, 210 assertions green.
+
+**Deliberately NOT built (queued, §6):** R5 sys_metadata backbone (needs a provenance-column migration — awaiting sign-off), R7 3-way merge (base snapshot now available via Build #4), remaining R8 housekeeping (#37 transactional apply, #72 non-prod guard, #81 wipe coverage).
+
+---
+
+## Appendix A — Live probe log (all read-only GETs, dev instance)
+
+| Probe | Query | Result |
+|---|---|---|
+| A1 | `stats/sys_metadata?sys_scope.scope=sn_major_inc_mgmt&count` | **705** application files in scope |
+| A2 | same, `group_by=sys_class_name` | ~40 classes; top: sys_atf_step 223, sys_documentation 116, sys_hub_action_input 84, sys_hub_action_output 24, sys_security_acl_role 23, sys_security_acl 19, sys_atf_test 16, sys_report 15, sys_report_users_groups 15, sys_ui_section 14, sys_ui_page 13 … (many not in the 24-surface capture) |
+| A3 | `table/sys_metadata` sample rows | expose sys_id, sys_name, sys_class_name, sys_update_name (`<class>_<sys_id>`), sys_scope, sys_package, sys_policy, sys_mod_count, sys_updated_on/by |
+| A4 | `table/sys_metadata/<bare sys_id>` | 200 — resolves class + audit fields from sys_id alone, table-agnostic |
+| A5 | `table/sys_script` (capture's own path) | sys_mod_count / sys_updated_on / sys_updated_by returned normally |
+| A6 | `sys_update_version` for a record with sys_mod_count=22 (last change 2024-07) | **0 rows** — history absent for older changes |
+| A7 | `sys_update_version` unfiltered / for recently-changed email actions | 13,287 rows total; 34 rows for `sysevent_email_action_aea24ac2…` with 2026 timestamps ⇒ mechanism live, retention-limited |
+| A8 | `sys_update_xml` for the same 2024-modified record | 0 rows (trail pruned/absent) |
+
+Interpretation in §4. Credentials: per-project encrypted storage (MIM project row), corporate-proxy TLS override honored.
+
+## Appendix B — Sources
+
+- ServiceNow docs, **Australia** release (latest per `llms.txt` wrap-around rule), `application-development` publication: `c_ApplicationFiles.md` (sys_metadata parentage; sys_update_xml tracking), `c_ApplicationVersioning.md`, `servicenow-metadata-in-applications.md`.
+- ServiceNow SDK docs: `servicenow.github.io/sdk/fluent/now-id-guide`, `/sdk/config/keys-file`.
+- Code references: current `main` (f914ebb), verified 2026-07-03.

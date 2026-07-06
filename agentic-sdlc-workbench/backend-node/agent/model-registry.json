@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "comment": "Model registry — the single data source for selectable Claude models, pricing, and thinking behavior. Verified against the claude-api reference 2026-07-03. Add/override entries WITHOUT code changes via the asdlc_app_setting key 'model_registry_custom' (JSON array merged over this file by id; {\"id\":X,\"remove\":true} hides an entry). Fields: tier=reasoning|balanced|fast, status=active|legacy|deprecated|retired, thinking_style=adaptive|always_on|budget, explicit_off=true when the API runs thinking by default so 'off' must be sent explicitly, efforts=supported output_config.effort values (empty = no effort param), pricing=USD per 1M tokens.",
+  "models": [
+    {
+      "id": "claude-fable-5",
+      "display": "Claude Fable 5",
+      "family": "Claude 5",
+      "tier": "reasoning",
+      "status": "active",
+      "thinking_style": "always_on",
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "default_effort": "high",
+      "pricing": { "in": 10, "out": 50, "cacheRead": 1.0 },
+      "notes": "Thinking always on (cannot be disabled — omit the thinking param). Requires 30-day data retention; may return stop_reason 'refusal'."
+    },
+    {
+      "id": "claude-sonnet-5",
+      "display": "Claude Sonnet 5",
+      "family": "Claude 5",
+      "tier": "balanced",
+      "status": "active",
+      "thinking_style": "adaptive",
+      "explicit_off": true,
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "default_effort": "high",
+      "pricing": { "in": 3, "out": 15, "cacheRead": 0.3 },
+      "notes": "Adaptive thinking runs by default when the param is omitted — 'off' requires an explicit disabled. Intro pricing $2/$10 per MTok through 2026-08-31; standard rates seeded here. New tokenizer (~30% more tokens vs Sonnet 4.6)."
+    },
+    {
+      "id": "claude-opus-4-8",
+      "display": "Claude Opus 4.8",
+      "family": "Claude 4 — Opus",
+      "tier": "reasoning",
+      "status": "active",
+      "thinking_style": "adaptive",
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "default_effort": "high",
+      "pricing": { "in": 5, "out": 25, "cacheRead": 0.5 }
+    },
+    {
+      "id": "claude-opus-4-7",
+      "display": "Claude Opus 4.7",
+      "family": "Claude 4 — Opus",
+      "tier": "reasoning",
+      "status": "legacy",
+      "thinking_style": "adaptive",
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "default_effort": "high",
+      "pricing": { "in": 5, "out": 25, "cacheRead": 0.5 },
+      "notes": "Previous-generation Opus; still active on the API. Prefer claude-opus-4-8 for new configuration."
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "display": "Claude Sonnet 4.6",
+      "family": "Claude 4 — Sonnet",
+      "tier": "balanced",
+      "status": "active",
+      "default": true,
+      "thinking_style": "adaptive",
+      "efforts": ["low", "medium", "high", "max"],
+      "default_effort": "medium",
+      "pricing": { "in": 3, "out": 15, "cacheRead": 0.3 },
+      "notes": "No 'xhigh' effort on this model (clamped to 'high')."
+    },
+    {
+      "id": "claude-haiku-4-5-20251001",
+      "display": "Claude Haiku 4.5",
+      "family": "Claude 4 — Haiku",
+      "tier": "fast",
+      "status": "active",
+      "thinking_style": "budget",
+      "efforts": [],
+      "default_effort": "off",
+      "pricing": { "in": 1, "out": 5, "cacheRead": 0.1 },
+      "notes": "No output_config.effort support; extended thinking uses budget_tokens. 200K context."
+    }
+  ]
+}
