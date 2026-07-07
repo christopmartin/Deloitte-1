@@ -14,3 +14,9 @@ __pycache__/
 # Generated feature-inventory deliverables (regenerable via build_inventory.py)
 SDLC Workbench - Feature Inventory.pptx
 SDLC Workbench - Feature Inventory.xlsx
+
+# Generated knowledge-graph output (regenerable via /graphify)
+graphify-out/
+
+# Local test inputs / scratch cases
+workbench-test-cases/
