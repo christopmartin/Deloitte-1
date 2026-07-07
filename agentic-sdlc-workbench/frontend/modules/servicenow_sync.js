@@ -128,6 +128,29 @@ export async function render(container) {
     el('div', {}, el('strong', {}, 'Instance: '), project.servicenow_instance || '(from server SN_INSTANCE env)'),
     project.sn_last_synced_at ? el('div', {}, el('strong', {}, 'Last synced: '), project.sn_last_synced_at) : null));
 
+  // ── Active import slice (bounds capture + write-back) ─────────────────────────
+  const sliceLine = el('div', { style: 'font-size:12px;margin-bottom:12px;padding:8px 10px;background:var(--color-bg-panel,#f6f8fa);border:1px solid var(--color-border);border-radius:var(--radius)' }, 'Ingest scope: loading…');
+  linkBody.appendChild(sliceLine);
+  try {
+    const ip = await apiFetch(`/projects/${pid}/servicenow/import-profile`);
+    if (ip && ip.source === 'saved' && ip.profile && (ip.profile.include_surfaces || []).length) {
+      const surfaces = ip.profile.include_surfaces;
+      sliceLine.innerHTML = '';
+      sliceLine.appendChild(el('strong', {}, `Slice: ${surfaces.length} surface${surfaces.length === 1 ? '' : 's'}`));
+      sliceLine.appendChild(document.createTextNode(` — ${surfaces.slice(0, 8).join(', ')}${surfaces.length > 8 ? ', …' : ''}${ip.profile.per_surface_cap ? ` · cap ${ip.profile.per_surface_cap}/surface` : ''}. `));
+      const editLink = el('a', { style: 'color:var(--color-accent);cursor:pointer;text-decoration:none' }, 'Edit in Assessment ↗');
+      editLink.addEventListener('click', (e) => { e.preventDefault(); navigate('servicenow_assessment'); });
+      sliceLine.appendChild(editLink);
+    } else {
+      sliceLine.innerHTML = '';
+      sliceLine.appendChild(el('strong', {}, 'Whole scope'));
+      sliceLine.appendChild(document.createTextNode(' — no slice set; the entire scope will be ingested. '));
+      const setLink = el('a', { style: 'color:var(--color-accent);cursor:pointer;text-decoration:none' }, 'Define a slice in Assessment ↗');
+      setLink.addEventListener('click', (e) => { e.preventDefault(); navigate('servicenow_assessment'); });
+      sliceLine.appendChild(setLink);
+    }
+  } catch { sliceLine.textContent = 'Ingest scope: whole scope (import profile unavailable).'; }
+
   // ── Credential status (read-only — edit in Applications Admin) ─────────────
   linkBody.appendChild(el('div', { style: 'font-size:12px;color:var(--text-muted);margin-bottom:14px' },
     project.has_sn_password

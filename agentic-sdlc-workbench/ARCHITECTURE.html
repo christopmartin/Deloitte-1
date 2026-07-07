@@ -487,6 +487,20 @@ flowchart LR
     K --> L(["Deploy to SN"])
     L --> M["POST .../register-sysid\nWrite sys_id back to design rows\nRound-trip identity for next sync"]
     </div>
+    <p style="margin-top:12px"><strong>Slice-scoped ingest.</strong> A project can save an <em>import profile</em>
+    (<code>asdlc_project.sn_import_profile_json</code>; <code>GET/PUT .../servicenow/import-profile</code>, seeded from the
+    assessment's <code>recommended_profile</code>) that bounds the ingest to a <em>slice</em> of a scope — a surface allowlist
+    (plus the child tables of any included parent) and an optional per-surface cap, with a reserved <code>record_filters</code>
+    for a future record-level narrowing. Capture, the <code>sys_metadata</code> completeness sweep, <em>and</em> drift
+    classification are all bounded to the same slice (<code>sn-capture.js</code>), so out-of-slice rows are never mis-read as
+    deleted. The Assessment page makes census surfaces selectable; Sync shows the active slice; <code>wipe-project.js</code>
+    clears the SN substrate for a clean re-ingest.</p>
+    <p><strong>Field-level two-way merge (R7).</strong> <code>agent/three-way-merge.js</code> compares each field across the
+    last-synced base (<code>source_fluent</code>), the current Workbench value, and the current ServiceNow value
+    (<code>unchanged / sn_only / wb_only / both_changed</code>). Generic artifacts are merged field-by-field — ServiceNow-only
+    changes auto-apply, every Workbench edit (including a deliberate clear) is kept, and only a real <code>both_changed</code>
+    field goes to human review — instead of parking the whole record. Rich (Tier-A) records feed the deterministic SN-side
+    field delta into the reconciler prompt, with the record-level both-side floor as the safe fallback.</p>
   </div>
 
   <div class="diagram-wrap">

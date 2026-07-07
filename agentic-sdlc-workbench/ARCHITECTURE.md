@@ -115,7 +115,7 @@ graph TB
 | Design Entities | Full CRUD for UC/WF/AG/T/AC/TC/FR/NFR/guardrail/data-source/user-story | No |
 | Workflow RASIC & Paths | CRUD for participants / paths / RASIC matrix | No |
 | Ingest Documents | Upload, process, promote, clarifications, content download | **Yes** (process, promote) |
-| ServiceNow | sync, assess, delta-export, register-sysid, delta-info | **Yes** (sync, assess) |
+| ServiceNow | sync, assess, delta-export, register-sysid, delta-info, import-profile | **Yes** (sync, assess) |
 | Quality & Repair | quality-review/entity, quality-review/full, repair-design, traceability/infer | **Yes** |
 | Cost | cost-estimate, cost-bindings CRUD | **Yes** (estimate) |
 | Baselines | create, lock, compare (diff) | No |
@@ -184,6 +184,26 @@ flowchart TD
     M --> N(["Deploy to SN (manual / SDK)"])
     N --> O["POST .../servicenow/register-sysid\nWrite source_sys_id back to design rows\nEnables round-trip identity on next sync"]
 ```
+
+**Slice-scoped ingest (import profile).** A large or global scope is too big to ingest whole, so
+a project can save an **import profile** (`asdlc_project.sn_import_profile_json`; GET/PUT
+`.../servicenow/import-profile`, seeded from the assessment's `recommended_profile`) that bounds
+the ingest to a *slice*: a surface allowlist (+ the child tables of any included parent) and an
+optional per-surface cap, with a reserved `record_filters` for a future record-level narrowing.
+`captureScope`, the `sys_metadata` completeness sweep, **and** drift classification are all bounded
+to the same slice (`agent/sn-capture.js` — `normalizeSlice`/`expandSliceSurfaces`/`sliceQuery`), so
+out-of-slice Workbench rows are never mis-read as deleted upstream. The Assessment page makes census
+surfaces selectable; Sync shows the active slice. `wipe-project.js` clears the SN substrate so a
+slice can be re-ingested cleanly.
+
+**Field-level two-way merge (R7).** `agent/three-way-merge.js` (`classifyFields`) compares each field
+across three states — the last-synced base (`source_fluent`), the current Workbench value, and the
+current ServiceNow value — bucketing it `unchanged | sn_only | wb_only | both_changed`. For **generic
+artifacts** (whose Workbench payload *is* the ServiceNow payload) a both-side-edited record is merged
+field-by-field instead of parked whole in review: `sn_only` changes auto-apply, every Workbench edit
+(including a deliberate clear) is kept, and only a genuine `both_changed` field goes to human review.
+For **rich (Tier-A)** records the deterministic SN-side field delta is fed into the reconciler prompt,
+with the record-level both-side floor as the safe fallback (a full WB-field-space rich merge is #100).
 
 ### 4.3 AI Configuration & Model Routing
 

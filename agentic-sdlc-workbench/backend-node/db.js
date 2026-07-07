@@ -516,6 +516,14 @@ const MIGRATIONS = [
   "ALTER TABLE asdlc_business_logic ADD COLUMN sn_artifact_id TEXT",
   "ALTER TABLE asdlc_catalog_item   ADD COLUMN sn_artifact_id TEXT",
   "ALTER TABLE asdlc_integration    ADD COLUMN sn_artifact_id TEXT",
+
+  // ── Slice-scoped ingest: one editable "import profile" per project ────────────
+  // Bounds an ingest to a SLICE of a scope instead of the whole scope. Stored as JSON:
+  //   { scope, include_types[], include_surfaces[], per_surface_cap|null, record_filters{} }
+  // include_surfaces (SN tables) is the operative field the capture reads; record_filters is
+  // reserved for a future record-level narrowing (encoded query per surface) and unused today.
+  // NULL / absent = capture the WHOLE scope (unchanged legacy behavior).
+  "ALTER TABLE asdlc_project ADD COLUMN sn_import_profile_json TEXT",
 ];
 for (const migration of MIGRATIONS) {
   try { db.exec(migration); } catch { /* column already exists — safe to ignore */ }

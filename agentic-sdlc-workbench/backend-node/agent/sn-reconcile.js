@@ -135,6 +135,13 @@ function editContextLines(item) {
     lines.push(` - ServiceNow last modified by ${item.sn_updated_by || 'unknown'} on ${item.sn_updated_on || 'unknown date'}` +
                (item.sn_mod_count != null ? ` (modification #${item.sn_mod_count}).` : '.'));
   }
+  // R7: deterministic SN-side field delta (base snapshot vs current capture). Names WHICH
+  // ServiceNow fields actually moved since the last sync so the proposal targets real changes
+  // and the rationale can be specific. Advisory (never asserts "nothing else changed", since a
+  // script-body base only exposes the body field) — the reconciler still sees the full inference.
+  if (Array.isArray(item.sn_changed_fields) && item.sn_changed_fields.length) {
+    lines.push(` - Deterministic field delta: on the ServiceNow side, these field(s) changed since the last sync: ${item.sn_changed_fields.join(', ')}. Focus the reconciliation on genuine ServiceNow changes; treat unrelated differences as the expected lossy-subset gap.`);
+  }
   return lines;
 }
 

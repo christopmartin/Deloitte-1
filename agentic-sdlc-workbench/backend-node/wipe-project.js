@@ -39,11 +39,17 @@
 //     asdlc_change_packet (after asdlc_change_packet_item)
 //     asdlc_ingest_document (after clarifications/extractions)
 //     asdlc_ai_usage
+//   ServiceNow round-trip substrate (#81 — else a re-ingest orphans/duplicates them):
+//     asdlc_sn_artifact         (generic artifact substrate)
+//     asdlc_sn_change_signal    (per-record sys_mod_count baselines)
+//   + the sn_artifact_id back-links on the L1 twin tables are nulled.
 //
 // Tables intentionally preserved:
 //   asdlc_project, asdlc_project_member, asdlc_project_agent_setting
 //   asdlc_audit_log  (compliance record — never wiped)
 //   asdlc_app_setting, asdlc_best_practice  (global config)
+//   asdlc_sn_type_registry  (GLOBAL SDK capability snapshot — not per-project)
+//   asdlc_sn_assessment, asdlc_sn_catalog_run  (read-only history; re-seeds the import profile)
 
 'use strict';
 
@@ -120,7 +126,17 @@ const deletes = [
   ...[ 'asdlc_evidence_source', 'asdlc_report_export', 'asdlc_baseline',
        'asdlc_change_packet', 'asdlc_ingest_document', 'asdlc_ai_usage',
   ].map(t => ({ label: t, sql: `DELETE FROM ${t} WHERE project_id=?`, params: [pid] })),
+  // ServiceNow round-trip substrate (#81): clear so a wipe-and-re-ingest doesn't orphan or
+  // duplicate generic artifacts, nor carry stale change-signal baselines. The GLOBAL
+  // asdlc_sn_type_registry is intentionally NOT wiped (SDK snapshot, not per-project).
+  ...[ 'asdlc_sn_artifact', 'asdlc_sn_change_signal',
+  ].map(t => ({ label: t, sql: `DELETE FROM ${t} WHERE project_id=?`, params: [pid] })),
 ];
+
+// L1 twin tables that back-link to a now-deleted generic artifact (#81). Nulled after the
+// deletes so no row points at a removed asdlc_sn_artifact (esp. asdlc_integration, which is
+// not itself wiped). foreign_keys is OFF during the wipe, so order is not a concern.
+const SN_BACKLINK_TABLES = ['asdlc_data_model', 'asdlc_form_design', 'asdlc_business_logic', 'asdlc_catalog_item', 'asdlc_integration'];
 
 // ── Count preview ─────────────────────────────────────────────────────────────
 let totalRows = 0;
@@ -155,6 +171,15 @@ function doWipe() {
         if (changes > 0) counts[label] = changes;
       } catch (e) {
         if (!e.message.includes('no such table')) console.warn(`  [warn] ${label}: ${e.message}`);
+      }
+    }
+    // Null the sn_artifact_id back-links on the L1 twin tables (#81).
+    for (const t of SN_BACKLINK_TABLES) {
+      try {
+        const { changes } = db.prepare(`UPDATE ${t} SET sn_artifact_id=NULL WHERE project_id=? AND sn_artifact_id IS NOT NULL`).run(pid);
+        if (changes > 0) counts[`${t}.sn_artifact_id (nulled)`] = changes;
+      } catch (e) {
+        if (!e.message.includes('no such table') && !e.message.includes('no such column')) console.warn(`  [warn] ${t}.sn_artifact_id: ${e.message}`);
       }
     }
     db.prepare('COMMIT').run();

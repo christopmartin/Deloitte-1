@@ -468,6 +468,63 @@ app.get('/api/v1/projects/:id/servicenow/assessments/:aid', (req, res) => {
   res.json({ ...row, report });
 });
 
+// ── Slice-scoped ingest: the project's editable IMPORT PROFILE ────────────────
+// Bounds a ServiceNow ingest to a SLICE of a scope (surface/type selection now; a future
+// record filter later). GET returns the saved profile, else a seed derived from the latest
+// assessment's recommended_profile (source: 'saved' | 'assessment_seed' | 'none').
+app.get('/api/v1/projects/:id/servicenow/import-profile', (req, res) => {
+  const project = db.prepare("SELECT project_id, servicenow_scope, sn_import_profile_json FROM asdlc_project WHERE project_id=?").get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  if (project.sn_import_profile_json) {
+    let profile = null; try { profile = JSON.parse(project.sn_import_profile_json); } catch { profile = null; }
+    if (profile) return res.json({ profile, source: 'saved' });
+  }
+  // Seed from the latest complete assessment's recommended_profile (never persisted until PUT).
+  const asr = db.prepare("SELECT report_json FROM asdlc_sn_assessment WHERE project_id=? AND status='complete' ORDER BY created_at DESC LIMIT 1").get(req.params.id);
+  let seed = null;
+  if (asr && asr.report_json) {
+    try {
+      const rp = (JSON.parse(asr.report_json) || {}).recommended_profile;
+      if (rp) seed = {
+        scope: project.servicenow_scope || (Array.isArray(rp.scopes) ? rp.scopes[0] : null) || null,
+        include_types: [],
+        include_surfaces: Array.isArray(rp.include_surfaces) ? rp.include_surfaces : [],
+        per_surface_cap: rp.per_surface_cap || null,
+        record_filters: {},
+      };
+    } catch { /* leave seed null */ }
+  }
+  res.json({ profile: seed, source: seed ? 'assessment_seed' : 'none' });
+});
+
+// PUT saves the import profile (bounds later ingests), or resets to whole-scope with
+// {clear:true} / an empty include_surfaces. Validates the shape minimally.
+app.put('/api/v1/projects/:id/servicenow/import-profile', (req, res) => {
+  const uid = userId(req);
+  const project = db.prepare("SELECT * FROM asdlc_project WHERE project_id=?").get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const body = req.body || {};
+  const surfaces = Array.isArray(body.include_surfaces) ? body.include_surfaces.filter(s => typeof s === 'string' && s) : [];
+  const clear = body.clear === true || (!surfaces.length && !body.scope);
+  if (clear) {
+    db.prepare("UPDATE asdlc_project SET sn_import_profile_json=NULL, updated_by=?, updated_at=datetime('now') WHERE project_id=?").run(uid, req.params.id);
+    auditLog('asdlc_project', req.params.id, 'UPDATE', { sn_import_profile_json: project.sn_import_profile_json }, { sn_import_profile_json: null }, uid);
+    return res.json({ profile: null, source: 'none' });
+  }
+  if (!surfaces.length) return res.status(400).json({ error: 'include_surfaces must be a non-empty array of ServiceNow table names (or send {clear:true} to reset to whole-scope).' });
+  const capNum = Number(body.per_surface_cap);
+  const profile = {
+    scope: (typeof body.scope === 'string' && body.scope) ? body.scope : (project.servicenow_scope || null),
+    include_types: Array.isArray(body.include_types) ? body.include_types.filter(t => typeof t === 'string') : [],
+    include_surfaces: surfaces,
+    per_surface_cap: (Number.isFinite(capNum) && capNum > 0) ? Math.floor(capNum) : null,
+    record_filters: (body.record_filters && typeof body.record_filters === 'object' && !Array.isArray(body.record_filters)) ? body.record_filters : {},
+  };
+  db.prepare("UPDATE asdlc_project SET sn_import_profile_json=?, updated_by=?, updated_at=datetime('now') WHERE project_id=?").run(JSON.stringify(profile), uid, req.params.id);
+  auditLog('asdlc_project', req.params.id, 'UPDATE', { sn_import_profile_json: project.sn_import_profile_json }, { sn_import_profile_json: JSON.stringify(profile) }, uid);
+  res.json({ profile, source: 'saved' });
+});
+
 // ── ServiceNow whole-instance CATALOG (read-only awareness sweep) ─────────────
 // Cross-scope, identity-only sweep → collision awareness for the deployer + cross-scope
 // net-new for governance. Mirrors the assess 202 async pattern; creds resolve body →
@@ -7403,6 +7460,7 @@ function buildExportMarkdown(project, baseline, sections, data) {
   lines.push('### 0. Authentication & Project Initialization');
   lines.push('');
   lines.push('- [ ] Run `npx now-sdk auth --list` and confirm the credential alias for the target instance is set as **default** (starred). Authenticating mid-build is the single biggest time sink — resolve it first.');
+  lines.push('- [ ] **Use the Claude user\'s saved ServiceNow credentials (the `now-sdk auth` alias) — never the admin profile.** Deploy under the already-authenticated non-admin alias shown by `now-sdk auth --list`; do not switch to an admin account or prompt for admin credentials to get around an auth/permission error.');
   lines.push('- [ ] For a fresh project folder, run `npx now-sdk init --auth` to create the `sys_scope` record on the instance and write `scopeId` into `now.config.json`. `now-sdk install` will not create the scope.');
   lines.push('- [ ] Pin the build to this one project folder. Reading or writing other scoped-app folders mid-session risks cross-contamination.');
   lines.push('');
@@ -9344,10 +9402,16 @@ app.post('/api/v1/projects/:id/servicenow/sync', async (req, res) => {
   const modeOverride = body.mode;
   const thresholdOverride = typeof body.threshold === 'number' ? body.threshold : undefined;
 
+  // Slice: an explicit body.slice wins (null forces whole-scope); otherwise the project's saved
+  // import profile bounds the ingest to a subset of the scope. Absent ⇒ whole scope (legacy).
+  let importSlice = null;
+  if (body.slice !== undefined) importSlice = body.slice;
+  else if (project.sn_import_profile_json) { try { importSlice = JSON.parse(project.sn_import_profile_json); } catch { importSlice = null; } }
+
   let plan;
   try {
     plan = await snSync.runSyncPlan(
-      { projectId: project.project_id, scope, instance, user, pw, artifacts, metadataSweep: body.metadataSweep, mode: modeOverride, threshold: thresholdOverride },
+      { projectId: project.project_id, scope, instance, user, pw, artifacts, metadataSweep: body.metadataSweep, mode: modeOverride, threshold: thresholdOverride, slice: importSlice },
       { projectId: project.project_id }
     );
   } catch (err) {
@@ -9357,7 +9421,7 @@ app.post('/api/v1/projects/:id/servicenow/sync', async (req, res) => {
 
   // Serializable plan view (drop heavy artifact.salient).
   const planView = {
-    project_id: plan.project_id, scope: plan.scope, mode: plan.mode, threshold: plan.threshold,
+    project_id: plan.project_id, scope: plan.scope, slice: plan.slice || null, mode: plan.mode, threshold: plan.threshold,
     summary: plan.summary, classified_summary: plan.classified_summary, errors: plan.errors,
     warnings: plan.warnings || [], surface_counts: plan.surface_counts || {},
     completeness: plan.completeness || null,

@@ -32,11 +32,12 @@
 // makes it offline-testable in stub mode exactly like Phases C–E.
 'use strict';
 const { db, getSetting } = require('../db');
-const { captureScope, classifyArtifacts, sweepScopeMetadata, normalizeSweep, analyzeCompleteness, sweepSignals, WB_PROVENANCE_TABLES } = require('./sn-capture');
+const { captureScope, classifyArtifacts, sweepScopeMetadata, normalizeSweep, analyzeCompleteness, sweepSignals, expandSliceSurfaces, WB_PROVENANCE_TABLES } = require('./sn-capture');
 const { reverseEngineer } = require('./sn-reverse-engineer');
 const { reconcile } = require('./sn-reconcile');
 const { review } = require('./sn-review');
 const { buildArtifactRecord } = require('./sn-artifact');
+const { classifyFields, mergeSafe } = require('./three-way-merge');
 
 // ── Tier-B/C GENERIC plan (Phase 2) ──────────────────────────────────────────
 // Generic artifacts are deterministic ServiceNow captures, NOT business inferences,
@@ -65,16 +66,62 @@ function genericDecision(classification, mode, wbEditedSinceSync, snUnmoved) {
     : { target: 'auto', auto_apply: true, reason: 'generic artifact refreshed from ServiceNow (Level-2 source of truth)' };
 }
 
-/** Build deterministic plan items for captured generic (Tier-B/C) artifacts. */
-function buildGenericPlan(items, classification, scope, mode) {
+/** Load a generic twin's current Workbench payload (parsed) by sn_artifact_id, or null. */
+function loadTwinPayload(wbId) {
+  if (!wbId) return null;
+  try {
+    const r = db.prepare('SELECT payload FROM asdlc_sn_artifact WHERE sn_artifact_id = ?').get(wbId);
+    if (!r || r.payload == null) return null;
+    return typeof r.payload === 'string' ? JSON.parse(r.payload) : r.payload;
+  } catch { return null; }
+}
+
+/**
+ * Build deterministic plan items for captured generic (Tier-B/C) artifacts.
+ *
+ * R7 field-level two-way merge (generic artifacts only — their Workbench payload IS the
+ * ServiceNow field payload, so a per-field 3-way is sound). When a generic artifact was
+ * edited in the Workbench since the last sync AND ServiceNow also changed, the old blunt rule
+ * sent the WHOLE record to human review. Now we run classifyFields(base, wbCurrent, snCurrent):
+ *   - any both_changed field → still HITL, but the reason names the conflicting fields;
+ *   - otherwise auto-apply a SAFE MERGE — apply the ServiceNow-only field changes, keep every
+ *     Workbench edit (a Workbench-cleared field is wb_only and is never refilled).
+ * We also stamp source_fluent with the ServiceNow-current payload so the NEXT sync has a base.
+ * When no parseable base exists yet, we fall back to the record-level HITL floor (never wrong).
+ */
+function buildGenericPlan(items, classification, scope, mode, projectId) {
   return items.map(a => {
-    const rec = buildArtifactRecord(a, { scope });
+    const snPayload = a.payload || a.salient || {};
+    const rec = buildArtifactRecord(a, { scope, sourceFluent: JSON.stringify(snPayload) });
+    let decision = genericDecision(classification, mode, a.wb_edited_since_sync, a.sn_unmoved);
+    let field_classification = null;
+
+    const eligibleForMerge = classification === 'changed' && a.wb_edited_since_sync &&
+      !a.sn_unmoved && mode !== 'review_all' && a.base_snapshot && a.wb_id;
+    if (eligibleForMerge) {
+      const twinPayload = loadTwinPayload(a.wb_id);
+      const fc = classifyFields(a.base_snapshot, twinPayload || {}, snPayload);
+      if (fc.available) {
+        field_classification = fc.summary;
+        const bothChanged = Object.keys(fc.fields).filter(k => fc.fields[k].kind === 'both_changed');
+        if (bothChanged.length) {
+          decision = { target: 'hitl', auto_apply: false,
+            reason: `both sides changed since the last sync — field conflict on ${bothChanged.join(', ')}; human review required` };
+        } else {
+          rec.payload = mergeSafe(twinPayload || {}, fc);   // apply sn_only, keep every WB edit
+          decision = { target: 'auto', auto_apply: true,
+            reason: `field-level merge — applied ${fc.summary.sn_only} ServiceNow-only field change(s), kept ${fc.summary.wb_only} Workbench edit(s); no field conflict` };
+        }
+      }
+      // fc unavailable (no parseable base yet) → keep the record-level HITL floor from genericDecision.
+    }
+
     return {
       classification, source_sys_id: a.source_sys_id, generic: true, generic_record: rec,
       artifact: a, wb_table: a.wb_table || null, wb_id: a.wb_id || null, name: rec.name,
       wb_edited_since_sync: !!a.wb_edited_since_sync, wb_updated_at: a.wb_updated_at || null,
-      sn_unmoved: !!a.sn_unmoved,
-      decision: genericDecision(classification, mode, a.wb_edited_since_sync, a.sn_unmoved),
+      sn_unmoved: !!a.sn_unmoved, field_classification,
+      decision,
     };
   });
 }
@@ -311,9 +358,14 @@ async function runSyncPlan(opts = {}, ctx = {}) {
   const threshold = (typeof opts.threshold === 'number') ? opts.threshold : resolveProjectThreshold(projectId);
   const logCtx = { projectId, ...ctx };
 
-  // 1. Capture every design surface (or use pre-supplied artifacts for tests/dry-runs).
+  // Slice: bound this ingest to a subset of the scope (the project's import profile). null ⇒
+  // whole scope. The SAME slice bounds capture, the completeness sweep, and drift detection.
+  const slice = opts.slice || null;
+  const sliceSurfaces = expandSliceSurfaces(slice);   // Set or null — drift candidacy bound
+
+  // 1. Capture every design surface in the slice (or use pre-supplied artifacts for tests/dry-runs).
   const artifacts = opts.artifacts ||
-    await captureScope({ scope, instance: opts.instance, user: opts.user, pw: opts.pw, fetchImpl: opts.fetchImpl });
+    await captureScope({ scope, instance: opts.instance, user: opts.user, pw: opts.pw, fetchImpl: opts.fetchImpl, slice });
 
   // 1b. Completeness backbone (#86 part a): ONE read-only sys_metadata sweep enumerates
   //     EVERY application file in the scope — the authority for blind-spot classes the
@@ -325,11 +377,12 @@ async function runSyncPlan(opts = {}, ctx = {}) {
   //     opts.metadataSweep. Computed BEFORE classify so classify can consult the signals.
   const sweep = normalizeSweep(opts.metadataSweep) || (opts.artifacts
     ? { available: false, error: 'sweep skipped (pre-supplied artifacts)', capped: false, total: 0, bySysId: new Map(), byClass: {} }
-    : await sweepScopeMetadata({ scope, instance: opts.instance, user: opts.user, pw: opts.pw, fetchImpl: opts.fetchImpl }));
+    : await sweepScopeMetadata({ scope, instance: opts.instance, user: opts.user, pw: opts.pw, fetchImpl: opts.fetchImpl, slice }));
 
   // 2. Deterministic tier-0 classification against the linked project (sweep-aware: #86b
   //    sn_unmoved / who-when annotations attach to `changed` items when signals exist).
-  const classified = classifyArtifacts(artifacts, projectId, { sweep });
+  //    sliceSurfaces bounds drift candidacy so out-of-slice rows are not read as deleted.
+  const classified = classifyArtifacts(artifacts, projectId, { sweep, sliceSurfaces });
 
   // 2b. Completeness report + drift disambiguation (NO gating change — annotates only).
   const completeness = analyzeCompleteness(sweep, classified);
@@ -358,8 +411,8 @@ async function runSyncPlan(opts = {}, ctx = {}) {
   }));
 
   const genericPlanned = [
-    ...buildGenericPlan(classified.new.filter(isGen), 'new', scope, mode),
-    ...buildGenericPlan(classified.changed.filter(isGen), 'changed', scope, mode),
+    ...buildGenericPlan(classified.new.filter(isGen), 'new', scope, mode, projectId),
+    ...buildGenericPlan(classified.changed.filter(isGen), 'changed', scope, mode, projectId),
     ...classified.drift.filter(d => d.wb_type === 'sn_artifact').map(d => ({
       classification: 'drift', source_sys_id: d.source_sys_id, generic: true, generic_record: null,
       wb_table: d.wb_table, wb_id: d.wb_id, name: d.name, decision: genericDecision('drift', mode),
@@ -455,7 +508,7 @@ async function runSyncPlan(opts = {}, ctx = {}) {
   }
 
   return {
-    project_id: projectId, scope, mode, threshold,
+    project_id: projectId, scope, slice: slice || null, mode, threshold,
     classified_summary: classified.summary,
     unchanged: classified.unchanged,
     planned,

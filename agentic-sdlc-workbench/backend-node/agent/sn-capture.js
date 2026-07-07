@@ -17,6 +17,7 @@ const { db } = require('../db');
 // instance are skipped. Covers AI-agent apps + data-centric apps.
 const { SN_SURFACES, normalizeInstanceUrl } = require('./sn-catalog');
 const reg = require('./sn-type-registry');
+const { snFieldDelta } = require('./three-way-merge');
 
 // Pure-audit/system columns dropped from a generic artifact payload (noise, not design).
 const PAYLOAD_NOISE = new Set([
@@ -64,9 +65,10 @@ const maxRows  = () => Math.max(1, parseInt(process.env.SN_CAPTURE_MAX_ROWS  || 
  * @throws {Error} on HTTP !ok ("HTTP <status>") or transport failure — the caller
  *   turns it into the same per-surface __error entry it always produced.
  */
-async function fetchAllRows(f, baseUrl, headers) {
+async function fetchAllRows(f, baseUrl, headers, cap) {
   const limit = pageSize();
   const ceiling = maxRows();
+  const wantCap = (cap != null && Number.isFinite(Number(cap)) && Number(cap) > 0) ? Number(cap) : null;
   const rows = [];
   let offset = 0;
   for (;;) {
@@ -74,6 +76,8 @@ async function fetchAllRows(f, baseUrl, headers) {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const page = ((await r.json()) || {}).result || [];
     rows.push(...page);
+    // Intentional per-surface slice cap reached — a deliberate bound, NOT a partial-import warning.
+    if (wantCap && rows.length >= wantCap) return { rows: rows.slice(0, wantCap), capped: false };
     if (page.length < limit) return { rows, capped: false };   // last (short) page → done
     if (rows.length >= ceiling) return { rows, capped: true };  // safety ceiling hit → partial
     offset += limit;
@@ -123,6 +127,54 @@ const CHILD_SURFACES = [
     parentKey: 'sysId', filter: p => `cat_item=${p.sysId}`,               nameField: 'question_text', orderField: 'order' },
 ];
 
+// ── Slice: bound an ingest to a SUBSET of a scope (surface/type selection now, a future
+// record-level filter later). A slice is the runtime form of the project's saved import
+// profile: { include_surfaces: string[], per_surface_cap?: number|null, record_filters?:
+// {table: encodedQuery} }. null / empty include_surfaces ⇒ the WHOLE scope (legacy).
+function normalizeSlice(slice) {
+  if (!slice) return null;
+  const surfaces = Array.isArray(slice.include_surfaces) ? slice.include_surfaces.filter(Boolean) : [];
+  if (!surfaces.length) return null;   // nothing selected ⇒ treat as whole-scope
+  const capRaw = slice.per_surface_cap;
+  const cap = (capRaw != null && Number.isFinite(Number(capRaw)) && Number(capRaw) > 0) ? Number(capRaw) : null;
+  const filters = (slice.record_filters && typeof slice.record_filters === 'object') ? slice.record_filters : {};
+  return { surfaces: new Set(surfaces), cap, filters };
+}
+
+/**
+ * Expand a slice's surface allowlist to also include the CHILD tables of any included parent,
+ * so selecting sc_cat_item also captures (and does NOT drift-flag) its item_option_new
+ * variables. Returns a Set of table names, or null for a whole-scope (unbounded) ingest.
+ */
+function expandSliceSurfaces(slice) {
+  const s = normalizeSlice(slice);
+  if (!s) return null;
+  const out = new Set(s.surfaces);
+  for (const cs of CHILD_SURFACES) if (out.has(cs.parentTable)) out.add(cs.childTable);
+  return out;
+}
+
+/**
+ * Build the per-surface capture query: scope filter, an OPTIONAL record filter (dormant until
+ * record_filters is populated — the surface-only slice leaves it empty), then the stable
+ * ORDERBYsys_id key the offset pager relies on. Whole-scope when slice is null.
+ */
+function sliceQuery(scope, surface, slice) {
+  const s = normalizeSlice(slice);
+  let q = 'sys_scope.scope=' + scope;
+  const extra = s && s.filters && s.filters[surface];
+  if (extra) q += '^' + String(extra).replace(/^\^+/, '');
+  return q + '^ORDERBYsys_id';
+}
+
+/** The sys_metadata completeness sweep, bounded to the slice's classes (whole-scope otherwise). */
+function sliceMetadataQuery(scope, slice) {
+  const allow = expandSliceSurfaces(slice);
+  let q = 'sys_scope.scope=' + scope;
+  if (allow && allow.size) q += '^sys_class_nameIN' + [...allow].join(',');
+  return q + '^ORDERBYsys_id';
+}
+
 // Workbench tables that carry Level-2 provenance (where SN-sourced records live).
 const WB_PROVENANCE_TABLES = [
   { table: 'asdlc_use_case',       pk: 'use_case_id',       type: 'use_case',       nameCol: 'title' },
@@ -152,18 +204,22 @@ function hashArtifact(salient) {
  * Live read-only capture of every design surface in a ServiceNow scope.
  * @returns {Promise<Array>} artifacts [{source_table, design_type, source_sys_id, name, salient, hash}] (+ {__error} entries)
  */
-async function captureScope({ scope, instance, user, pw, fetchImpl }) {
+async function captureScope({ scope, instance, user, pw, fetchImpl, slice }) {
   const f = makeFetch(fetchImpl);
   const auth = 'Basic ' + Buffer.from(`${user}:${pw}`).toString('base64');
   const base = normalizeInstanceUrl(instance);
   const headers = { Authorization: auth, Accept: 'application/json' };
   const artifacts = [];
+  // Slice bounding (surface allowlist + optional per-surface cap). null ⇒ whole scope.
+  const allow = expandSliceSurfaces(slice);   // Set of tables, or null
+  const sliceCap = (normalizeSlice(slice) || {}).cap || null;
   for (const s of SN_SURFACES) {
+    if (allow && !allow.has(s.table)) continue;   // outside the selected slice
     const fields = ['sys_id', ...s.fields].join(',');
-    const baseUrl = `${base}/api/now/table/${s.table}?sysparm_query=${encodeURIComponent('sys_scope.scope=' + scope + '^ORDERBYsys_id')}&sysparm_fields=${encodeURIComponent(fields)}&sysparm_display_value=true&sysparm_exclude_reference_link=true`;
+    const baseUrl = `${base}/api/now/table/${s.table}?sysparm_query=${encodeURIComponent(sliceQuery(scope, s.table, slice))}&sysparm_fields=${encodeURIComponent(fields)}&sysparm_display_value=true&sysparm_exclude_reference_link=true`;
     let rows = [];
     try {
-      const out = await fetchAllRows(f, baseUrl, headers);
+      const out = await fetchAllRows(f, baseUrl, headers, sliceCap);
       rows = out.rows;
       if (out.capped) artifacts.push({ __warn: `${s.table} -> capped at ${maxRows()} rows; import is PARTIAL for this surface (raise SN_CAPTURE_MAX_ROWS)` });
     } catch (e) { artifacts.push({ __error: `${s.table} -> ${e.message}` }); continue; }
@@ -183,10 +239,11 @@ async function captureScope({ scope, instance, user, pw, fetchImpl }) {
   // Each becomes a generic artifact (design_type = sn_metadata_type, generic:true);
   // nothing is dropped. Errors per table are tolerated (skipped), exactly like above.
   for (const s of genericSurfaces()) {
-    const baseUrl = `${base}/api/now/table/${s.table}?sysparm_query=${encodeURIComponent('sys_scope.scope=' + scope + '^ORDERBYsys_id')}&sysparm_exclude_reference_link=true`;
+    if (allow && !allow.has(s.table)) continue;   // outside the selected slice
+    const baseUrl = `${base}/api/now/table/${s.table}?sysparm_query=${encodeURIComponent(sliceQuery(scope, s.table, slice))}&sysparm_exclude_reference_link=true`;
     let rows = [];
     try {
-      const out = await fetchAllRows(f, baseUrl, headers);
+      const out = await fetchAllRows(f, baseUrl, headers, sliceCap);
       rows = out.rows;
       if (out.capped) artifacts.push({ __warn: `${s.table} -> capped at ${maxRows()} rows; import is PARTIAL for this surface (raise SN_CAPTURE_MAX_ROWS)` });
     } catch (e) { artifacts.push({ __error: `${s.table} -> ${e.message}` }); continue; }
@@ -216,12 +273,13 @@ async function captureScope({ scope, instance, user, pw, fetchImpl }) {
       .push({ sysId: art.source_sys_id, name: (art.salient && art.salient.name) || art.name });
   }
   for (const cs of CHILD_SURFACES) {
+    if (allow && !allow.has(cs.childTable)) continue;   // child not in the slice (its parent wasn't selected)
     for (const parent of (parentsByTable[cs.parentTable] || [])) {
       if (cs.parentKey === 'name' && !parent.name) continue;
       const baseUrl = `${base}/api/now/table/${cs.childTable}?sysparm_query=${encodeURIComponent(cs.filter(parent) + '^ORDERBYsys_id')}&sysparm_exclude_reference_link=true`;
       let rows = [];
       try {
-        const out = await fetchAllRows(f, baseUrl, headers);
+        const out = await fetchAllRows(f, baseUrl, headers, sliceCap);
         rows = out.rows;
         if (out.capped) artifacts.push({ __warn: `${cs.childTable} (parent ${parent.name || parent.sysId}) -> capped at ${maxRows()} rows; import is PARTIAL (raise SN_CAPTURE_MAX_ROWS)` });
       } catch (e) { artifacts.push({ __error: `${cs.childTable} -> ${e.message}` }); continue; }
@@ -295,13 +353,15 @@ function normalizeSweep(s) {
   return s;
 }
 
-async function sweepScopeMetadata({ scope, instance, user, pw, fetchImpl }) {
+async function sweepScopeMetadata({ scope, instance, user, pw, fetchImpl, slice }) {
   try {
     const f = makeFetch(fetchImpl);
     const auth = 'Basic ' + Buffer.from(`${user}:${pw}`).toString('base64');
     const base = normalizeInstanceUrl(instance);
     const headers = { Authorization: auth, Accept: 'application/json' };
-    const q = 'sys_scope.scope=' + scope + '^ORDERBYsys_id';
+    // Bound the completeness sweep to the SAME slice as the capture, so a slice ingest
+    // measures completeness against the slice — not the entire (possibly huge) scope.
+    const q = sliceMetadataQuery(scope, slice);
     const baseUrl = `${base}/api/now/table/sys_metadata?sysparm_query=${encodeURIComponent(q)}&sysparm_fields=${encodeURIComponent(SWEEP_FIELDS.join(','))}&sysparm_exclude_reference_link=true`;
     const { rows, capped } = await fetchAllRows(f, baseUrl, headers);
     const sweep = buildSweep(rows);
@@ -455,7 +515,7 @@ function findWbBySysId(projectId, sysId) {
     let row;
     try {
       row = db.prepare(
-        `SELECT ${t.pk} AS id, ${t.nameCol} AS name, source_hash, source_sys_id, updated_at AS wb_updated_at
+        `SELECT ${t.pk} AS id, ${t.nameCol} AS name, source_hash, source_fluent, source_sys_id, updated_at AS wb_updated_at
          FROM ${t.table} WHERE source_sys_id = ? AND project_id = ?
            AND (lifecycle_status IS NULL OR lifecycle_status != 'retired') LIMIT 1`
       ).get(sysId, projectId);
@@ -495,7 +555,7 @@ function findWbBySlug(projectId, slug) {
     let row;
     try {
       row = db.prepare(
-        `SELECT ${t.pk} AS id, ${t.nameCol} AS name, source_hash, source_sys_id, slug, updated_at AS wb_updated_at
+        `SELECT ${t.pk} AS id, ${t.nameCol} AS name, source_hash, source_fluent, source_sys_id, slug, updated_at AS wb_updated_at
          FROM ${t.table} WHERE slug = ? AND project_id = ?
            AND (lifecycle_status IS NULL OR lifecycle_status != 'retired') LIMIT 1`
       ).get(slug, projectId);
@@ -513,6 +573,10 @@ function findWbBySlug(projectId, slug) {
 function classifyArtifacts(artifacts, projectId, opts = {}) {
   const res = { unchanged: [], changed: [], new: [], drift: [], errors: [], warnings: [] };
   const seen = new Set();
+  // Slice bounding (#A3): under a bounded ingest, only Workbench rows whose source_table is
+  // IN the slice are drift candidates — otherwise every out-of-slice row would falsely read as
+  // "deleted upstream". null ⇒ whole-scope (all provenance rows are candidates, legacy).
+  const sliceSurfaces = (opts.sliceSurfaces instanceof Set && opts.sliceSurfaces.size) ? opts.sliceSurfaces : null;
   // Both-side-edit detection (#84): the one deterministic fact the reconciler can't infer.
   // A Workbench row whose updated_at is AFTER the project's last sync was touched by a
   // human (sync writes always land BEFORE markSynced() advances sn_last_synced_at), so a
@@ -555,8 +619,14 @@ function classifyArtifacts(artifacts, projectId, opts = {}) {
       const curMod  = (cur && cur.sys_mod_count != null && cur.sys_mod_count !== '') ? Number(cur.sys_mod_count) : null;
       const prevMod = (prevSig && prevSig.sys_mod_count != null) ? Number(prevSig.sys_mod_count) : null;
       const snUnmoved = (curMod !== null && prevMod !== null && curMod === prevMod);
+      // R7: deterministic SN-SIDE field delta (base source_fluent vs current salient — both
+      // ServiceNow-shaped, always sound). Names WHICH ServiceNow fields moved since the last
+      // sync so the reconciler prompt / conflict story can be specific, and so a generic
+      // artifact can be merged field-by-field downstream. Context only — no gating change here.
+      const delta = snFieldDelta(wb.source_fluent, a.salient);
       res.changed.push({
         ...a, wb_id: wb.id, wb_table: wb.table, prev_hash: wb.source_hash || null,
+        base_snapshot: wb.source_fluent || null,
         wb_updated_at: wb.wb_updated_at || null,
         sn_last_synced_at: lastSync,
         wb_edited_since_sync: !!(lastSync && wb.wb_updated_at && wb.wb_updated_at > lastSync),
@@ -565,6 +635,7 @@ function classifyArtifacts(artifacts, projectId, opts = {}) {
         sn_updated_on: cur ? (cur.sys_updated_on || null) : null,
         sn_updated_by: cur ? (cur.sys_updated_by || null) : null,
         sn_unmoved: snUnmoved,
+        sn_changed_fields: delta.available ? delta.changed : null,
       });
     }
   }
@@ -578,12 +649,15 @@ function classifyArtifacts(artifacts, projectId, opts = {}) {
     let rows = [];
     try {
       rows = db.prepare(
-        `SELECT ${t.pk} AS id, ${t.nameCol} AS name, source_sys_id FROM ${t.table}
+        `SELECT ${t.pk} AS id, ${t.nameCol} AS name, source_sys_id, source_table FROM ${t.table}
          WHERE project_id = ? AND source_sys_id IS NOT NULL
            AND (lifecycle_status IS NULL OR lifecycle_status != 'retired')`
       ).all(projectId);
     } catch { continue; }
     for (const r of rows) if (!seen.has(r.source_sys_id) && !driftSeen.has(r.source_sys_id)) {
+      // Under a slice, a row is only a drift candidate if its surface was actually captured.
+      // A row with no source_table is skipped when slicing (we can't confirm it's in-scope).
+      if (sliceSurfaces && (!r.source_table || !sliceSurfaces.has(r.source_table))) continue;
       driftSeen.add(r.source_sys_id);
       res.drift.push({ wb_table: t.table, wb_type: t.type, wb_id: r.id, name: r.name, source_sys_id: r.source_sys_id });
     }
@@ -599,4 +673,4 @@ function classifyArtifacts(artifacts, projectId, opts = {}) {
   return res;
 }
 
-module.exports = { SN_SURFACES, WB_PROVENANCE_TABLES, hashArtifact, captureScope, fetchAllRows, findWbBySysId, findWbBySlug, parseWbTag, classifyArtifacts, makeFetch, sweepScopeMetadata, buildSweep, normalizeSweep, analyzeCompleteness, readChangeSignals, persistChangeSignals, sweepSignals };
+module.exports = { SN_SURFACES, WB_PROVENANCE_TABLES, hashArtifact, captureScope, fetchAllRows, findWbBySysId, findWbBySlug, parseWbTag, classifyArtifacts, makeFetch, sweepScopeMetadata, buildSweep, normalizeSweep, analyzeCompleteness, readChangeSignals, persistChangeSignals, sweepSignals, normalizeSlice, expandSliceSurfaces, sliceQuery, sliceMetadataQuery };
