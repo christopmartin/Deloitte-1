@@ -1053,10 +1053,7 @@ function renderQualityFindings(report) {
   const renderGroup = (sev, label, open) => {
     if (!bySeverity[sev].length) return;
     const color = sev === 'block' ? 'var(--color-danger)' : sev === 'warn' ? 'var(--color-warn)' : 'var(--color-text-muted)';
-    // el() always calls setAttribute even for undefined values (which stringifies
-    // to "open=\"undefined\"" and forces every <details> open) — only include the
-    // key at all when it should be present.
-    const details = el('details', open ? { open: '', style: { marginBottom: '8px' } } : { style: { marginBottom: '8px' } });
+    const details = el('details', { open, style: { marginBottom: '8px' } });
     details.appendChild(el('summary', { style: { cursor: 'pointer', fontSize: '12px', fontWeight: '500', color } },
       `${label} (${bySeverity[sev].length})`));
     bySeverity[sev].forEach(f => {

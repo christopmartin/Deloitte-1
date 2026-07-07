@@ -377,6 +377,11 @@ export function formatDateTime(iso) {
   } catch { return iso; }
 }
 
+// HTML boolean attributes: presence alone means true, regardless of value — so
+// setAttribute('disabled', false) still renders as disabled (stringifies to "false",
+// which is present). el() special-cases these: only set when truthy, otherwise remove.
+const BOOL_ATTRS = new Set(['disabled', 'checked', 'open', 'readonly', 'required', 'selected', 'multiple']);
+
 /**
  * Minimal DOM builder.
  * el('div', { className: 'foo', id: 'bar' }, child1, 'text')
@@ -389,6 +394,8 @@ export function el(tagName, attrs = {}, ...children) {
       else if (k === 'style' && typeof v === 'object') Object.assign(node.style, v);
       else if (k.startsWith('on') && typeof v === 'function') {
         node.addEventListener(k.slice(2).toLowerCase(), v);
+      } else if (BOOL_ATTRS.has(k)) {
+        if (v) node.setAttribute(k, ''); else node.removeAttribute(k);
       } else {
         node.setAttribute(k, v);
       }
