@@ -7,7 +7,7 @@
  * cross-scope net-new for governance), then deep-capture one scope to edit its design.
  * Nothing is written.
  */
-import { apiFetch, el, showToast, getCurrentProjectId } from '../app.js';
+import { apiFetch, el, showToast, getCurrentProjectId, navigate } from '../app.js';
 
 function num(n) { return (n == null) ? '—' : String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
 function when(ts) { return ts ? String(ts).slice(0, 16).replace('T', ' ') : '—'; }
@@ -60,6 +60,30 @@ export async function render(container) {
     el('div', {}, el('strong', {}, 'Credentials: '), project.has_sn_password ? `${project.sn_user || '(user)'} / ••••••••` : '(server env fallback)'),
     el('div', { style: 'color:var(--text-muted);margin-top:4px' },
       'The sweep reflects only what this account can read — ServiceNow hides rows it lacks access to silently.')));
+
+  // ── This project's import slice (reference only — the sweep below always covers the
+  // whole instance; this just tells you what THIS project's own ingest is bounded to,
+  // so a collision/drift finding above can be read in that context) ──────────────────
+  if (project.servicenow_scope) {
+    const sliceLine = el('div', { style: 'font-size:12px;margin-top:10px;padding:8px 10px;background:var(--color-bg-panel,#f6f8fa);border:1px solid var(--color-border);border-radius:var(--radius)' }, 'This project’s import slice: loading…');
+    runBody.appendChild(sliceLine);
+    try {
+      const ip = await apiFetch(`/projects/${pid}/servicenow/import-profile`);
+      sliceLine.innerHTML = '';
+      if (ip && ip.source === 'saved' && ip.profile && (ip.profile.include_surfaces || []).length) {
+        const surfaces = ip.profile.include_surfaces;
+        sliceLine.appendChild(el('strong', {}, `This project's import (${project.servicenow_scope}): `));
+        sliceLine.appendChild(document.createTextNode(`bounded to ${surfaces.length} surface${surfaces.length === 1 ? '' : 's'} — ${surfaces.slice(0, 8).join(', ')}${surfaces.length > 8 ? ', …' : ''}. `));
+      } else {
+        sliceLine.appendChild(el('strong', {}, `This project's import (${project.servicenow_scope}): `));
+        sliceLine.appendChild(document.createTextNode('whole scope, no slice set. '));
+      }
+      sliceLine.appendChild(document.createTextNode('The sweep below always covers the whole instance regardless. '));
+      const editLink = el('a', { style: 'color:var(--color-accent);cursor:pointer;text-decoration:none' }, 'Edit in Assessment ↗');
+      editLink.addEventListener('click', (e) => { e.preventDefault(); navigate('servicenow_assessment'); });
+      sliceLine.appendChild(editLink);
+    } catch { sliceLine.textContent = `This project's import (${project.servicenow_scope}): whole scope (import profile unavailable).`; }
+  }
 
   const runBtn = el('button', { className: 'btn btn-primary' }, 'Run catalog sweep');
   const out = el('div', { style: 'margin-top:8px' });

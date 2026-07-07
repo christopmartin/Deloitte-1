@@ -6072,10 +6072,14 @@ app.get('/api/v1/projects/:id/build-export', async (req, res) => {
 
   const allSections = ['use_cases','workflows','agents','tools','guardrails','data_sources','test_scenarios','user_stories','governance','relationships','cost_summary',
     'data_models','form_designs','business_logic','catalog_items','integrations','sn_generic_artifacts',
+    'requirements','best_practices',
     // config-driven Tier-A entities (Information Layer + NL rules) — derived from registry display blocks
     ...registry.entitiesWithDisplay().map(e => e.display.data_key)];
   const sectionsParam = req.query.sections || 'all';
   const sections = sectionsParam === 'all' ? allSections : sectionsParam.split(',').map(s => s.trim()).filter(s => allSections.includes(s));
+  // Delta mode: only include entity rows updated after the last Build Spec export.
+  const deltaMode = req.query.delta === 'true' || req.query.delta === '1';
+  const sinceTs   = deltaMode ? (project.last_build_spec_generated_at || null) : null;
 
   // Baseline — only for header stamping, never filters SQL queries
   let baseline = null;
@@ -6448,6 +6452,70 @@ app.get('/api/v1/projects/:id/build-export', async (req, res) => {
     data.cost_summary = { assumption, use_cases: ucCosts };
   }
 
+  // ── Requirements (FR + NFR) ────────────────────────────────────────────────────
+  if (sections.includes('requirements')) {
+    data.functional_reqs = db.prepare(
+      `SELECT fr.*, uc.slug AS use_case_slug, uc.title AS use_case_title
+       FROM asdlc_functional_req fr
+       LEFT JOIN asdlc_use_case uc ON uc.use_case_id = fr.use_case_id
+       WHERE fr.project_id = ? AND (fr.status IS NULL OR fr.status != 'deleted')
+       ORDER BY fr.slug`
+    ).all(req.params.id).map(r => ({
+      ...r,
+      actors: parseJson(r.actors),
+      acceptance_criteria: parseJson(r.acceptance_criteria),
+      dependencies: parseJson(r.dependencies),
+    }));
+    data.nonfunctional_reqs = db.prepare(
+      "SELECT * FROM asdlc_nonfunctional_req WHERE project_id = ? AND (status IS NULL OR status != 'deleted') ORDER BY slug"
+    ).all(req.params.id).map(r => ({
+      ...r,
+      dependencies: parseJson(r.dependencies),
+    }));
+  }
+
+  // ── Best Practices / AI Guidance ──────────────────────────────────────────────
+  if (sections.includes('best_practices')) {
+    data.best_practices = db.prepare(
+      "SELECT * FROM asdlc_best_practice WHERE is_active = 1 AND (platform = 'any' OR platform = 'servicenow' OR platform IS NULL) ORDER BY sort_order, title"
+    ).all();
+  }
+
+  // ── Delta filter: trim design sections to records changed since last export ──
+  // Must run after ALL data-gather blocks so every array is populated before filtering.
+  if (deltaMode && sinceTs) {
+    const after = r => !r.updated_at || r.updated_at > sinceTs;
+    ['use_cases','agents','tools','data_models','form_designs','business_logic',
+     'catalog_items','integrations','sn_generic_artifacts',
+     'functional_reqs','nonfunctional_reqs'].forEach(k => {
+      if (Array.isArray(data[k])) data[k] = data[k].filter(after);
+    });
+    // Workflows: include if the workflow itself OR any of its steps/participants changed
+    if (Array.isArray(data.workflows)) {
+      data.workflows = data.workflows.filter(wf =>
+        after(wf) ||
+        (wf.steps        || []).some(after) ||
+        (wf.participants || []).some(after)
+      );
+    }
+    // Config-driven Tier-A entities (dashboards, KPIs, NL rules, etc.)
+    for (const e of registry.entitiesWithDisplay()) {
+      const k = e.display.data_key;
+      if (Array.isArray(data[k])) data[k] = data[k].filter(after);
+    }
+    // Gather approved-CP summaries so the preamble can explain what drove this export
+    data._delta_context = {
+      since_ts: sinceTs,
+      cps: db.prepare(
+        "SELECT packet_code, summary, updated_at FROM asdlc_change_packet WHERE project_id = ? AND status = 'approved' AND updated_at > ? ORDER BY updated_at DESC LIMIT 20"
+      ).all(req.params.id, sinceTs),
+    };
+  } else if (deltaMode) {
+    // Delta requested but never exported before — note it; include everything
+    data._delta_context = { since_ts: null, cps: [] };
+  }
+  data._export_meta = { deltaMode, sinceTs };
+
   // Best-effort: resolve the configured runAsUser account's sys_id live, so the
   // Build Spec can pre-fill it instead of emitting a REPLACE_WITH_… placeholder.
   // Read-only single GET; any failure (no creds, unreachable, not found) just
@@ -6484,9 +6552,19 @@ app.get('/api/v1/projects/:id/build-export', async (req, res) => {
     }
   }
 
+  // Stamp last-export timestamp so subsequent delta exports know where to pick up.
+  // Skippable via ?stamp=0 for automated/test callers that don't want to advance the cursor.
+  if (req.query.stamp !== '0') {
+    try {
+      db.prepare("UPDATE asdlc_project SET last_build_spec_generated_at = ? WHERE project_id = ?")
+        .run(new Date().toISOString(), req.params.id);
+    } catch { /* non-critical; column may not exist on older DB */ }
+  }
+
   const dateStr  = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const code     = (project.project_code || project.project_name || 'project').replace(/\s+/g, '-');
-  const fileName = `${code}-build-spec-${dateStr}.md`;
+  const suffix   = deltaMode ? '-delta' : '';
+  const fileName = `${code}-build-spec${suffix}-${dateStr}.md`;
 
   res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
@@ -6611,6 +6689,7 @@ app.get('/api/v1/projects/:id/servicenow/delta-info', (req, res) => {
     generics: genericCounts,
     collision_warning_count: collisionWarnings.length,
     collision_warnings: collisionWarnings.slice(0, 10),
+    last_build_spec_generated_at: project.last_build_spec_generated_at || null,
   });
 });
 
@@ -7281,6 +7360,76 @@ function buildExportMarkdown(project, baseline, sections, data) {
   lines.push(`| Exported | ${ts} |`);
   lines.push('');
 
+  // ── Build Readiness ──────────────────────────────────────────────────────────
+  // Emitted immediately after the header so Claude Code can see at a glance
+  // whether this spec is fully self-contained or needs manual steps before install.
+  {
+    const snRunAsForBR  = data.sn_runas || null;
+    const resolvedRunAs = !!(snRunAsForBR && snRunAsForBR.sys_id);
+    const dmCount       = sections.includes('data_models')    ? (data.data_models    || []).length : null;
+    const blCount       = sections.includes('business_logic') ? (data.business_logic || []).length : null;
+    const agentCount    = sections.includes('agents')         ? (data.agents         || []).length : null;
+    const wfCount       = sections.includes('workflows')      ? (data.workflows      || []).length : null;
+
+    lines.push('---'); lines.push('');
+    lines.push('## Build Readiness');
+    lines.push('');
+    lines.push('> Quick-check before opening the SDK. Items marked ❌ **must** be resolved manually before running `npx now-sdk install`.');
+    lines.push('');
+    lines.push('| Item | Status |');
+    lines.push('|---|---|');
+
+    if (resolvedRunAs) {
+      const who = [snRunAsForBR.user_name, snRunAsForBR.name].filter(Boolean).join(' / ');
+      lines.push(`| \`runAsUser\` sys_id | ✅ Resolved at export — \`${snRunAsForBR.sys_id}\`${who ? ` (${who})` : ''} |`);
+    } else if (project.sn_user || project.servicenow_instance) {
+      lines.push(`| \`runAsUser\` sys_id | ❌ **Manual step required** — account \`${project.sn_user || '?'}\` on \`${project.servicenow_instance || '?'}\` — look up sys_id via SDK query before install (see Pre-flight §1) |`);
+    } else {
+      lines.push(`| \`runAsUser\` sys_id | ❌ **Manual step required** — no account configured; resolve sys_id before install (see Pre-flight §1) |`);
+    }
+
+    if (dmCount !== null && blCount !== null && blCount > 0 && dmCount === 0) {
+      lines.push(`| Table prerequisites | ❌ **${blCount} business rule(s) but 0 data models** — the tables these rules target must already exist on the instance (or be added to this spec). Deploy tables before business logic. |`);
+    } else if (dmCount !== null && blCount !== null && dmCount > 0 && blCount > 0) {
+      lines.push(`| Table prerequisites | ⚠ ${dmCount} table(s) + ${blCount} business rule(s) — deploy data models in a **separate first pass** before business rules (see Deployment Sequence step 1) |`);
+    } else {
+      lines.push(`| Table prerequisites | ✅ No cross-dependency detected in this export |`);
+    }
+
+    if (agentCount !== null && wfCount !== null && wfCount > 0 && agentCount === 0) {
+      lines.push(`| Agent-less workflows | ⚠ ${wfCount} workflow(s) with no agents in this spec — **omit \`team\` block** on all of them (see Common Mistakes) |`);
+    } else {
+      lines.push(`| Agent-less workflows | ✅ |`);
+    }
+
+    lines.push('');
+  }
+
+  // ── Delta preamble (only when generated in delta mode) ─────────────────────
+  const exportMeta = data._export_meta || {};
+  if (exportMeta.deltaMode) {
+    lines.push('---'); lines.push('');
+    lines.push('> ⚠️ **Delta Build Spec** — Contains only entities changed since the last export.');
+    if (exportMeta.sinceTs) {
+      lines.push(`> Last export: **${exportMeta.sinceTs.slice(0, 10)}**. Only records with \`updated_at\` after that date are included in each design section.`);
+    } else {
+      lines.push('> No prior export found — this is the first export so all records are included (identical to a full spec).');
+    }
+    lines.push('> Claude Code should **PATCH** existing records and **POST** new ones. Do **not** redeploy or overwrite artifacts absent from this spec.');
+    lines.push('');
+    const deltaCtx = data._delta_context || {};
+    if (deltaCtx.cps && deltaCtx.cps.length) {
+      lines.push('### Change Context (Approved CPs driving this export)');
+      lines.push('');
+      lines.push('| CP | Summary | Date |');
+      lines.push('|---|---|---|');
+      for (const cp of deltaCtx.cps) {
+        lines.push(`| ${cp.packet_code || ''} | ${mdCell(cp.summary || '(no summary)')} | ${(cp.updated_at || '').slice(0, 10)} |`);
+      }
+      lines.push('');
+    }
+  }
+
   // ── Instance Context (whole-instance collision awareness) ───────────────────
   // What already exists on the target instance, + ⚠️ collisions for names this spec
   // would CREATE. Computed in the handler from the latest catalog (data._instance_context).
@@ -7309,7 +7458,7 @@ function buildExportMarkdown(project, baseline, sections, data) {
   lines.push('| Artifact | Required Fields |');
   lines.push('|---|---|');
   lines.push('| AI Agent | `$id`, `name`, `description`, `agentRole`, `securityAcl`, `versionDetails` (array) |');
-  lines.push('| AI Agentic Workflow | `$id`, `name`, `description`, `securityAcl`, `team.$id`, `versions` (array) |');
+  lines.push('| AI Agentic Workflow | `$id`, `name`, `description`, `securityAcl`, `team.$id` *(only when agents are linked — omit entirely for zero-agent workflows)*, `versions` (array) |');
   lines.push('| All tools | `name`, `type` |');
   lines.push('| All versions | `name`, `number`, `state`, `instructions` |');
   lines.push('');
@@ -7319,13 +7468,14 @@ function buildExportMarkdown(project, baseline, sections, data) {
   lines.push('### Deployment Sequence');
   lines.push('');
   lines.push('0. **Initialize the project before installing.** A fresh project folder needs `npx now-sdk init --auth` to create the `sys_scope` record on the instance and write `scopeId` back into `now.config.json`. `now-sdk install` will **not** create the scope — it fails if `scopeId` is absent.');
-  lines.push('1. Define `securityAcl` first (with `$id` and `type`)');
-  lines.push('2. Configure tools — priority order: OOB → reference-based → CRUD → script (last resort)');
-  lines.push('3. Author `instructions` referencing tool names explicitly; include failure contingencies');
-  lines.push('4. Define `versionDetails`/`versions` (1+ required, `state: "published"`)');
-  lines.push('5. **Workflows reference agents by real `sys_id` — plan for a two-pass install.** On the first install, `team.members` referenced via the `Record()`/`Now.ID` coalesce create empty **stub** agent records rather than resolving to the real agents. Install once to obtain the real agent `sys_id`s, hardcode those strings into `team.members`, then rebuild and reinstall.');
-  lines.push('6. Configure `triggerConfig` — agents use `"nap"` or `"nap_and_va"`; workflows use `"Now Assist Panel"`');
-  lines.push('7. Validate: query `sn_aia_agent` (agents) or `sn_aia_usecase` (workflows) to verify deployment');
+  lines.push('1. **Deploy data models (tables + fields) before anything else.** Business rules, client scripts, and UI actions are table-scoped — they fail silently or error on install if the target table does not exist. Run an isolated first `now-sdk install` pass with only data models, confirm the tables are live on the instance, then run the full install for all remaining artifacts.');
+  lines.push('2. Define `securityAcl` (with `$id` and `type`)');
+  lines.push('3. Configure tools — priority order: OOB → reference-based → CRUD → script (last resort)');
+  lines.push('4. Author `instructions` referencing tool names explicitly; include failure contingencies');
+  lines.push('5. Define `versionDetails`/`versions` (1+ required, `state: "published"`)');
+  lines.push('6. **Workflows reference agents by real `sys_id` — plan for a two-pass install.** On the first install, `team.members` referenced via the `Record()`/`Now.ID` coalesce create empty **stub** agent records rather than resolving to the real agents. Install once to obtain the real agent `sys_id`s, hardcode those strings into `team.members`, then rebuild and reinstall.');
+  lines.push('7. Configure `triggerConfig` — agents use `"nap"` or `"nap_and_va"`; workflows use `"Now Assist Panel"`');
+  lines.push('8. Validate: query `sn_aia_agent` (agents) or `sn_aia_usecase` (workflows) to verify deployment');
   lines.push('');
 
   lines.push('### ⚠ Round-Trip Identity Rules (read before deploying)');
@@ -7447,6 +7597,8 @@ function buildExportMarkdown(project, baseline, sections, data) {
   lines.push('- [ ] Using `GlideRecord` in script tools — always use `GlideRecordSecure`');
   lines.push('- [ ] Script tool inputs defined as object (must be **array**); omit `inputSchema` (auto-generated)');
   lines.push('- [ ] Deploying a Tier-A generic artifact independently from its Level-1 row — they form a single SDK artifact; use the Delta Export which handles the pairing, or deploy both in the same install pass');
+  lines.push('- [ ] Creating a `team` block when the workflow has **zero agents linked** — this generates non-unique stub records that collide on install. If a workflow has no agents, **omit `team` entirely** rather than generating an empty or placeholder block.');
+  lines.push('- [ ] Attempting raw REST calls, `Invoke-WebRequest`, or PowerShell credential extraction to resolve a missing `sys_id` — the SDK already holds valid credentials; use `npx now-sdk query` instead, and if that fails, stop and ask the human. Never improvise an alternative auth path.');
   lines.push('');
 
   // ── ServiceNow Pre-flight Checklist ────────────────────────────────────────
@@ -7463,6 +7615,7 @@ function buildExportMarkdown(project, baseline, sections, data) {
   lines.push('- [ ] **Use the Claude user\'s saved ServiceNow credentials (the `now-sdk auth` alias) — never the admin profile.** Deploy under the already-authenticated non-admin alias shown by `now-sdk auth --list`; do not switch to an admin account or prompt for admin credentials to get around an auth/permission error.');
   lines.push('- [ ] For a fresh project folder, run `npx now-sdk init --auth` to create the `sys_scope` record on the instance and write `scopeId` into `now.config.json`. `now-sdk install` will not create the scope.');
   lines.push('- [ ] Pin the build to this one project folder. Reading or writing other scoped-app folders mid-session risks cross-contamination.');
+  lines.push('- [ ] **Never inspect credential storage files, extract OAuth tokens, or make raw REST/PowerShell calls to resolve missing `sys_id`s.** The SDK holds valid credentials — use `npx now-sdk query --table <table> --filter "<field>=<value>" --fields sys_id,name` for any lookup. If `now-sdk query` fails, stop and ask the human — do **not** improvise an alternative auth path.');
   lines.push('');
 
   // Service accounts
@@ -7480,7 +7633,15 @@ function buildExportMarkdown(project, baseline, sections, data) {
   } else if (project.sn_user || project.servicenow_instance) {
     const acct = project.sn_user || '(not set)';
     const inst = project.servicenow_instance || '(not set)';
-    lines.push(`> **Configured for this project:** account **\`${acct}\`** on **\`${inst}\`**. Look this user up in \`sys_user\` and record its \`sys_id\` for the placeholder below.`);
+    lines.push(`> ❌ **STOP — \`runAsUser\` sys_id is unresolved.** Do not run \`npx now-sdk install\` until the placeholder \`REPLACE_WITH_AGENT_SERVICE_ACCOUNT_SYS_ID\` is replaced with a real sys_id.`);
+    lines.push(`>`);
+    lines.push(`> **Configured account:** \`${acct}\` on \`${inst}\``);
+    lines.push(`>`);
+    lines.push('> **To resolve using only the SDK (no raw REST):**');
+    lines.push(`> \`\`\`bash`);
+    lines.push(`> npx now-sdk query --table sys_user --filter "user_name=${acct}" --fields sys_id,user_name,name`);
+    lines.push(`> \`\`\``);
+    lines.push(`> If \`npx now-sdk query\` is unavailable or returns no results, **ask the human to provide the sys_id manually**. Do NOT make raw REST calls, extract OAuth tokens, or read credential files to obtain it.`);
     lines.push('');
   }
   const runAsVal = (snRunAs && snRunAs.sys_id) ? `\`${snRunAs.sys_id}\`` : '`REPLACE_WITH_AGENT_SERVICE_ACCOUNT_SYS_ID`';
@@ -7605,6 +7766,54 @@ function buildExportMarkdown(project, baseline, sections, data) {
     lines.push('Before go-live, verify the Now Assist entitlement settings and cost-per-assist value');
     lines.push('in the **Cost Management** admin page within the workbench.');
     lines.push('');
+  }
+
+  // ── Requirements (FR + NFR) ─────────────────────────────────────────────────
+  if (sections.includes('requirements') && (data.functional_reqs !== undefined || data.nonfunctional_reqs !== undefined)) {
+    lines.push('---'); lines.push('');
+    lines.push('## Requirements'); lines.push('');
+    lines.push('> Functional and non-functional requirements that define what the application must do and how it must perform.');
+    lines.push('> Each artifact (agent, workflow, tool) should implement the requirements linked to it.');
+    lines.push('');
+    const frs  = data.functional_reqs    || [];
+    const nfrs = data.nonfunctional_reqs || [];
+    if (!frs.length && !nfrs.length) {
+      lines.push('*No requirements defined.*'); lines.push('');
+    }
+    if (frs.length) {
+      lines.push('### Functional Requirements'); lines.push('');
+      lines.push('| Slug | Priority | Title | Use Case | Status |');
+      lines.push('|---|---|---|---|---|');
+      for (const fr of frs) {
+        const ucRef = fr.use_case_slug || (fr.use_case_id ? fr.use_case_id.slice(0, 8) : '—');
+        lines.push(`| ${fr.slug || ''} | ${fr.priority || ''} | ${mdCell(fr.title)} | ${ucRef} | ${fr.status || ''} |`);
+      }
+      lines.push('');
+      // Detail blocks for FRs that have acceptance criteria or rich prose
+      for (const fr of frs) {
+        const ac = Array.isArray(fr.acceptance_criteria) ? fr.acceptance_criteria : [];
+        if (!fr.description && !ac.length && !(fr.actors || []).length && !fr.preconditions && !fr.postconditions) continue;
+        lines.push(`#### ${fr.slug || 'FR'}: ${mdCell(fr.title)}`); lines.push('');
+        if (fr.description) { lines.push(fr.description); lines.push(''); }
+        if (fr.actors && fr.actors.length) lines.push(`**Actors:** ${fr.actors.join(', ')}`);
+        if (fr.preconditions)  lines.push(`**Preconditions:** ${fr.preconditions}`);
+        if (fr.postconditions) lines.push(`**Postconditions:** ${fr.postconditions}`);
+        if (ac.length) {
+          lines.push('**Acceptance Criteria:**');
+          ac.forEach(c => lines.push(`- ${typeof c === 'string' ? c : (c.criterion || c.text || JSON.stringify(c))}`));
+        }
+        lines.push('');
+      }
+    }
+    if (nfrs.length) {
+      lines.push('### Non-Functional Requirements'); lines.push('');
+      lines.push('| Slug | Category | Priority | Title | Measurable Target | Status |');
+      lines.push('|---|---|---|---|---|---|');
+      for (const nfr of nfrs) {
+        lines.push(`| ${nfr.slug || ''} | ${mdCell(nfr.category)} | ${nfr.priority || ''} | ${mdCell(nfr.title)} | ${mdCell(nfr.measurable_target)} | ${nfr.status || ''} |`);
+      }
+      lines.push('');
+    }
   }
 
   // ── 1. Application Overview ─────────────────────────────────────────────────
@@ -8354,6 +8563,36 @@ function buildExportMarkdown(project, baseline, sections, data) {
         lines.push('### Implementation Artifacts — do NOT redeploy');
         lines.push('');
         lines.push(`This spec contains **${implArtifactCount}** implementation artifact(s) (Business Rules, Script Includes, Client Scripts, UI Actions, UI Policies) captured for drift detection. **Do not regenerate these from this spec.** They live in ServiceNow and must be edited there directly. Use them for collision awareness only.`);
+        lines.push('');
+      }
+    }
+  }
+
+  // ── AI Guidance & Best Practices ────────────────────────────────────────────
+  if (sections.includes('best_practices') && data.best_practices !== undefined) {
+    lines.push('---'); lines.push('');
+    lines.push('## AI Guidance & Best Practices'); lines.push('');
+    lines.push('> **Apply these rules throughout the build.** They represent accumulated platform knowledge and must guide every design decision Claude Code makes.');
+    lines.push('');
+    const bps = data.best_practices || [];
+    if (!bps.length) {
+      lines.push('*No best practices configured.*'); lines.push('');
+    } else {
+      const byScope = {};
+      for (const bp of bps) {
+        const s = bp.scope || 'global';
+        if (!byScope[s]) byScope[s] = [];
+        byScope[s].push(bp);
+      }
+      for (const [scope, scopeBps] of Object.entries(byScope).sort((a, b) => a[0].localeCompare(b[0]))) {
+        const heading = scope === 'global'
+          ? 'General'
+          : scope.charAt(0).toUpperCase() + scope.slice(1).replace(/_/g, ' ');
+        lines.push(`### ${heading}`); lines.push('');
+        for (const bp of scopeBps) {
+          const rule = bp.rule_text ? `: ${bp.rule_text}` : '';
+          lines.push(`- **${bp.title}**${rule}`);
+        }
         lines.push('');
       }
     }

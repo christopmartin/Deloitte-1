@@ -7,6 +7,7 @@ const SECTION_GROUPS = [
   {
     label: 'Design Entities',
     items: [
+      { id: 'requirements', label: 'Requirements (FR/NFR)' },
       { id: 'use_cases',  label: 'Use Cases'  },
       { id: 'workflows',  label: 'Workflows'  },
       { id: 'agents',     label: 'Agents'     },
@@ -22,6 +23,7 @@ const SECTION_GROUPS = [
   {
     label: 'Supporting Evidence',
     items: [
+      { id: 'best_practices', label: 'AI Guidance & Best Practices' },
       { id: 'guardrails',     label: 'Guardrails'      },
       { id: 'data_sources',   label: 'Data Sources'    },
       { id: 'test_scenarios', label: 'Test Scenarios'  },
@@ -44,15 +46,19 @@ const SECTION_GROUPS = [
 ];
 
 // ─── Module-level state ───────────────────────────────────────────────────────
-let _projectId       = null;
-let _baselineSelect  = null;
-let _downloadBtn     = null;
-let _snDeltaBtn      = null;
-let _snDeltaNote     = null;
-let _snDeltaCpList   = null;
-let _previewEl       = null;
-let _allCheckboxes   = [];
-let _aiReviewChk     = null;
+let _projectId              = null;
+let _baselineSelect         = null;
+let _downloadBtn            = null;
+let _snDeltaBtn             = null;
+let _snDeltaNote            = null;
+let _snDeltaCpList          = null;
+let _previewEl              = null;
+let _allCheckboxes          = [];
+let _aiReviewChk            = null;
+let _deltaRadioFull         = null;
+let _deltaRadioDelta        = null;
+let _deltaModeLabelEl       = null;
+let _lastBuildSpecDate      = null;   // ISO string from server, null if never exported
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 function injectStyles() {
@@ -441,6 +447,36 @@ function buildControls(card, projects) {
 
   card.appendChild(el('hr', { className: 'be-divider' }));
 
+  // ── Export mode: Full vs Delta ────────────────────────────────────────────
+  card.appendChild(el('div', { className: 'be-sections-title' }, 'Export Mode'));
+
+  _deltaRadioFull = el('input', { type: 'radio', id: 'be-radio-full', name: 'be-export-mode', value: 'full' });
+  _deltaRadioFull.checked = true;
+  card.appendChild(el('label', { className: 'be-chk-label', for: 'be-radio-full' },
+    _deltaRadioFull, 'Full specification'));
+
+  _deltaRadioDelta = el('input', { type: 'radio', id: 'be-radio-delta', name: 'be-export-mode', value: 'delta' });
+  _deltaModeLabelEl = el('span', {}, 'Delta only (changes since last export)');
+  card.appendChild(el('label', { className: 'be-chk-label', for: 'be-radio-delta' },
+    _deltaRadioDelta, _deltaModeLabelEl));
+
+  const deltaModeHint = el('div', { style: 'font-size:11px;color:var(--text-muted);margin:-4px 0 10px 0' },
+    'Delta mode includes only records updated since the last export, limiting unintended changes in ServiceNow.');
+  card.appendChild(deltaModeHint);
+
+  // Update download button label when mode changes
+  const updateDownloadLabel = () => {
+    if (_deltaRadioDelta && _deltaRadioDelta.checked) {
+      _downloadBtn.textContent = '⬇  Delta Build Spec';
+    } else {
+      _downloadBtn.textContent = '⬇  Full Build Spec';
+    }
+  };
+  _deltaRadioFull.addEventListener('change', updateDownloadLabel);
+  _deltaRadioDelta.addEventListener('change', updateDownloadLabel);
+
+  card.appendChild(el('hr', { className: 'be-divider' }));
+
   // ── Optional AI review (additive; deterministic spec is unchanged) ─────────
   _aiReviewChk = el('input', { type: 'checkbox', id: 'be-chk-ai-review' });
   card.appendChild(el('label', { className: 'be-chk-label', for: 'be-chk-ai-review', style: 'margin-bottom:8px' },
@@ -448,7 +484,7 @@ function buildControls(card, projects) {
   card.appendChild(el('div', { style: 'font-size:11px;color:var(--text-muted);margin:-4px 0 10px 0' },
     'Adds an AI-written Executive Summary, gaps/completeness review, and implementation notes after the deterministic spec.'));
 
-  // ── Download button (Full Build Spec) ────────────────────────────────────
+  // ── Download button ───────────────────────────────────────────────────────
   _downloadBtn = el('button', { className: 'be-download-btn' }, '⬇  Full Build Spec');
   _downloadBtn.addEventListener('click', handleDownload);
   card.appendChild(_downloadBtn);
@@ -503,7 +539,19 @@ async function loadSnDeltaInfo(projectId) {
   if (!projectId) return;
   try {
     const info = await apiFetch(`/projects/${projectId}/servicenow/delta-info`);
-    if (!info.enabled) return; // not an SN-linked project — keep hidden
+
+    // Update delta mode label regardless of whether SN delta is enabled
+    _lastBuildSpecDate = info.last_build_spec_generated_at || null;
+    if (_deltaModeLabelEl) {
+      if (_lastBuildSpecDate) {
+        const d = _lastBuildSpecDate.slice(0, 10);
+        _deltaModeLabelEl.textContent = `Delta only (changes since ${d})`;
+      } else {
+        _deltaModeLabelEl.textContent = 'Delta only (no prior export — will include all)';
+      }
+    }
+
+    if (!info.enabled) return; // not an SN-linked project — keep SN buttons hidden
 
     // Show direction header + button whenever the project is SN-linked
     if (_snDeltaBtn._deployHdr) _snDeltaBtn._deployHdr.style.display = 'flex';
@@ -571,11 +619,23 @@ async function loadSnDeltaInfo(projectId) {
         }
       }
     }
+
+    // Update delta mode label with the last-export date
+    _lastBuildSpecDate = info.last_build_spec_generated_at || null;
+    if (_deltaModeLabelEl) {
+      if (_lastBuildSpecDate) {
+        const d = _lastBuildSpecDate.slice(0, 10);
+        _deltaModeLabelEl.textContent = `Delta only (changes since ${d})`;
+      } else {
+        _deltaModeLabelEl.textContent = 'Delta only (no prior export — will include all)';
+      }
+    }
   } catch (err) {
     // Non-fatal — SN delta is optional; hide button silently
     console.warn('[build_export] delta-info fetch failed:', err.message);
   }
 }
+
 
 // ─── Baseline loader ──────────────────────────────────────────────────────────
 async function loadBaselines(projectId) {
@@ -704,8 +764,14 @@ function handleDownload() {
   params.set('sections', checkedSections.join(','));
   if (_aiReviewChk?.checked) params.set('ai_review', '1');
 
+  const isDelta = _deltaRadioDelta?.checked;
+  if (isDelta) params.set('delta', '1');
+
   if (_aiReviewChk?.checked) {
     showToast('Generating AI review — the download may take a few seconds…', 'info');
+  } else if (isDelta) {
+    const since = _lastBuildSpecDate ? ` since ${_lastBuildSpecDate.slice(0, 10)}` : '';
+    showToast(`Generating delta build spec${since}…`, 'info');
   }
 
   // Direct navigation triggers browser file download (Content-Disposition: attachment)

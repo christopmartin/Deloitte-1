@@ -524,6 +524,11 @@ const MIGRATIONS = [
   // reserved for a future record-level narrowing (encoded query per surface) and unused today.
   // NULL / absent = capture the WHOLE scope (unchanged legacy behavior).
   "ALTER TABLE asdlc_project ADD COLUMN sn_import_profile_json TEXT",
+
+  // ── Build Spec export stamping ────────────────────────────────────────────────
+  // Track when a Build Spec was last generated so the delta-export mode knows
+  // which entity rows to include (only those updated after the last export timestamp).
+  "ALTER TABLE asdlc_project ADD COLUMN last_build_spec_generated_at TEXT",
 ];
 for (const migration of MIGRATIONS) {
   try { db.exec(migration); } catch { /* column already exists — safe to ignore */ }
