@@ -22,6 +22,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const aiConfig = require('./ai-config');
 const registry = require('./entity-registry');
 const { withWiki } = require('./wiki-context');
+const { directMapArtifact } = require('./sn-direct-map');
 
 let _client;
 function getClient() {
@@ -220,7 +221,22 @@ function parseFallback(resp) {
 /** Reverse-engineer ONE artifact → { source_sys_id, inferred, usage?, stub? }.
  *  Reuses the forward extract_<type> tool so the inferred design carries the FULL Level-1 field
  *  set (not a 1–2 field skeleton). Falls back to the offline stub with no API key / unknown type. */
-async function reverseEngineerOne(artifact, ctx = {}) {
+async function reverseEngineerOne(artifact, ctx = {}, opts = {}) {
+  // DETERMINISTIC FAST PATH (#101/#102/#103): record types whose Level-1 schema is a
+  // direct copy of ServiceNow data need no AI — map the raw capture straight into the
+  // extract-tool's entity_data shape and wrap with buildInferred. Zero tokens, no client.
+  // Business logic maps to name + logic_type only (narrative blank → "Explain with AI").
+  // `opts.forceAi` skips this (used by the on-request "Explain with AI" action to narrate
+  // a single business-logic record on demand).
+  const det = opts.forceAi ? null : directMapArtifact(artifact);
+  if (det) {
+    // confidence:1 — a direct field-copy is certain (not an AI guess), so it clears the
+    // gate's confidence floor and auto-applies instead of bouncing to HITL. buildInferred
+    // reads input.confidence for the envelope and strips it from entity_data.
+    const inferred = buildInferred(det.designType, { ...det.entity_data, confidence: 1 }, artifact);
+    return { source_sys_id: artifact.source_sys_id, inferred, deterministic: true };
+  }
+
   const client = getClient();
   const designType = SN_TABLE_TO_TYPE[artifact.source_table] || 'other';
   const tool = designType !== 'other' ? forwardTool(designType) : null;

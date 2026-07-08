@@ -258,7 +258,7 @@
           <span class="chip"><code>test-generator</code></span>
           <span class="chip"><code>traceability</code> / <code>req-linker</code></span>
           <span class="chip"><code>rasic-deriver</code> · <code>swimlane-deriver</code></span>
-          <span class="chip">ServiceNow: <code>sn-reverse-engineer</code> · <code>sn-reconcile</code> · <code>sn-review</code></span>
+          <span class="chip">ServiceNow: <code>sn-reverse-engineer</code> · <code>sn-reconcile</code> · <code>sn-review</code> · <code>sn-direct-map</code> (deterministic, no-AI)</span>
           <span class="chip"><code>ai-config</code> usage + cost logging</span>
         </div>
       </div>
@@ -433,9 +433,10 @@
       <div class="rolecard">
         <h4><span class="d ai"></span>ServiceNow Round-Trip AI Agents</h4>
         <ul>
-          <li><b>Reverse-Engineer</b> — live SN app → design <span class="model">· Opus 4.8 + thinking</span></li>
+          <li><b>Reverse-Engineer</b> — live SN app → design <span class="model">· Opus 4.8 + thinking</span> <em>(interpretive types only: AI agents, use cases, tools; #103)</em></li>
           <li><b>Reconcile</b> — merge against Workbench design <span class="model">· Opus 4.8</span></li>
           <li><b>Review</b> — validate reconciled output <span class="model">· Opus 4.8</span></li>
+          <li><b>Explain with AI</b> — on-request narration of one business-logic rule <span class="model">· Opus 4.8</span> <em>(#103)</em></li>
         </ul>
       </div>
       <div class="rolecard">
@@ -447,6 +448,7 @@
           <li><b>audit log</b> — field-level history</li>
           <li><b>capture · gate · seed</b> — pipeline plumbing</li>
           <li><b>sys_metadata sweep</b> — completeness + per-record change signals (#86)</li>
+          <li><b>sn-direct-map</b> — deterministic field-copy for literal SN types (catalog items, tables, forms, integrations, business logic); zero-AI capture, narrative on request (#103)</li>
         </ul>
       </div>
     </div>

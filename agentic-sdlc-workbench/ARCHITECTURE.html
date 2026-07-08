@@ -549,7 +549,8 @@ graph LR
           <tr><td><code>prompt-drafter.js</code></td><td><span class="badge badge-green">Quality</span></td><td>Sonnet</td><td>Draft agent system prompts from spec metadata</td></tr>
           <tr><td><code>sn-sync.js</code></td><td><span class="badge badge-teal">ServiceNow</span></td><td>Opus + thinking</td><td>Orchestrate full round-trip: capture → extract → reconcile</td></tr>
           <tr><td><code>sn-capture.js</code></td><td><span class="badge badge-teal">ServiceNow</span></td><td>N/A</td><td>Fetch SN source code via REST API → Fluent IR</td></tr>
-          <tr><td><code>sn-reverse-engineer.js</code></td><td><span class="badge badge-teal">ServiceNow</span></td><td>Opus + thinking</td><td>Extract Level-1 design from Fluent with sys_id provenance</td></tr>
+          <tr><td><code>sn-reverse-engineer.js</code></td><td><span class="badge badge-teal">ServiceNow</span></td><td>Opus + thinking</td><td>Extract Level-1 design — AI for interpretive types only (agents/use cases/tools); deterministic short-circuit for literal types (#103)</td></tr>
+          <tr><td><code>sn-direct-map.js</code></td><td><span class="badge badge-teal">ServiceNow</span></td><td>N/A</td><td>Deterministic field-copy for literal SN types (catalog items, tables, forms, integrations, business logic) — zero-AI capture; narrative on request (#103)</td></tr>
           <tr><td><code>sn-reconcile.js</code></td><td><span class="badge badge-teal">ServiceNow</span></td><td>Opus + thinking</td><td>Compare inbound SN changes vs workbench; stage as CP</td></tr>
           <tr><td><code>sn-assess.js</code></td><td><span class="badge badge-teal">ServiceNow</span></td><td>Opus + thinking</td><td>Read-only SN instance fit analysis; store sn_assessment row</td></tr>
           <tr><td><code>sn-review.js</code></td><td><span class="badge badge-teal">ServiceNow</span></td><td>Sonnet</td><td>Validate design vs SN naming and trigger conventions</td></tr>

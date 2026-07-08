@@ -301,6 +301,21 @@ async function captureScope({ scope, instance, user, pw, fetchImpl, slice }) {
       }
     }
   }
+
+  // Attach captured children to their parent artifact as a NON-salient `_children` list
+  // (added AFTER hashing, so identity/change-detection are untouched). The deterministic
+  // direct-map reads this to fold a table's columns / a catalog item's variables into the
+  // parent's Level-1 record instead of leaving those columns blank/AI-guessed.
+  const childrenByParent = {};
+  for (const art of artifacts) {
+    if (art.__error || !art.parent_source_sys_id) continue;
+    (childrenByParent[art.parent_source_sys_id] = childrenByParent[art.parent_source_sys_id] || []).push(art);
+  }
+  for (const art of artifacts) {
+    if (art.__error || !art.source_sys_id) continue;
+    const kids = childrenByParent[art.source_sys_id];
+    if (kids && kids.length) art._children = kids;
+  }
   return artifacts;
 }
 

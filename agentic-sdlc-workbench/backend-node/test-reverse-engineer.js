@@ -19,9 +19,15 @@ const assert = (c, m) => { if (c) { console.log('  ok  -', m); pass++; } else { 
   console.log('--- Phase C: reverse-engineer (stub mode) ---');
   const out = await re.reverseEngineer(artifacts, {});
   assert(out.length === 3, 'all artifacts processed');
-  assert(out.every(o => o.stub === true), 'stub mode engaged (no API key)');
+  // #101/#102/#103: deterministic types (sys_script, sys_db_object) take the direct-map
+  // fast path — no AI, no stub, `deterministic:true`. Only genuinely interpretive types
+  // (sn_aia_agent) fall back to the stub skeleton when there is no API key.
+  assert(out[0].stub === true && !out[0].deterministic, 'interpretive type (agent) → stub in no-key mode');
+  assert(out[1].deterministic === true && !out[1].stub, 'sys_script → deterministic direct-map (no AI)');
+  assert(out[2].deterministic === true && !out[2].stub, 'sys_db_object → deterministic direct-map (no AI)');
   assert(out[0].inferred.design_type === 'agent_spec', 'sn_aia_agent → agent_spec');
   assert(out[1].inferred.design_type === 'business_logic', 'sys_script → business_logic');
+  assert(out[1].inferred.entity_data.logic_type === 'business_rule' && !out[1].inferred.entity_data.plain_english, 'business_logic: logic_type set, narrative BLANK (Explain-with-AI on request)');
   assert(out[2].inferred.design_type === 'data_model', 'sys_db_object → data_model');
   assert(out.every(o => o.inferred.name && typeof o.inferred.confidence === 'number' && o.inferred.purpose), 'required inferred fields present');
   assert(out.every(o => o.source_sys_id), 'each result carries its source_sys_id');

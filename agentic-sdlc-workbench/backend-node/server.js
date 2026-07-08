@@ -5646,6 +5646,57 @@ app.post('/api/v1/projects/:id/nl-rules/reverse-engineer', async (req, res) => {
   res.json({ ...after, _cp: cpResult, _stub: !!result.stub, _confidence: rule.confidence });
 });
 
+// ── "Explain with AI" — on-request narration of ONE business_logic record ─────────────
+// Business logic imports deterministically with a BLANK plain-English narrative (#103): the
+// raw script is preserved for drift/redeploy and needs no AI. This endpoint narrates a single
+// record ON DEMAND — the only place the reverse-engineer AI runs for business logic — reading
+// the stored script (source_fluent) and forcing the AI path past the deterministic short-circuit.
+app.post('/api/v1/projects/:id/design/business-logic/:blId/explain', async (req, res) => {
+  const uid = userId(req);
+  const projectId = req.params.id;
+  const row = db.prepare('SELECT * FROM asdlc_business_logic WHERE business_logic_id = ? AND project_id = ?')
+    .get(req.params.blId, projectId);
+  if (!row) return res.status(404).json({ error: 'Business logic record not found in this project' });
+  if (!row.source_fluent) return res.status(400).json({ error: 'No captured script to explain (source_fluent is empty).' });
+
+  const artifact = {
+    source_table: row.source_table || 'sys_script',
+    source_sys_id: row.source_sys_id || null,
+    source_scope: row.source_scope || null,
+    name: row.name,
+    salient: { name: row.name, script: row.source_fluent },
+  };
+
+  let result;
+  try {
+    const { reverseEngineerOne } = require('./agent/sn-reverse-engineer');
+    result = await reverseEngineerOne(artifact, { projectId }, { forceAi: true });   // force AI past the deterministic short-circuit
+  } catch (err) {
+    return res.status(502).json({ error: `Explain failed: ${err.message}` });
+  }
+  const ed = (result.inferred && result.inferred.entity_data) || {};
+  const before = { plain_english: row.plain_english, when_runs: row.when_runs, conditions: row.conditions };
+  const after = {
+    plain_english: ed.plain_english || (result.inferred && result.inferred.behavior) || null,
+    when_runs:     ed.when_runs || null,
+    conditions:    ed.conditions || null,
+  };
+  db.prepare(`UPDATE asdlc_business_logic SET plain_english = ?, when_runs = ?, conditions = ?,
+      updated_by = ?, updated_at = datetime('now') WHERE business_logic_id = ?`)
+    .run(after.plain_english, after.when_runs, after.conditions, uid, row.business_logic_id);
+
+  const updated = db.prepare('SELECT * FROM asdlc_business_logic WHERE business_logic_id = ?').get(row.business_logic_id);
+  auditLog('asdlc_business_logic', row.business_logic_id, 'UPDATE', before, after, uid);
+  const diffs = [
+    { field: 'plain_english', old_value: before.plain_english, new_value: after.plain_english },
+    { field: 'when_runs',     old_value: before.when_runs,     new_value: after.when_runs },
+    { field: 'conditions',    old_value: before.conditions,    new_value: after.conditions },
+  ].filter(d => d.new_value != null);
+  const cpResult = createAutoApprovedCP(projectId, 'business_logic', row.business_logic_id, row.name, diffs, uid);
+
+  res.json({ ...updated, _cp: cpResult, _stub: !!result.stub });
+});
+
 // gaps: design entities (data models, workflows) with no documented NL rule, plus
 // captured scripts not yet reverse-engineered — drives the "add a rule" prompts.
 app.get('/api/v1/projects/:id/nl-rules/gaps', (req, res) => {

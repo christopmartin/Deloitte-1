@@ -38,6 +38,8 @@ const { reconcile } = require('./sn-reconcile');
 const { review } = require('./sn-review');
 const { buildArtifactRecord } = require('./sn-artifact');
 const { classifyFields, mergeSafe } = require('./three-way-merge');
+const { isDeterministicTable } = require('./sn-direct-map');
+const registry = require('./entity-registry');
 
 // ── Tier-B/C GENERIC plan (Phase 2) ──────────────────────────────────────────
 // Generic artifacts are deterministic ServiceNow captures, NOT business inferences,
@@ -294,6 +296,66 @@ function gateProposal(reviewed, opts = {}) {
   return { target: 'auto', auto_apply: true, reason: `approved, non-destructive, confidence ${conf.toFixed(2)} ≥ ${threshold}` };
 }
 
+// ── DETERMINISTIC changed-record plan (direct-map + business logic) ──────────
+// Changed records of direct-mappable types need no Opus reconcile/review: their fields
+// are a faithful copy of ServiceNow, so a per-field diff against the current Workbench row
+// is sound. This mirrors what reconcileChanged would emit (fill_blank vs modify), but from
+// raw data, for free — then reuses the SAME gateProposal floors (both-side-edit, non-
+// destructive, additivity) so safety is identical to the AI path.
+const PROV_KEYS = new Set(['source_system', 'source_sys_id', 'source_table', 'source_scope', 'source_fluent', 'source_hash', 'sdk_version', 'system_generated']);
+
+function loadWbRow(table, pk, id) {
+  if (!table || !pk || !id) return null;
+  try { return db.prepare(`SELECT * FROM ${table} WHERE ${pk} = ?`).get(id) || null; } catch { return null; }
+}
+function jnorm(v) {
+  if (v === undefined || v === null) return '';
+  if (typeof v === 'object') { try { return JSON.stringify(v); } catch { return String(v); } }
+  return String(v);
+}
+
+/** Deterministic field diff: direct-mapped ServiceNow values vs the current Workbench row. */
+function detChangedProposal(entity, wbRow, entity_data, name) {
+  const field_changes = [];
+  let destructive = false;
+  for (const [key, spec] of Object.entries(entity.fieldMap || {})) {
+    if (PROV_KEYS.has(key)) continue;
+    const snVal = entity_data[key];
+    if (snVal === undefined || snVal === null || snVal === '') continue;
+    const wbVal = wbRow ? wbRow[spec.col] : undefined;
+    if (jnorm(wbVal) === jnorm(snVal)) continue;                 // unchanged
+    const wbEmpty = wbVal === undefined || wbVal === null || wbVal === '';
+    if (wbEmpty) field_changes.push({ field: spec.col, change_kind: 'fill_blank', proposed: snVal });
+    else { field_changes.push({ field: spec.col, change_kind: 'modify', proposed: snVal }); destructive = true; }
+  }
+  const action = field_changes.length === 0 ? 'no_change' : (destructive ? 'conflict' : 'enrich');
+  return { action, destructive, field_changes, name, confidence: 1 };
+}
+
+/** Build gated plan items for CHANGED deterministic records (no Opus). */
+function buildDeterministicRichPlan(items, { mode, threshold }) {
+  return items.map(item => {
+    const inferred = item.inferred || {};
+    const entity = registry.byEntityType[inferred.design_type];
+    if (!entity || !entity.materializable) return null;
+    const wbRow = loadWbRow(entity.table, entity.pk, item.wb_id);
+    const proposal = detChangedProposal(entity, wbRow, inferred.entity_data || {}, inferred.name || item.name);
+    const review = { verdict: 'approve', destructive_confirmed: false, final_confidence: 1, issues: [], note: 'deterministic direct-map — no AI reconciliation' };
+    const decision = gateProposal(
+      { classification: 'changed', proposal, review, wb_edited_since_sync: !!item.wb_edited_since_sync, wb_updated_at: item.wb_updated_at || null },
+      { mode, threshold });
+    return {
+      classification: 'changed', source_sys_id: item.source_sys_id,
+      wb_table: item.wb_table, wb_id: item.wb_id, name: proposal.name,
+      artifact: item, inferred, proposal, review, decision,
+      wb_edited_since_sync: !!item.wb_edited_since_sync, wb_updated_at: item.wb_updated_at || null,
+      sn_updated_by: item.sn_updated_by || null, sn_updated_on: item.sn_updated_on || null,
+      sn_mod_count: item.sn_mod_count != null ? item.sn_mod_count : null,
+      deterministic: true,
+    };
+  }).filter(Boolean);
+}
+
 /** Roll up the gated plan into headline counts for the UI / logs. */
 function summarize(planned, classified) {
   const s = { unchanged: classified.unchanged.length, auto: 0, hitl: 0, no_change: 0,
@@ -433,15 +495,22 @@ async function runSyncPlan(opts = {}, ctx = {}) {
     else newAllowed.push(a);
   }
 
+  // 3. Infer design intent. DETERMINISTIC types (#101/#102/#103: catalog_item, data_model,
+  //    form_design, integration, business_logic) short-circuit inside reverseEngineerOne to a
+  //    direct field-map — zero tokens. Only genuinely interpretive types (agent/use_case/tool)
+  //    and the header-only workflow actually call Opus here.
   const toInfer = [...richChanged, ...newAllowed];
   const inferences = await reverseEngineer(toInfer, logCtx);
   const inferBySysId = {};
   for (const inf of inferences) inferBySysId[inf.source_sys_id] = inf.inferred;
 
-  // Stage 2: significance/confidence gate on NEW business-logic.
+  // Stage 2: significance/confidence gate on NEW business-logic. Deterministic types skip
+  // the gate and always materialize — for business logic this honors "a design entry per
+  // rule" (narrative blank until "Explain with AI"); other design types always elevated anyway.
   const captured_not_elevated = [];
   const elevatedNew = [];
   for (const a of newAllowed) {
+    if (isDeterministicTable(a.source_table)) { elevatedNew.push(a); continue; }
     const inferred = inferBySysId[a.source_sys_id];
     const m = passesMaterialityGate(a, inferred, matCfg, threshold);
     if (m.elevate) elevatedNew.push(a);
@@ -451,9 +520,16 @@ async function runSyncPlan(opts = {}, ctx = {}) {
   const changedWithInf = richChanged.map(a => ({ ...a, inferred: inferBySysId[a.source_sys_id] }));
   const newWithInf     = elevatedNew.map(a => ({ ...a, inferred: inferBySysId[a.source_sys_id] }));
 
+  // Divert CHANGED deterministic records away from the Opus reconcile/review — a raw field
+  // diff + the same gateProposal floors is sound (and free) for faithful field-copies. Only
+  // AI-interpretive changed records still reach reconcile/review.
+  const changedDet = changedWithInf.filter(a => isDeterministicTable(a.source_table));
+  const changedAi  = changedWithInf.filter(a => !isDeterministicTable(a.source_table));
+
   // 4. Reconcile (non-destructive proposals). 5. Independent adversarial review.
-  const proposals = await reconcile({ changed: changedWithInf, new: newWithInf, drift: richDrift }, logCtx);
+  const proposals = await reconcile({ changed: changedAi, new: newWithInf, drift: richDrift }, logCtx);
   const reviewed  = await review(proposals, logCtx);
+  const detChangedPlanned = buildDeterministicRichPlan(changedDet, { mode, threshold });
 
   // 6. Gate each reviewed proposal; carry the captured artifact (hash/salient) for materialization.
   const artBySysId = {};
@@ -478,7 +554,7 @@ async function runSyncPlan(opts = {}, ctx = {}) {
   // Rich (Opus-reasoned) + deterministic no-change (sn_unmoved) + generic plans share one
   // materialization path. Unmoved items carry decision.target='none' → skipped at apply,
   // hash refreshed by sync step 3.
-  const planned = [...richPlanned, ...unmovedPlanned, ...genericPlanned];
+  const planned = [...richPlanned, ...detChangedPlanned, ...unmovedPlanned, ...genericPlanned];
 
   const summary = summarize(planned, classified);
   summary.elevated_new = newWithInf.length;

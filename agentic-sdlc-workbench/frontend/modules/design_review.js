@@ -1058,6 +1058,23 @@ function appendNlGapBanner(wrap, cfg) {
   }).catch(() => { body.innerHTML = ''; body.appendChild(el('span', { style: 'color:var(--text-muted,#64748b)' }, 'Gap check unavailable.')); });
 }
 
+// On-request AI narration of one business-logic record (the blank plain-English fields).
+async function explainBusinessLogic(blId, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Explaining…'; }
+  showToast('Explaining rule with AI…', 'info');
+  try {
+    const r = await apiFetch(`/projects/${_currentProjectId}/design/business-logic/${blId}/explain`, { method: 'POST' });
+    showToast(r._stub
+      ? 'Explained (offline stub — set ANTHROPIC_API_KEY for a real narration).'
+      : 'Explained — plain-English narrative added.', 'success');
+    const pid = getCurrentProjectId();
+    if (pid && _currentReportArea) loadReport(_currentReportArea, pid, _currentScope);
+  } catch (err) {
+    showToast('Explain failed: ' + err.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '✨ Explain with AI'; }
+  }
+}
+
 async function reverseEngineerNlRuleFromScript(artifactId, entityType) {
   showToast('Reverse-engineering rule from script…', 'info');
   try {
@@ -3249,6 +3266,14 @@ function buildBusinessLogicSection(items) {
     badges.appendChild(statusPill(bl.lifecycle_status));
     const editBtn = buildEditBtn('business_logic', bl);
     if (editBtn) badges.appendChild(editBtn);
+    // Business logic imports deterministically with a BLANK narrative (#103) — the raw script
+    // is captured, but the plain-English "what it does" is generated ON REQUEST to avoid paying
+    // for AI on every rule. Offer the narration only where it's still missing.
+    if (!bl.plain_english && bl.business_logic_id) {
+      const explainBtn = el('button', { className: 'btn btn-ghost', style: { fontSize: '11px' } }, '✨ Explain with AI');
+      explainBtn.addEventListener('click', () => explainBusinessLogic(bl.business_logic_id, explainBtn));
+      badges.appendChild(explainBtn);
+    }
     hdr.appendChild(badges);
     section.appendChild(hdr);
     const s = subSection('Overview');

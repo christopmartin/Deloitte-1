@@ -1,15 +1,19 @@
 // test-materiality.js — reverse-path business-logic MATERIALITY gate test.
 // Fully offline (no ANTHROPIC_API_KEY → the Opus agents stub). Drives the real
 // POST /projects/:id/servicenow/sync endpoint with pre-supplied business-logic
-// artifacts and asserts the materiality buckets:
-//   - business_rule / script_include          → ALWAYS elevated (server-side logic)
+// artifacts and asserts the materiality buckets.
+//
+// UPDATED for #103 (deterministic capture): business logic is now captured
+// deterministically (direct-map, no AI) and — per the "a design entry per rule" decision —
+// ALWAYS materializes; the Stage-2 significance/confidence heuristic no longer suppresses it.
+// What still holds:
+//   - business_rule / script_include / client_script / ui_action → ALWAYS elevated
+//     (deterministic capture; narrative blank until "Explain with AI")
 //   - data_model (not business-logic)         → ALWAYS elevated
-//   - trivial client_script (cosmetic onLoad) → captured_not_elevated (significance)
-//   - significant client_script (long onChange) → elevated
 //   - materiality_disallow_types=['client_script'] → both client scripts skipped
-//     PRE-inference (skipped_disallowed)
-//   - materiality_min_confidence=0.9 → significant client script drops on confidence
-//     (stub inference confidence is 0.5), but business_rule/script_include still elevate.
+//     PRE-inference (skipped_disallowed) — Stage 1 remains the category-exclusion lever
+//   - materiality_min_confidence no longer drops deterministic business logic (there is no
+//     AI confidence to gate on — the capture is a faithful copy)
 //
 // Run:  node test-materiality.js   (from backend-node/)
 'use strict';
@@ -72,16 +76,15 @@ async function main() {
 
   const names = b => b.map(x => x.name).sort();
 
-  // ── Run A: default materiality (no disallow, threshold 0 so significance is the lever) ──
-  console.log('\n--- Run A: default materiality (significance heuristic) ---');
+  // ── Run A: default (deterministic capture — every rule materializes, #103) ──
+  console.log('\n--- Run A: deterministic capture (a design entry per rule) ---');
   const a = await post(`/projects/${pid}/servicenow/sync?dry_run=1`, { artifacts: ARTIFACTS, threshold: 0 });
   const mA = a.plan.materiality;
   assert(!!mA, 'plan exposes a materiality block');
-  assert(mA.elevated === 4, `4 elevated (BR, SI, significant CS, DM) — got ${mA.elevated}`);
-  assert(mA.captured_not_elevated.length === 1 && mA.captured_not_elevated[0].source_sys_id === 'sysCS1',
-    'trivial client_script captured_not_elevated (cosmetic onLoad)');
+  assert(mA.elevated === 5, `all 5 elevate — BR, SI, both CS, DM (deterministic capture, no significance drop) — got ${mA.elevated}`);
+  assert(mA.captured_not_elevated.length === 0, 'nothing captured_not_elevated — the significance heuristic no longer suppresses deterministic business logic');
   assert(mA.skipped_disallowed.length === 0, 'nothing skipped (no disallow types configured)');
-  assert(a.plan.summary.elevated_new === 4 && a.plan.summary.captured_not_elevated === 1,
+  assert(a.plan.summary.elevated_new === 5 && a.plan.summary.captured_not_elevated === 0,
     'summary carries elevated_new + captured_not_elevated counts');
 
   // ── Run B: disallow client_script entirely (Stage 1, pre-inference) ──
@@ -95,30 +98,28 @@ async function main() {
   assert(mB.elevated === 3, `3 elevated (BR, SI, DM) — got ${mB.elevated}`);
   assert(mB.captured_not_elevated.length === 0, 'no Stage-2 drops (client scripts never reached inference)');
 
-  // ── Run C: confidence bar (Stage 2). Stub inference confidence = 0.5. ──
-  console.log('\n--- Run C: materiality_min_confidence = 0.9 ---');
+  // ── Run C: min_confidence no longer suppresses deterministic business logic ──
+  console.log('\n--- Run C: materiality_min_confidence = 0.9 (moot for deterministic capture) ---');
   db.prepare('UPDATE asdlc_project SET materiality_disallow_types = ?, materiality_min_confidence = ? WHERE project_id = ?')
     .run('[]', 0.9, pid);
   const c = await post(`/projects/${pid}/servicenow/sync?dry_run=1`, { artifacts: ARTIFACTS, threshold: 0 });
   const mC = c.plan.materiality;
   assert(mC.config.min_confidence === 0.9, 'materiality config min_confidence reflected (0.9)');
-  // significant CS is significant but conf 0.5 < 0.9 → drops; trivial CS drops on significance.
-  assert(mC.captured_not_elevated.length === 2 && JSON.stringify(names(mC.captured_not_elevated)) === JSON.stringify(['Set Default Region', 'Validate Return Date']),
-    'both client scripts captured_not_elevated (one significance, one confidence)');
-  assert(mC.elevated === 3, `BR + SI + DM still elevate (server-side/non-logic, not confidence-gated) — got ${mC.elevated}`);
-  const csReason = mC.captured_not_elevated.find(x => x.source_sys_id === 'sysCS2').reason;
-  assert(/confidence/.test(csReason), 'significant client_script drop reason cites confidence');
+  assert(mC.captured_not_elevated.length === 0, 'no confidence drops — a deterministic field-copy has no AI confidence to gate on');
+  assert(mC.elevated === 5, `all 5 still elevate despite min_confidence 0.9 — got ${mC.elevated}`);
 
-  // ── Run D: real apply (not dry) — elevated business_logic holds Tier-3 body (source_fluent) ──
-  console.log('\n--- Run D: elevated business_logic persists Tier-3 source_fluent ---');
+  // ── Run D: real apply (not dry) — every rule materializes; business_logic holds Tier-3 body ──
+  console.log('\n--- Run D: deterministic apply — entry per rule + Tier-3 source_fluent ---');
   db.prepare('UPDATE asdlc_project SET materiality_min_confidence = NULL WHERE project_id = ?').run(pid);
   await post(`/projects/${pid}/servicenow/sync`, { artifacts: ARTIFACTS, threshold: 0 });
   const blRow = db.prepare("SELECT name, plain_english, source_sys_id, source_fluent FROM asdlc_business_logic WHERE project_id=? AND source_sys_id='sysBR'").get(pid);
   assert(!!blRow, 'business_rule elevated into asdlc_business_logic');
   assert(blRow.source_sys_id === 'sysBR', 'elevated row carries source_sys_id (Tier-3 identity)');
   assert(blRow.source_fluent && /current\.status/.test(blRow.source_fluent), 'elevated row holds the real script body in source_fluent (Tier-3 instantiation)');
-  assert(!db.prepare("SELECT 1 FROM asdlc_business_logic WHERE project_id=? AND source_sys_id='sysCS1'").get(pid),
-    'trivial client_script did NOT become a Level-1 business_logic row');
+  assert(!blRow.plain_english, 'deterministic capture leaves the plain-English narrative BLANK (until "Explain with AI")');
+  const trivialRow = db.prepare("SELECT plain_english FROM asdlc_business_logic WHERE project_id=? AND source_sys_id='sysCS1'").get(pid);
+  assert(!!trivialRow, 'trivial client_script NOW becomes a Level-1 row too (a design entry per rule, #103)');
+  assert(!trivialRow.plain_english, 'trivial client_script row also has a blank narrative');
 
   console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
   done(fail ? 1 : 0);
