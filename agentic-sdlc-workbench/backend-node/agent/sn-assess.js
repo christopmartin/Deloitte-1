@@ -92,6 +92,32 @@ async function detectVersion(client) {
   return out;
 }
 
+/**
+ * Fast, synchronous credential/connectivity check — ONE minimal authenticated read.
+ * For the "Test connection" action on the Applications screen, so a bad username/password
+ * (or an account missing the `snc_basic_auth_api_access` role) is caught immediately at the
+ * point credentials are entered, instead of only surfacing later as an empty Scan/Sync result.
+ * @returns {Promise<{ok:boolean, status:?number, message:string}>}
+ */
+async function checkConnection({ instance, user, pw, fetchImpl } = {}) {
+  if (!instance || !user || !pw) {
+    return { ok: false, status: null, message: 'Instance URL, username, and password are all required.' };
+  }
+  const client = makeClient({ instance, user, pw, fetchImpl });
+  const r = await client.get('/api/now/table/sys_properties?sysparm_limit=1&sysparm_fields=sys_id');
+  if (r.ok) return { ok: true, status: r.status, message: 'Connected successfully.' };
+  if (r.status === 401) {
+    return { ok: false, status: 401, message: 'Authentication failed (401 Unauthorized) — check the username and password. The account must also have the "snc_basic_auth_api_access" role.' };
+  }
+  if (r.status === 403) {
+    return { ok: false, status: 403, message: 'Connected, but access was denied (403 Forbidden) reading a basic table — check the account\'s roles.' };
+  }
+  if (r.status === 0) {
+    return { ok: false, status: 0, message: `Could not reach "${normalizeInstanceUrl(instance)}" — check the instance URL and network connectivity.${r.error ? ' (' + r.error + ')' : ''}` };
+  }
+  return { ok: false, status: r.status, message: `Unexpected response (HTTP ${r.status}).` };
+}
+
 /** List application scopes (custom apps the user can target). */
 async function listScopes(client) {
   const r = await client.get(
@@ -123,8 +149,19 @@ async function assessInstance({ instance, user, pw, scopes, fetchImpl } = {}) {
   const client = makeClient({ instance, user, pw, fetchImpl });
   const warnings = [];
 
-  // 1. Version / edition.
+  // 1. Version / edition. This is also the FIRST live call, so use its raw HTTP status as
+  //    the connectivity/auth gate: a bad username/password (or an account missing the
+  //    `snc_basic_auth_api_access` role, which ServiceNow also reports as 401 on every Table
+  //    API call) must fail LOUDLY here rather than silently degrading into a "complete"
+  //    report with zero data and a vague "insufficient role?" warning — the failure mode a
+  //    user actually hit and got no feedback from.
   const version = await detectVersion(client);
+  if (version.http === 401) {
+    throw new Error('ServiceNow authentication failed (401 Unauthorized) — check the stored username and password. The account must also have the "snc_basic_auth_api_access" role (see the note on the Applications screen).');
+  }
+  if (version.http === 0) {
+    throw new Error(`Could not reach the ServiceNow instance at "${normalizeInstanceUrl(instance)}" — check the instance URL and network connectivity.`);
+  }
   if (!version.readable) warnings.push('Could not read sys_properties — version/edition unknown (insufficient role?).');
   const versionSupported = !MIN_FAMILY || !version.family ? true : version.family >= MIN_FAMILY;
   if (MIN_FAMILY && version.family && !versionSupported)
@@ -279,4 +316,4 @@ async function resolveUserSysId({ instance, user, pw, lookupUser, timeoutMs, fet
   }
 }
 
-module.exports = { assessInstance, capacityVerdict, resolveUserSysId };
+module.exports = { assessInstance, checkConnection, capacityVerdict, resolveUserSysId };

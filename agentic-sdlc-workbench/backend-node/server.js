@@ -325,6 +325,10 @@ app.post('/api/v1/projects', (req, res) => {
   if (!clientRow) {
     return res.status(400).json({ error: `Unknown client_id "${client_id}". Pick an existing client or create one first.` });
   }
+  const dupe = db.prepare('SELECT * FROM asdlc_project WHERE client_id = ? AND project_code = ?').get(client_id, project_code);
+  if (dupe) {
+    return res.status(409).json({ error: `Application code "${project_code}" already exists for this client.`, project: scrubProject(dupe) });
+  }
   const id = generateId();
   const uid = userId(req);
   const tplat = ['servicenow', 'generic'].includes(target_platform) ? target_platform : 'servicenow';
@@ -447,6 +451,24 @@ app.post('/api/v1/projects/:id/servicenow/assess', (req, res) => {
         .run(String(err.message).slice(0, 1000), aid);
     }
   })();
+});
+
+// Fast, synchronous credential/connectivity check (no assessment row, no capability probing) —
+// lets a user verify a username/password at the point of entry on the Applications screen,
+// instead of only discovering a bad login later via an empty Scan/Sync result.
+app.post('/api/v1/projects/:id/servicenow/test-connection', async (req, res) => {
+  const project = db.prepare("SELECT * FROM asdlc_project WHERE project_id=?").get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const body = req.body || {};
+  const instance = body.instance || project.servicenow_instance || process.env.SN_INSTANCE;
+  const user = body.user || project.sn_user || process.env.SN_USER;
+  const pw   = body.pw   || decryptField(project.sn_password_enc) || process.env.SN_PASSWORD;
+  try {
+    const result = await snAssess.checkConnection({ instance, user, pw });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, status: null, message: 'Connection test failed: ' + err.message });
+  }
 });
 
 // List assessments for a project (newest first; no heavy report_json).

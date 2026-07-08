@@ -50,7 +50,7 @@ async function buildProjectList(paneLeft, paneRight) {
   filterBar.appendChild(clientSelect);
 
   const newBtn = el('button', { className: 'btn btn-primary btn-sm' }, '+ New Application');
-  newBtn.addEventListener('click', () => openNewProject(paneRight));
+  newBtn.addEventListener('click', () => openNewProject(paneRight, listBody, clientSelect));
   filterBar.appendChild(newBtn);
 
   // Header
@@ -214,6 +214,9 @@ function renderDetail(p, pane) {
   snSection.appendChild(el('h4', {}, 'ServiceNow Connection'));
   snSection.appendChild(el('p', { className: 'text-muted text-sm', style: 'margin-bottom:12px' },
     'Connect this application to a live ServiceNow instance. Once configured, use Administration → ServiceNow Sync to reverse-engineer the design from the running app.'));
+  snSection.appendChild(el('div', {
+    style: 'font-size:12px;background:#fff8e1;border:1px solid #f0e0a0;border-radius:6px;padding:8px 12px;margin-bottom:12px'
+  }, el('strong', {}, 'Note: '), 'the ServiceNow username must be assigned the ', el('code', {}, 'snc_basic_auth_api_access'), ' role, with admin privileges.'));
 
   const snGrid = el('div', { className: 'meta-grid' });
 
@@ -261,7 +264,9 @@ function renderDetail(p, pane) {
   snSection.appendChild(snCredStatus);
 
   const saveSnBtn = el('button', { className: 'btn btn-secondary btn-sm' }, 'Save connection');
+  const testSnBtn = el('button', { className: 'btn btn-secondary btn-sm', style: 'margin-left:8px' }, 'Test connection');
   const clearSnBtn = el('button', { className: 'btn btn-ghost btn-sm', style: 'margin-left:8px' }, 'Clear credentials');
+  const testResult = el('div', { style: 'font-size:12px;margin-top:8px' });
 
   saveSnBtn.addEventListener('click', async () => {
     saveSnBtn.disabled = true;
@@ -285,6 +290,29 @@ function renderDetail(p, pane) {
     finally { saveSnBtn.disabled = false; }
   });
 
+  testSnBtn.addEventListener('click', async () => {
+    testSnBtn.disabled = true;
+    testResult.textContent = 'Testing…';
+    testResult.style.color = 'var(--text-muted)';
+    try {
+      const payload = {
+        instance: snInstanceInput.value.trim() || undefined,
+        user: snUserInput.value.trim() || undefined,
+      };
+      // Test exactly what's typed; if the password field is blank, fall back to the
+      // already-stored/env password server-side (mirrors the Save-connection behavior).
+      if (snPwInput.value) payload.pw = snPwInput.value;
+      const result = await apiFetch(`/projects/${p.project_id}/servicenow/test-connection`, {
+        method: 'POST', body: JSON.stringify(payload),
+      });
+      testResult.textContent = (result.ok ? '✓ ' : '✗ ') + result.message;
+      testResult.style.color = result.ok ? '#1a7f37' : '#cf222e';
+    } catch (err) {
+      testResult.textContent = '✗ Test failed: ' + err.message;
+      testResult.style.color = '#cf222e';
+    } finally { testSnBtn.disabled = false; }
+  });
+
   clearSnBtn.addEventListener('click', async () => {
     if (!confirm('Clear stored ServiceNow credentials? The server env vars will be used as fallback.')) return;
     clearSnBtn.disabled = true;
@@ -298,7 +326,8 @@ function renderDetail(p, pane) {
     finally { clearSnBtn.disabled = false; }
   });
 
-  snSection.appendChild(el('div', {}, saveSnBtn, clearSnBtn));
+  snSection.appendChild(el('div', {}, saveSnBtn, testSnBtn, clearSnBtn));
+  snSection.appendChild(testResult);
   body.appendChild(snSection);
 
   // Reuse scope
@@ -552,7 +581,7 @@ function renderDetail(p, pane) {
   pane.appendChild(body);
 }
 
-async function openNewProject(pane) {
+async function openNewProject(pane, listBody, filterClientSelect) {
   pane.innerHTML = '';
 
   const header = el('div', { className: 'pane-header' },
@@ -650,6 +679,13 @@ async function openNewProject(pane) {
         body: JSON.stringify({ client_id, project_name, project_code, stage: inputs.stage.value.trim() || 'draft', target_platform: platformInput.value }),
       });
       allProjects.push(created);
+      // Keep the left-hand list and its client filter in sync — otherwise the
+      // new application only shows in the detail pane until the page reloads.
+      if (listBody) refreshList(listBody, pane);
+      if (filterClientSelect && created.client_name &&
+          ![...filterClientSelect.options].some(o => o.value === created.client_name)) {
+        filterClientSelect.appendChild(el('option', { value: created.client_name }, created.client_name));
+      }
       // Switch global context to the new application so navigating to any other
       // module (e.g. Ingest) scopes itself to this new, empty project.
       const sel = document.getElementById('project-select');
