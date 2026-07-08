@@ -9693,47 +9693,49 @@ function snPlanItemToCpSpec(pl, scope) {
   };
 }
 
-app.post('/api/v1/projects/:id/servicenow/sync', async (req, res) => {
-  const uid = userId(req);
-  const project = db.prepare(
-    "SELECT * FROM asdlc_project WHERE project_id=? AND (lifecycle_status IS NULL OR lifecycle_status!='retired')"
-  ).get(req.params.id);
-  if (!project) return res.status(404).json({ error: 'Project not found' });
-
-  const body = req.body || {};
+// Resolve the request body + project row into the fully-formed opts runSyncPlan/estimateSyncWork
+// need. Shared by the synchronous endpoint and the async job (#105) so both build the identical
+// plan for identical input — no second, potentially-divergent parameter-resolution copy.
+function resolveSyncOpts(project, body) {
   const scope = body.scope || project.servicenow_scope;
-  if (!scope) return res.status(400).json({ error: 'Project is not linked to a ServiceNow scope (set servicenow_scope first).' });
+  if (!scope) return { error: { status: 400, message: 'Project is not linked to a ServiceNow scope (set servicenow_scope first).' } };
   const instance = body.instance || project.servicenow_instance || process.env.SN_INSTANCE;
   const user = body.user || project.sn_user              || process.env.SN_USER;
   const pw   = body.pw   || decryptField(project.sn_password_enc) || process.env.SN_PASSWORD;
   const artifacts = body.artifacts;   // test / pre-capture hook: skip the live REST pull
   if (!artifacts && (!instance || !user || !pw)) {
-    return res.status(400).json({ error: 'ServiceNow credentials required (instance/user/pw in body, or SN_INSTANCE/SN_USER/SN_PASSWORD env).' });
+    return { error: { status: 400, message: 'ServiceNow credentials required (instance/user/pw in body, or SN_INSTANCE/SN_USER/SN_PASSWORD env).' } };
   }
-  const dryRun = req.query.dry_run === '1' || body.dry_run === true;
   const modeOverride = body.mode;
   const thresholdOverride = typeof body.threshold === 'number' ? body.threshold : undefined;
-
   // Slice: an explicit body.slice wins (null forces whole-scope); otherwise the project's saved
   // import profile bounds the ingest to a subset of the scope. Absent ⇒ whole scope (legacy).
   let importSlice = null;
   if (body.slice !== undefined) importSlice = body.slice;
   else if (project.sn_import_profile_json) { try { importSlice = JSON.parse(project.sn_import_profile_json); } catch { importSlice = null; } }
+  return { opts: { projectId: project.project_id, scope, instance, user, pw, artifacts, metadataSweep: body.metadataSweep, mode: modeOverride, threshold: thresholdOverride, slice: importSlice } };
+}
 
+/**
+ * Run the full sync pipeline (plan + apply-unless-dryRun) and return {status, body} instead of
+ * writing to `res` — shared by the synchronous endpoint (unchanged response contract, so the
+ * ~10 existing test suites that call it directly keep working) and the async job (#105), which
+ * additionally threads ctx.onProgress/cancelToken through to the AI stages.
+ */
+async function executeSyncRequest({ project, opts, dryRun, uid, ctx }) {
   let plan;
   try {
-    plan = await snSync.runSyncPlan(
-      { projectId: project.project_id, scope, instance, user, pw, artifacts, metadataSweep: body.metadataSweep, mode: modeOverride, threshold: thresholdOverride, slice: importSlice },
-      { projectId: project.project_id }
-    );
+    plan = await snSync.runSyncPlan(opts, { projectId: project.project_id, ...ctx });
   } catch (err) {
     console.error('[sn-sync] plan failed:', err.message);
-    return res.status(502).json({ error: `ServiceNow sync failed: ${err.message}` });
+    return { status: 502, body: { error: `ServiceNow sync failed: ${err.message}` } };
   }
+  const scope = opts.scope;
 
   // Serializable plan view (drop heavy artifact.salient).
   const planView = {
     project_id: plan.project_id, scope: plan.scope, slice: plan.slice || null, mode: plan.mode, threshold: plan.threshold,
+    cancelled: !!plan.cancelled,   // #105 — the run was stopped early via the cancel button
     summary: plan.summary, classified_summary: plan.classified_summary, errors: plan.errors,
     warnings: plan.warnings || [], surface_counts: plan.surface_counts || {},
     completeness: plan.completeness || null,
@@ -9752,7 +9754,7 @@ app.post('/api/v1/projects/:id/servicenow/sync', async (req, res) => {
       decision: pl.decision,
     })),
   };
-  if (dryRun) return res.json({ dry_run: true, plan: planView });
+  if (dryRun) return { status: 200, body: { dry_run: true, plan: planView } };
 
   // ── Materialize: AUTO change packet (approved) + HITL packet (pending_review) ──
   const autoSpecs = [], hitlSpecs = [], dropped = [];
@@ -9796,7 +9798,7 @@ app.post('/api/v1/projects/:id/servicenow/sync', async (req, res) => {
       result.auto_cp = { ...cp, apply_result: r.applyResult };
     } catch (err) {
       console.error('[sn-sync] auto-apply failed:', err.message);
-      return res.status(500).json({ error: `Auto-apply failed: ${err.message}`, plan: planView, result });
+      return { status: 500, body: { error: `Auto-apply failed: ${err.message}`, plan: planView, result } };
     }
   }
 
@@ -9896,7 +9898,126 @@ app.post('/api/v1/projects/:id/servicenow/sync', async (req, res) => {
   } catch (e) { console.error('[sn-sync] persistChangeSignals', e.message); }
 
   try { require('./agent/fluent-ingest').markSynced(project.project_id); } catch (e) { console.error('[sn-sync] markSynced', e.message); }
-  res.json({ dry_run: false, plan: planView, result });
+  return { status: 200, body: { dry_run: false, plan: planView, result } };
+}
+
+app.post('/api/v1/projects/:id/servicenow/sync', async (req, res) => {
+  const uid = userId(req);
+  const project = db.prepare(
+    "SELECT * FROM asdlc_project WHERE project_id=? AND (lifecycle_status IS NULL OR lifecycle_status!='retired')"
+  ).get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  const body = req.body || {};
+  const resolved = resolveSyncOpts(project, body);
+  if (resolved.error) return res.status(resolved.error.status).json({ error: resolved.error.message });
+  const dryRun = req.query.dry_run === '1' || body.dry_run === true;
+
+  const r = await executeSyncRequest({ project, opts: resolved.opts, dryRun, uid });
+  res.status(r.status).json(r.body);
+});
+
+// ── #105: pre-flight cost/time estimate — capture + classify only, NO AI spend ──────────────
+// A dry run is NOT free: it runs the same AI stages as a real run and only skips the DB write.
+// This lets the UI tell the user what a Preview/Run will cost BEFORE either one starts.
+app.post('/api/v1/projects/:id/servicenow/sync/estimate', async (req, res) => {
+  const project = db.prepare(
+    "SELECT * FROM asdlc_project WHERE project_id=? AND (lifecycle_status IS NULL OR lifecycle_status!='retired')"
+  ).get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const body = req.body || {};
+  const resolved = resolveSyncOpts(project, body);
+  if (resolved.error) return res.status(resolved.error.status).json({ error: resolved.error.message });
+
+  try {
+    const est = await snSync.estimateSyncWork(resolved.opts);
+    // Cache the just-captured artifacts/sweep so the subsequent async start doesn't have to
+    // re-read ServiceNow a second time for the same data (best-effort — a short-lived slot per
+    // project; the async start falls back to a fresh live capture if this has expired/missed).
+    lastSyncCapture.set(project.project_id, { artifacts: est.artifacts, metadataSweep: est.metadataSweep, ts: Date.now() });
+    const { artifacts, metadataSweep, ...estView } = est;
+    res.json(estView);
+  } catch (err) {
+    console.error('[sn-sync] estimate failed:', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ── #105: async sync job — start / poll / cancel ────────────────────────────────────────────
+// ADDITIVE ONLY: the synchronous POST .../sync endpoint above is UNCHANGED (existing tests and
+// scripts keep working). This is a separate, in-memory-tracked background job the frontend uses
+// to show a live progress meter and offer a cancel button on long-running Preview/Run calls.
+const syncJobs = new Map();          // job_id -> {status, progress, planView, result, error, cancelToken, projectId}
+const lastSyncCapture = new Map();   // project_id -> {artifacts, metadataSweep, ts} — from the last /estimate call
+const SYNC_CAPTURE_TTL_MS = 10 * 60 * 1000;   // 10 min — long enough to read an estimate and click Start
+
+app.post('/api/v1/projects/:id/servicenow/sync/async', async (req, res) => {
+  const uid = userId(req);
+  const project = db.prepare(
+    "SELECT * FROM asdlc_project WHERE project_id=? AND (lifecycle_status IS NULL OR lifecycle_status!='retired')"
+  ).get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const body = { ...(req.body || {}) };
+
+  // Reuse the most recent /estimate capture for this project if it's fresh and the caller
+  // didn't already supply artifacts explicitly — avoids a second live ServiceNow read, and
+  // (must happen BEFORE resolveSyncOpts) lets the request succeed on cached data even without
+  // live credentials in the body, exactly as an immediately-following /estimate call would.
+  if (!body.artifacts) {
+    const cached = lastSyncCapture.get(project.project_id);
+    if (cached && (Date.now() - cached.ts) < SYNC_CAPTURE_TTL_MS) {
+      body.artifacts = cached.artifacts;
+      body.metadataSweep = cached.metadataSweep;
+    }
+  }
+
+  const resolved = resolveSyncOpts(project, body);
+  if (resolved.error) return res.status(resolved.error.status).json({ error: resolved.error.message });
+  const dryRun = req.query.dry_run === '1' || body.dry_run === true;
+  const opts = resolved.opts;
+
+  const jobId = generateId();
+  const cancelToken = { cancelled: false };
+  const job = { job_id: jobId, project_id: project.project_id, status: 'running', dry_run: dryRun,
+    progress: { stage: 'capturing', current: 0, total: 0 }, planView: null, result: null, error: null,
+    cancelToken, startedAt: new Date().toISOString() };
+  syncJobs.set(jobId, job);
+  res.status(202).json({ job_id: jobId, status: 'running' });
+
+  // Fire-and-forget — the same executeSyncRequest the synchronous endpoint uses, so behavior
+  // (gating, materialization, audit) is identical; only progress/cancel plumbing is added.
+  (async () => {
+    try {
+      const ctx = {
+        cancelToken,
+        onProgress: (p) => { job.progress = p; },
+      };
+      const r = await executeSyncRequest({ project, opts, dryRun, uid, ctx });
+      job.status = cancelToken.cancelled ? 'cancelled' : (r.status === 200 ? 'complete' : 'failed');
+      job.planView = (r.body && r.body.plan) || null;
+      job.result = (r.body && r.body.result) || null;
+      if (r.status !== 200) job.error = (r.body && r.body.error) || `HTTP ${r.status}`;
+    } catch (err) {
+      job.status = 'failed';
+      job.error = err.message;
+      console.error('[sn-sync async]', err.message);
+    }
+  })();
+});
+
+app.get('/api/v1/projects/:id/servicenow/sync/async/:jobId', (req, res) => {
+  const job = syncJobs.get(req.params.jobId);
+  if (!job || job.project_id !== req.params.id) return res.status(404).json({ error: 'Sync job not found' });
+  const { cancelToken, ...view } = job;
+  res.json(view);
+});
+
+app.post('/api/v1/projects/:id/servicenow/sync/async/:jobId/cancel', (req, res) => {
+  const job = syncJobs.get(req.params.jobId);
+  if (!job || job.project_id !== req.params.id) return res.status(404).json({ error: 'Sync job not found' });
+  if (job.status !== 'running') return res.json({ job_id: job.job_id, status: job.status, note: 'already finished — nothing to cancel' });
+  job.cancelToken.cancelled = true;   // cooperative — the running loop checks this before its next item
+  res.json({ job_id: job.job_id, status: 'cancelling' });
 });
 
 /** Extract a human-readable label from entity_data based on entity_type */

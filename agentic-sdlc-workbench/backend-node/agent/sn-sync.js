@@ -414,16 +414,31 @@ function buildPreflight(planned, classified) {
  * @returns {Promise<object>} { project_id, scope, mode, threshold, classified_summary,
  *                              unchanged, planned[], errors, summary }
  */
-async function runSyncPlan(opts = {}, ctx = {}) {
+/**
+ * Steps 1–2b: capture, the sys_metadata completeness sweep, deterministic classification, and
+ * the rich/generic/unmoved partition. Extracted so `estimateSyncWork` (#105 — a free pre-flight
+ * estimate, before any AI runs) can share the EXACT same classification `runSyncPlan` will use
+ * moments later, instead of a second, potentially-divergent implementation.
+ */
+async function captureAndClassify(opts = {}) {
   const { projectId, scope } = opts;
-  const mode = opts.mode || getSetting('sn_sync_apply_mode', 'additive_hitl');
-  const threshold = (typeof opts.threshold === 'number') ? opts.threshold : resolveProjectThreshold(projectId);
-  const logCtx = { projectId, ...ctx };
 
   // Slice: bound this ingest to a subset of the scope (the project's import profile). null ⇒
   // whole scope. The SAME slice bounds capture, the completeness sweep, and drift detection.
   const slice = opts.slice || null;
   const sliceSurfaces = expandSliceSurfaces(slice);   // Set or null — drift candidacy bound
+
+  // #105: fail LOUDLY on bad credentials / an unreachable instance, same fix as sn-assess.js's
+  // Scan-instance gate. Without this, captureScope's per-surface try/catch swallows a network
+  // failure into a per-surface __error entry — a totally broken connection would silently
+  // classify as "0 records, nothing to sync" instead of a clear error, which is actively
+  // misleading for a PRE-FLIGHT ESTIMATE whose entire purpose is telling the user the truth
+  // before they commit. Skipped when artifacts are pre-supplied (offline tests/dry-runs).
+  if (!opts.artifacts) {
+    const { checkConnection } = require('./sn-assess');
+    const check = await checkConnection({ instance: opts.instance, user: opts.user, pw: opts.pw, fetchImpl: opts.fetchImpl });
+    if (!check.ok) throw new Error(check.message);
+  }
 
   // 1. Capture every design surface in the slice (or use pre-supplied artifacts for tests/dry-runs).
   const artifacts = opts.artifacts ||
@@ -464,6 +479,51 @@ async function runSyncPlan(opts = {}, ctx = {}) {
   // refreshes the stored hash so the next cycle is a clean tier-0 match.
   const richUnmoved = richChangedAll.filter(a => a.sn_unmoved);
   const richChanged = richChangedAll.filter(a => !a.sn_unmoved);
+
+  return { slice, artifacts, sweep, classified, completeness, isGen, richNew, richChangedAll, richDrift, richUnmoved, richChanged };
+}
+
+// #105: measured live 2026-07-08 (backlog #101) — 182 records / 28.3 min / $8.81 on
+// claude-opus-4-8 with thinking. A NEW AI-path record costs ~1 Opus call
+// (reverseEngineerOne only — reconcileNew/the non-'changed' review branch are deterministic).
+// A CHANGED AI-path record costs ~3 (reverse-engineer + reconcile + review). Deterministic/
+// generic/sn_unmoved records cost nothing regardless of count (#103).
+const EST_SECONDS_PER_CALL = 9.3;
+const EST_COST_PER_CALL = 0.0484;
+
+/**
+ * Pre-flight cost/time estimate (#105) — capture + deterministic classification ONLY, so
+ * calling this spends no AI money. Lets the UI tell the user what a Preview/Run will cost
+ * BEFORE either one starts (a dry run is not free: it runs the same AI stages as a real run
+ * and only skips the final DB write).
+ */
+async function estimateSyncWork(opts = {}) {
+  const { artifacts, sweep, classified, richNew, richChanged } = await captureAndClassify(opts);
+  const aiNew     = richNew.filter(a => !isDeterministicTable(a.source_table));
+  const aiChanged = richChanged.filter(a => !isDeterministicTable(a.source_table));
+  const totalRecords  = classified.new.length + classified.changed.length;
+  const aiRecordCount = aiNew.length + aiChanged.length;
+  const aiCalls = aiNew.length + aiChanged.length * 3;
+  return {
+    total_new: classified.new.length, total_changed: classified.changed.length,
+    total_unchanged: classified.unchanged.length,
+    ai_path_new: aiNew.length, ai_path_changed: aiChanged.length,
+    ai_path_count: aiRecordCount, deterministic_count: totalRecords - aiRecordCount,
+    estimated_seconds: Math.round(aiCalls * EST_SECONDS_PER_CALL),
+    estimated_cost_usd: Number((aiCalls * EST_COST_PER_CALL).toFixed(4)),
+    // Handed back so a caller can start the real run without re-capturing from ServiceNow.
+    artifacts, metadataSweep: sweep,
+  };
+}
+
+async function runSyncPlan(opts = {}, ctx = {}) {
+  const { projectId, scope } = opts;
+  const mode = opts.mode || getSetting('sn_sync_apply_mode', 'additive_hitl');
+  const threshold = (typeof opts.threshold === 'number') ? opts.threshold : resolveProjectThreshold(projectId);
+  const logCtx = { projectId, ...ctx };
+
+  const { slice, artifacts, sweep, classified, completeness, isGen, richNew, richChanged, richDrift, richUnmoved } = await captureAndClassify(opts);
+
   const unmovedPlanned = richUnmoved.map(a => ({
     classification: 'changed', source_sys_id: a.source_sys_id, wb_table: a.wb_table, wb_id: a.wb_id,
     name: a.name, artifact: a, inferred: null, sn_unmoved: true,
@@ -503,6 +563,10 @@ async function runSyncPlan(opts = {}, ctx = {}) {
   const inferences = await reverseEngineer(toInfer, logCtx);
   const inferBySysId = {};
   for (const inf of inferences) inferBySysId[inf.source_sys_id] = inf.inferred;
+  // Cancellation (#105) can stop reverseEngineer partway through toInfer. An item with no
+  // entry here was never processed and must NOT enter the plan — nothing has been written to
+  // the DB at this stage, so it simply re-surfaces as new/changed on the next sync attempt.
+  const wasInferred = a => Object.prototype.hasOwnProperty.call(inferBySysId, a.source_sys_id);
 
   // Stage 2: significance/confidence gate on NEW business-logic. Deterministic types skip
   // the gate and always materialize — for business logic this honors "a design entry per
@@ -510,6 +574,7 @@ async function runSyncPlan(opts = {}, ctx = {}) {
   const captured_not_elevated = [];
   const elevatedNew = [];
   for (const a of newAllowed) {
+    if (!wasInferred(a)) continue;   // cancelled before this item was reached
     if (isDeterministicTable(a.source_table)) { elevatedNew.push(a); continue; }
     const inferred = inferBySysId[a.source_sys_id];
     const m = passesMaterialityGate(a, inferred, matCfg, threshold);
@@ -517,7 +582,7 @@ async function runSyncPlan(opts = {}, ctx = {}) {
     else captured_not_elevated.push(matReport(a, 'new', m.reason, inferred));
   }
 
-  const changedWithInf = richChanged.map(a => ({ ...a, inferred: inferBySysId[a.source_sys_id] }));
+  const changedWithInf = richChanged.filter(wasInferred).map(a => ({ ...a, inferred: inferBySysId[a.source_sys_id] }));
   const newWithInf     = elevatedNew.map(a => ({ ...a, inferred: inferBySysId[a.source_sys_id] }));
 
   // Divert CHANGED deterministic records away from the Opus reconcile/review — a raw field
@@ -583,8 +648,17 @@ async function runSyncPlan(opts = {}, ctx = {}) {
     warnings.push(`#86b: ${summary.sn_unmoved} record(s) had a content-hash change but an UNMOVED ServiceNow modification counter — treated as capture-formula drift (hash refreshed, no re-reasoning).`);
   }
 
+  // #105: was this run cancelled part-way through? Unprocessed items were already excluded
+  // from `planned` above (wasInferred) — this just tells the caller/UI so it can say
+  // "stopped after N of M" instead of implying the scope is fully covered.
+  const cancelled = !!(ctx.cancelToken && ctx.cancelToken.cancelled);
+  if (cancelled) {
+    const skippedCount = toInfer.length - inferences.length;
+    warnings.push(`Sync cancelled by user — processed ${inferences.length} of ${toInfer.length} record(s) needing AI interpretation; ${skippedCount} left untouched and will re-surface next sync.`);
+  }
+
   return {
-    project_id: projectId, scope, slice: slice || null, mode, threshold,
+    project_id: projectId, scope, slice: slice || null, mode, threshold, cancelled,
     classified_summary: classified.summary,
     unchanged: classified.unchanged,
     planned,
@@ -607,6 +681,8 @@ async function runSyncPlan(opts = {}, ctx = {}) {
 
 module.exports = {
   runSyncPlan,
+  estimateSyncWork,
+  captureAndClassify,
   gateProposal,
   resolveProjectThreshold,
   resolveMaterialityConfig,

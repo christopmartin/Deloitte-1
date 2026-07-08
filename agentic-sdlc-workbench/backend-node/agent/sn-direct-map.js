@@ -14,9 +14,13 @@
 //
 // Scope (the rich SN_CATALOG types that hit — or stub through — reverseEngineerOne):
 //   • catalog_item, data_model, form_design, rest_message, connection_alias
-//       → full direct field-copy (Part A). Soft narrative fields (purpose /
-//         behavior_notes) are intentionally left blank — not needed for fidelity
-//         or conflict, confirmed by the round-trip fidelity assessment.
+//       → full direct field-copy (Part A). Soft narrative fields (purpose;
+//         form_design's `behavior_notes` on the FORM row itself) are intentionally
+//         left blank — not needed for fidelity or conflict, confirmed by the
+//         round-trip fidelity assessment. form_design's sections/mandatory_fields/
+//         readonly_fields ARE literal ServiceNow data (sys_ui_form_section /
+//         sys_ui_element / sys_ui_policy_action) and are captured deterministically
+//         (#105) — only a plain-English behavior summary would need AI.
 //   • business_logic (sys_script / _client / _include / sys_ui_action, ~60% of a
 //       typical scope) → deterministic name + logic_type ONLY; the plain-English
 //       narrative (plain_english / when_runs / conditions) is left BLANK and is
@@ -114,14 +118,44 @@ function dataModel(a) {
   };
 }
 
+// True-ish helper for ServiceNow's string/boolean-mixed choice flags ('true'/'1'/true).
+function truthy(v) { return v === true || v === 'true' || v === '1'; }
+// UI Policy Action's target-field column name isn't confirmed from a live schema probe
+// (instance auth wasn't available) — check the plausible candidates defensively rather
+// than hard-coding a guess that could silently capture nothing.
+function actionFieldName(p) { return p.field || p.field_name || p.element || undefined; }
+
 function formDesign(a) {
   const s = a.salient || {};
   if (a.source_table === 'sys_ui_policy') {
-    // A UI policy captured as form_design: its short_description names the behaviour.
-    return { name: s.short_description || a.name };
-    // behavior_notes (soft) intentionally left blank
+    // A UI policy captured as its own form_design row: fold its linked policy-action
+    // children into real mandatory/read-only field lists instead of leaving them blank.
+    const actions = childrenOf(a, 'sys_ui_policy_action').map(c => c.payload || c.salient || {});
+    const mandatory_fields = [...new Set(actions.filter(p => truthy(p.mandatory)).map(actionFieldName).filter(Boolean))];
+    const readonly_fields = [...new Set(actions.filter(p => truthy(p.read_only) || truthy(p.disabled) || truthy(p.readonly)).map(actionFieldName).filter(Boolean))];
+    const behavior_notes = [s.short_description, nz(s.conditions) && `when: ${s.conditions}`].filter(Boolean).join(' — ');
+    return {
+      name: s.short_description || a.name,
+      ...(mandatory_fields.length ? { mandatory_fields } : {}),
+      ...(readonly_fields.length ? { readonly_fields } : {}),
+      ...(behavior_notes ? { behavior_notes } : {}),
+    };
+    // behavior_notes here is a factual composite (short_description + raw condition), not
+    // an AI narrative — a plain-English rewrite is still an "Explain with AI" candidate.
   }
-  return { name: s.name || a.name, view_name: nz(s.view) };
+  // sys_ui_form: fold section-join children (with their dot-walked caption) and each
+  // section's element children into the sections[] shape extract_form_design expects.
+  const sections = childrenOf(a, 'sys_ui_form_section').map(sec => {
+    const p = sec.payload || sec.salient || {};
+    const section_label = p['sys_ui_section.caption'] || p['sys_ui_section.name'] || undefined;
+    const fields = childrenOf(sec, 'sys_ui_element').map(el => actionFieldName(el.payload || el.salient || {})).filter(Boolean);
+    return { ...(section_label ? { section_label } : {}), ...(fields.length ? { fields } : {}) };
+  }).filter(sec => sec.section_label || sec.fields);
+  return {
+    name: s.name || a.name,
+    view_name: nz(s.view),
+    ...(sections.length ? { sections } : {}),
+  };
 }
 
 function restMessage(a) {

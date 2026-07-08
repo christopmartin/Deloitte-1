@@ -76,6 +76,28 @@ function child(source_table, order, payload) {
   assert(dmap.directMapArtifact(art('sn_aia_agent', 'g1', 'Triage', { role: 'x' })) === null, 'interpretive type (agent) → null (keeps AI path)');
   assert(dmap.isDeterministicTable('sys_script') && dmap.isDeterministicTable('sc_cat_item') && !dmap.isDeterministicTable('sn_aia_agent'), 'isDeterministicTable predicate');
 
+  // #105: form sections/elements + UI-policy mandatory/read-only, previously always blank.
+  const sec0 = child('sys_ui_form_section', 0, { 'sys_ui_section.caption': 'Details', position: 0 });
+  sec0._children = [
+    child('sys_ui_element', 0, { element: 'short_description' }),
+    child('sys_ui_element', 1, { element: 'priority' }),
+  ];
+  const sec1 = child('sys_ui_form_section', 1, { 'sys_ui_section.caption': 'Notes', position: 1 });
+  sec1._children = [ child('sys_ui_element', 0, { element: 'comments' }) ];
+  const form = dmap.directMapArtifact(art('sys_ui_form', 'f1', 'incident', { name: 'incident', view: 'Default view' }, [sec0, sec1]));
+  assert(form.designType === 'form_design' && form.entity_data.view_name === 'Default view', 'sys_ui_form → form_design (view copied)');
+  assert(Array.isArray(form.entity_data.sections) && form.entity_data.sections.length === 2, 'form: sections joined from sys_ui_form_section children');
+  assert(form.entity_data.sections[0].section_label === 'Details' && form.entity_data.sections[0].fields.join(',') === 'short_description,priority',
+    'form: section label + field list (not blank/guessed)');
+
+  const pa0 = child('sys_ui_policy_action', 0, { field: 'cancellation_reason', mandatory: 'true' });
+  const pa1 = child('sys_ui_policy_action', 1, { field: 'assigned_to', disabled: 'true' });
+  const pol = dmap.directMapArtifact(art('sys_ui_policy', 'p1', 'Cancel flow', { short_description: 'Cancel flow', table: 'incident', conditions: 'state=7' }, [pa0, pa1]));
+  assert(pol.designType === 'form_design', 'sys_ui_policy → form_design');
+  assert(pol.entity_data.mandatory_fields.join(',') === 'cancellation_reason', 'ui_policy: mandatory_fields from policy actions');
+  assert(pol.entity_data.readonly_fields.join(',') === 'assigned_to', 'ui_policy: readonly_fields from policy actions');
+  assert(pol.entity_data.behavior_notes.includes('state=7'), 'ui_policy: behavior_notes includes the raw condition (factual, not AI-guessed)');
+
   // ── 2. reverseEngineerOne short-circuit (stub mode, no key): det → deterministic, no stub ──
   console.log('--- 2. reverse-engineer short-circuit ---');
   const rDet = await re.reverseEngineerOne(art('sys_script', 'b2', 'Notify', { name: 'Notify', script: 'x'.repeat(500) }), {});

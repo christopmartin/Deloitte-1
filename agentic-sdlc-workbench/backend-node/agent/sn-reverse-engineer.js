@@ -280,10 +280,21 @@ async function reverseEngineerOne(artifact, ctx = {}, opts = {}) {
   return { source_sys_id: artifact.source_sys_id, inferred, usage: resp.usage, model };
 }
 
-/** Reverse-engineer many artifacts (sequential so the cache warms on call 1, then reads). */
+/**
+ * Reverse-engineer many artifacts (sequential so the cache warms on call 1, then reads).
+ * `ctx.onProgress({stage,current,total})` fires after each item (this is the dominant-cost
+ * stage, so it drives the sync progress meter). `ctx.cancelToken.cancelled` is checked BEFORE
+ * each item — a cooperative cancel: at most one in-flight call finishes, then the loop stops
+ * and returns whatever completed so far (the caller filters unprocessed items out of the plan;
+ * nothing is left half-written since nothing has been applied to the DB yet at this stage).
+ */
 async function reverseEngineer(artifacts, ctx = {}) {
   const results = [];
-  for (const a of artifacts) results.push(await reverseEngineerOne(a, ctx));
+  for (let i = 0; i < artifacts.length; i++) {
+    if (ctx.cancelToken && ctx.cancelToken.cancelled) break;
+    results.push(await reverseEngineerOne(artifacts[i], ctx));
+    if (ctx.onProgress) ctx.onProgress({ stage: 'reverse_engineer', current: i + 1, total: artifacts.length });
+  }
   return results;
 }
 

@@ -226,7 +226,12 @@ function reconcileDrift(d) {
  */
 async function reconcile(input = {}, ctx = {}) {
   const proposals = [];
-  for (const it of (input.changed || [])) proposals.push(await reconcileChanged(it, ctx));
+  const changed = input.changed || [];
+  for (let i = 0; i < changed.length; i++) {
+    if (ctx.cancelToken && ctx.cancelToken.cancelled) break;
+    proposals.push(await reconcileChanged(changed[i], ctx));
+    if (ctx.onProgress) ctx.onProgress({ stage: 'reconcile', current: i + 1, total: changed.length });
+  }
   for (const it of (input.new || [])) proposals.push(reconcileNew(it));
   for (const d of (input.drift || [])) proposals.push(reconcileDrift(d));
   return proposals;

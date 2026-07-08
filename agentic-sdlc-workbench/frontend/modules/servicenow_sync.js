@@ -180,26 +180,139 @@ export async function render(container) {
 
   const busy = (on) => { previewBtn.disabled = on; runBtn.disabled = on; };
 
-  previewBtn.addEventListener('click', async () => {
-    busy(true); out.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><span>Capturing &amp; reconciling…</span></div>';
-    try {
-      const res = await apiFetch(`/projects/${pid}/servicenow/sync?dry_run=1`, { method: 'POST', body: JSON.stringify({}) });
-      renderPlan(out, res.plan, false);
-      localStorage.setItem(previewKey(pid), JSON.stringify({ plan: res.plan, ts: Date.now() }));
-    } catch (err) { out.innerHTML = ''; out.appendChild(el('div', { className: 'error-state' }, 'Preview failed: ' + err.message)); }
-    finally { busy(false); }
-  });
+  previewBtn.addEventListener('click', () => runEstimatedSyncFlow(pid, out, busy, true));
+  runBtn.addEventListener('click', () => runEstimatedSyncFlow(pid, out, busy, false));
+}
 
-  runBtn.addEventListener('click', async () => {
-    if (!confirm('Run the sync? Safe additive changes will be applied automatically; everything else will be queued for review. Populated Workbench content is never overwritten.')) return;
-    busy(true); out.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><span>Syncing…</span></div>';
-    try {
-      const res = await apiFetch(`/projects/${pid}/servicenow/sync`, { method: 'POST', body: JSON.stringify({}) });
-      renderResult(out, res);
-      localStorage.removeItem(previewKey(pid));
-    } catch (err) { out.innerHTML = ''; out.appendChild(el('div', { className: 'error-state' }, 'Sync failed: ' + err.message)); }
-    finally { busy(false); }
+// ── #105: estimate → confirm → async job (progress meter + cancel) ─────────────────────────
+// A dry run is NOT free — it runs the same AI stages as a real run and only skips the DB
+// write — so BOTH Preview and Run go through the same estimate-then-confirm flow before any
+// AI money is spent, then hand off to the async job endpoints for a live progress meter and a
+// cancel button (a long sync previously had no visibility and no way to stop it — #101/#105).
+async function runEstimatedSyncFlow(pid, out, busy, dryRun) {
+  busy(true);
+  out.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><span>Estimating…</span></div>';
+  let est;
+  try {
+    est = await apiFetch(`/projects/${pid}/servicenow/sync/estimate`, { method: 'POST', body: JSON.stringify({}) });
+  } catch (err) {
+    out.innerHTML = ''; out.appendChild(el('div', { className: 'error-state' }, 'Estimate failed: ' + err.message));
+    busy(false); return;
+  }
+  renderEstimatePanel(out, est, {
+    dryRun,
+    onAbort: () => { out.innerHTML = ''; busy(false); },
+    onStart: () => startAsyncSyncJob(pid, out, busy, dryRun),
   });
+}
+
+function renderEstimatePanel(out, est, { dryRun, onAbort, onStart }) {
+  out.innerHTML = '';
+  const box = el('div', { className: 'panel' });
+  box.appendChild(el('div', { className: 'panel-header' }, el('h3', { className: 'panel-title' }, dryRun ? 'Preview — before you start' : 'Run sync — before you start')));
+  const body = el('div', { className: 'panel-body', style: 'display:grid;gap:12px;max-width:600px' });
+  box.appendChild(body);
+
+  const stat = (val, lbl) => el('div', {}, el('div', { style: 'font-size:19px;font-weight:700' }, val), el('div', { style: 'font-size:11px;color:var(--text-muted)' }, lbl));
+  body.appendChild(el('div', { style: 'display:flex;gap:24px;flex-wrap:wrap' },
+    stat(String(est.total_new + est.total_changed), 'Records to process'),
+    stat(String(est.ai_path_count), 'Need AI interpretation'),
+    stat(String(est.deterministic_count), 'Deterministic (free, instant)'),
+    stat(est.estimated_seconds < 60 ? `~${est.estimated_seconds}s` : `~${Math.ceil(est.estimated_seconds / 60)} min`, 'Est. time'),
+    stat(`~$${est.estimated_cost_usd.toFixed(2)}`, 'Est. AI cost')));
+
+  if (est.ai_path_count === 0) {
+    body.appendChild(el('div', { style: 'font-size:12px;color:#1a7f37' },
+      '✓ No AI interpretation needed for this scope — this runs deterministically, in seconds, at no cost.'));
+  } else {
+    body.appendChild(el('div', { style: 'font-size:12px;color:var(--text-muted)' },
+      `${est.ai_path_count} record(s) need AI interpretation (e.g. AI agents, use cases, tools, or a flow header) — ` +
+      (dryRun ? 'a preview runs the same AI stages as a real run and is not free.'
+              : 'safe additive changes apply automatically; everything else is queued for human review. Populated Workbench content is never overwritten.')));
+  }
+  if (est.total_unchanged) body.appendChild(el('div', { style: 'font-size:11px;color:var(--text-muted)' }, `${est.total_unchanged} record(s) unchanged — skipped.`));
+
+  const startBtn = el('button', { className: 'btn btn-primary' }, dryRun ? 'Start preview' : 'Start sync');
+  const abortBtn = el('button', { className: 'btn btn-ghost', style: 'margin-left:8px' }, 'Cancel');
+  startBtn.addEventListener('click', onStart);
+  abortBtn.addEventListener('click', onAbort);
+  body.appendChild(el('div', {}, startBtn, abortBtn));
+  out.appendChild(box);
+}
+
+async function startAsyncSyncJob(pid, out, busy, dryRun) {
+  out.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><span>Starting…</span></div>';
+  let start;
+  try {
+    start = await apiFetch(`/projects/${pid}/servicenow/sync/async${dryRun ? '?dry_run=1' : ''}`, { method: 'POST', body: JSON.stringify({}) });
+  } catch (err) {
+    out.innerHTML = ''; out.appendChild(el('div', { className: 'error-state' }, 'Start failed: ' + err.message));
+    busy(false); return;
+  }
+  pollSyncJob(pid, start.job_id, out, dryRun, busy);
+}
+
+const STAGE_LABEL = { capturing: 'Capturing from ServiceNow…', reverse_engineer: 'Reverse-engineering records', reconcile: 'Reconciling changes', review: 'Reviewing changes' };
+
+function renderProgressPanel(out, progress, cancelling, onCancel) {
+  out.innerHTML = '';
+  const box = el('div', { className: 'panel' });
+  box.appendChild(el('div', { className: 'panel-header' }, el('h3', { className: 'panel-title' }, 'Working…')));
+  const body = el('div', { className: 'panel-body', style: 'display:grid;gap:10px;max-width:560px' });
+  box.appendChild(body);
+  const stage = progress && progress.stage;
+  const label = STAGE_LABEL[stage] || stage || 'Working…';
+  body.appendChild(el('div', { style: 'font-size:13px' }, `${label}${progress && progress.total ? ` (${progress.current}/${progress.total})` : '…'}`));
+  const pct = (progress && progress.total) ? Math.round((progress.current / progress.total) * 100) : 0;
+  const barOuter = el('div', { style: 'height:8px;background:var(--color-bg-panel,#eceff3);border-radius:4px;overflow:hidden' });
+  barOuter.appendChild(el('div', { style: `height:100%;width:${pct}%;background:var(--color-accent,#0969da);transition:width .3s` }));
+  body.appendChild(barOuter);
+  const cancelBtn = el('button', { className: 'btn btn-ghost btn-sm', disabled: cancelling }, cancelling ? 'Cancelling…' : 'Cancel');
+  cancelBtn.addEventListener('click', onCancel);
+  body.appendChild(cancelBtn);
+  out.appendChild(box);
+}
+
+function pollSyncJob(pid, jobId, out, dryRun, busy) {
+  let cancelling = false;
+  const timer = setInterval(tick, 1200);
+  async function tick() {
+    let job;
+    try { job = await apiFetch(`/projects/${pid}/servicenow/sync/async/${jobId}`); }
+    catch (err) {
+      clearInterval(timer);
+      out.innerHTML = ''; out.appendChild(el('div', { className: 'error-state' }, 'Lost connection to the sync job: ' + err.message));
+      busy(false); return;
+    }
+    if (job.status === 'running') {
+      renderProgressPanel(out, job.progress, cancelling, async () => {
+        if (cancelling) return;
+        cancelling = true;
+        try { await apiFetch(`/projects/${pid}/servicenow/sync/async/${jobId}/cancel`, { method: 'POST', body: JSON.stringify({}) }); showToast('Cancelling — finishing the current record…', 'info'); }
+        catch (err) { showToast('Cancel failed: ' + err.message, 'error'); cancelling = false; }
+      });
+      return;
+    }
+    clearInterval(timer);
+    if (job.status === 'complete' || job.status === 'cancelled') {
+      if (dryRun) {
+        renderPlan(out, job.planView, false);
+        localStorage.setItem(previewKey(pid), JSON.stringify({ plan: job.planView, ts: Date.now() }));
+      } else {
+        renderResult(out, { plan: job.planView, result: job.result });
+        localStorage.removeItem(previewKey(pid));
+      }
+      if (job.status === 'cancelled') {
+        out.insertBefore(el('div', {
+          style: 'font-size:12px;color:#92400e;background:#fff8e1;border:1px solid #f0e0a0;border-radius:6px;padding:8px 10px;margin-bottom:8px',
+        }, '⏹ Cancelled — showing the partial result for what completed before the stop. Unprocessed records will re-surface next sync.'), out.firstChild);
+      }
+    } else {
+      out.innerHTML = ''; out.appendChild(el('div', { className: 'error-state' }, 'Sync failed: ' + (job.error || 'unknown error')));
+    }
+    busy(false);
+  }
+  tick();
 }
 
 function summaryRow(s) {

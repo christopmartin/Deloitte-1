@@ -111,11 +111,24 @@ function genericSurfaces() {
 // columns key off the parent table NAME (sys_dictionary.name = table name); flow actions
 // and catalog variables key off the parent SYS_ID.
 //
-// COVERAGE NOTE (P2): the SDK capability registry models exactly two parent/child
-// taxonomies — `table → columns` and `catalogitem → variables` (the 81 child rows in the
-// baseline). Both instance-level relationships are captured here. Other surfaces (e.g.
-// forms) are NOT modelled as parent/child by the SDK, so we do not speculatively scrape
-// their sub-tables; add a row here only when the SDK gains a real child taxonomy for it.
+// COVERAGE NOTE (P2, extended for form fidelity — #105): the SDK capability registry models
+// `table → columns` and `catalogitem → variables`. Forms are a genuine THIRD taxonomy, just a
+// two-level one (form → form_section join row → elements), added here directly since sections
+// and mandatory/read-only behavior are literal ServiceNow data, not narrative — see BACKLOG #103's
+// research note that `form_design`'s only soft field is `behavior_notes`.
+//
+// Two ways a row's parent list is built:
+//   parentKey: 'sysId'|'name'  — the DEFAULT: parent list comes from that table's OWN top-level
+//     captured artifacts (source_sys_id / salient.name), as before.
+//   parentKeyField: '<field>' — a CHAINED (2nd-level) surface: the parent list is derived from
+//     an EARLIER CHILD_SURFACES entry's OWN captured rows, using a field captured on THOSE rows
+//     as the query key (queryKey) while still attaching new children under the parent ROW's own
+//     sys_id (sysId) — so `sys_ui_element` rows nest under the `sys_ui_form_section` row that named
+//     their section, even though the section's sys_id (not the join row's) is what the query filters
+//     on. Requires the referenced parentTable to appear EARLIER in this array (single forward pass).
+//   fields: '<sysparm_fields>' — optional explicit field list (supports dot-walks, e.g.
+//     'sys_ui_section.caption') so a single query can inline a related record's field without a
+//     separate table hop.
 const CHILD_SURFACES = [
   { childTable: 'sys_dictionary',           parentTable: 'sys_db_object', role: 'column',
     parentKey: 'name',  filter: p => `name=${p.name}^elementISNOTEMPTY`, nameField: 'element',       orderField: null },
@@ -125,6 +138,17 @@ const CHILD_SURFACES = [
   // parent ref (cat_item) stays in the payload; order drives child_order.
   { childTable: 'item_option_new',          parentTable: 'sc_cat_item',   role: 'variable',
     parentKey: 'sysId', filter: p => `cat_item=${p.sysId}`,               nameField: 'question_text', orderField: 'order' },
+  // Form sections: one row per (form, section) join. The section's own caption/name is
+  // dot-walked onto the SAME row so no separate sys_ui_section fetch is needed.
+  { childTable: 'sys_ui_form_section',      parentTable: 'sys_ui_form',   role: 'form_section',
+    parentKey: 'sysId', filter: p => `sys_ui_form=${p.sysId}`,            nameField: null,            orderField: 'position',
+    fields: 'sys_id,sys_ui_form,sys_ui_section,sys_ui_section.caption,sys_ui_section.name,position' },
+  // Fields shown within each section — chained off the sys_ui_section value captured above.
+  { childTable: 'sys_ui_element',           parentTable: 'sys_ui_form_section', role: 'form_element',
+    parentKeyField: 'sys_ui_section',       filter: p => `sys_ui_section=${p.queryKey}`, nameField: 'element', orderField: 'position' },
+  // UI-policy actions: which fields a policy makes mandatory/read-only/visible.
+  { childTable: 'sys_ui_policy_action',     parentTable: 'sys_ui_policy', role: 'policy_action',
+    parentKey: 'sysId', filter: p => `ui_policy=${p.sysId}`,              nameField: 'field',         orderField: null },
 ];
 
 // ── Slice: bound an ingest to a SUBSET of a scope (surface/type selection now, a future
@@ -274,9 +298,18 @@ async function captureScope({ scope, instance, user, pw, fetchImpl, slice }) {
   }
   for (const cs of CHILD_SURFACES) {
     if (allow && !allow.has(cs.childTable)) continue;   // child not in the slice (its parent wasn't selected)
-    for (const parent of (parentsByTable[cs.parentTable] || [])) {
+    // Chained (2nd-level) surface: derive the parent list from an earlier CHILD_SURFACES pass's
+    // OWN captured rows — queryKey is the field value the query filters on, sysId is that row's
+    // own identity (so children still attach under the row that named them, e.g. the section join
+    // row), NOT the referenced record's sys_id.
+    const parents = cs.parentKeyField
+      ? artifacts.filter(a => !a.__error && a.source_table === cs.parentTable && a.source_sys_id && a.payload && a.payload[cs.parentKeyField])
+          .map(a => ({ sysId: a.source_sys_id, queryKey: a.payload[cs.parentKeyField] }))
+      : (parentsByTable[cs.parentTable] || []);
+    for (const parent of parents) {
       if (cs.parentKey === 'name' && !parent.name) continue;
-      const baseUrl = `${base}/api/now/table/${cs.childTable}?sysparm_query=${encodeURIComponent(cs.filter(parent) + '^ORDERBYsys_id')}&sysparm_exclude_reference_link=true`;
+      const fieldsParam = cs.fields ? `&sysparm_fields=${encodeURIComponent(cs.fields)}` : '';
+      const baseUrl = `${base}/api/now/table/${cs.childTable}?sysparm_query=${encodeURIComponent(cs.filter(parent) + '^ORDERBYsys_id')}${fieldsParam}&sysparm_exclude_reference_link=true`;
       let rows = [];
       try {
         const out = await fetchAllRows(f, baseUrl, headers, sliceCap);

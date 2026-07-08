@@ -116,13 +116,32 @@ async function reviewChanged(item, ctx) {
   return { ...review, usage: resp.usage };
 }
 
-/** Augment each proposal with an independent `review`. Only `changed` gets the Opus pass. */
+/**
+ * Augment each proposal with an independent `review`. Only `changed` gets the Opus pass.
+ *
+ * Cooperative cancel (ctx.cancelToken) gates ONLY the about-to-start Opus call (the
+ * 'changed' branch) — it must NOT also drop the free, already-decided non-'changed' items
+ * (e.g. a 'new' proposal whose reverseEngineer call already completed and was already paid
+ * for in an earlier stage). The same cancelToken object is shared across every stage of one
+ * run, so by the time review() executes it may already be true from reverseEngineer having
+ * been cancelled earlier — checking it unconditionally at the top of this loop would silently
+ * discard that already-completed, cost-free work instead of merely refusing to spend MORE.
+ * A cancelled 'changed' item is skipped (not pushed to `out`) — it re-surfaces next sync.
+ */
 async function review(proposals, ctx = {}) {
   const out = [];
+  const changedTotal = proposals.filter(p => p.classification === 'changed').length;
+  let changedDone = 0;
   for (const p of proposals) {
     let rv;
-    if (p.classification === 'changed') rv = await reviewChanged(p, ctx);
-    else rv = { verdict: 'approve', destructive_confirmed: false, final_confidence: (p.proposal && p.proposal.confidence) ?? 0.6, issues: [], note: `${p.classification} — low-risk, not adversarially reviewed` };
+    if (p.classification === 'changed') {
+      if (ctx.cancelToken && ctx.cancelToken.cancelled) continue;   // skip only this Opus call; keep processing free items
+      rv = await reviewChanged(p, ctx);
+      changedDone++;
+      if (ctx.onProgress) ctx.onProgress({ stage: 'review', current: changedDone, total: changedTotal });
+    } else {
+      rv = { verdict: 'approve', destructive_confirmed: false, final_confidence: (p.proposal && p.proposal.confidence) ?? 0.6, issues: [], note: `${p.classification} — low-risk, not adversarially reviewed` };
+    }
     out.push({ ...p, review: rv });
   }
   return out;
