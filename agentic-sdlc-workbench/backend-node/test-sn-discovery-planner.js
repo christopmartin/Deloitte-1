@@ -35,10 +35,12 @@ global.fetch = async (url, opts) => {
 };
 
 const base = __dirname;
+const fs = require('fs');
 require(path.join(base, 'server.js'));
 const { db, generateId } = require(path.join(base, 'db'));
 const cap = require(path.join(base, 'agent', 'sn-capture'));
 const planner = require(path.join(base, 'agent', 'sn-discovery-planner'));
+const crossCheck = require(path.join(base, 'agent', 'cross-check'));
 
 const BASEURL = `http://127.0.0.1:${process.env.PORT}/api/v1`;
 const HEADERS = { 'Content-Type': 'application/json', 'X-User-ID': 'test-discplan' };
@@ -57,6 +59,19 @@ function makeProject(scope) {
               VALUES (?,?,?,?,?,?,?)`)
     .run(pid, cid, 'DiscPlan', `DP-${Date.now().toString(36).slice(-5)}${Math.floor(Math.random() * 1000)}`, scope, 'https://example.service-now.com', 0.75);
   return pid;
+}
+function makeIngestDoc(pid) {
+  const iid = generateId();
+  db.prepare(`INSERT INTO asdlc_ingest_document (ingest_id, project_id, document_title, ingest_status) VALUES (?,?,?, 'staged')`)
+    .run(iid, pid, 'Test Doc');
+  return iid;
+}
+function stageExtraction(ingestId, entityType, data, status) {
+  const eid = generateId();
+  db.prepare(`INSERT INTO asdlc_ingest_extraction (extraction_id, ingest_id, entity_type, entity_data, confidence, status, round, created_at)
+              VALUES (?,?,?,?,?,?,1,datetime('now'))`)
+    .run(eid, ingestId, entityType, JSON.stringify(data), 0.8, status || 'staged');
+  return eid;
 }
 
 (async () => {
@@ -147,15 +162,63 @@ function makeProject(scope) {
   await cap.captureScope({ scope: 'x', instance: 'https://t', user: 'u', pw: 'p', fetchImpl: mockCaptureFetch, slice: null });
   ok(!queried.has(CUSTOM_TABLE), 'whole-scope (no slice) capture is UNCHANGED — never probes an arbitrary table name');
 
-  // ── Part 6: HTTP — approve maps a draft plan to the import-profile slice ────
-  console.log('\n--- Part 6: HTTP approve ---');
+  // ── Part 6: loadDocumentRequirements() — document-scoped, pre-promote ───────
+  console.log('\n--- Part 6: loadDocumentRequirements ---');
+  const pidReq = makeProject('x_test_req');
+  const iidReq = makeIngestDoc(pidReq);
+  stageExtraction(iidReq, 'functional_req', { title: 'Order laptop', description: 'Users order a laptop.' }, 'staged');
+  stageExtraction(iidReq, 'functional_req', { title: 'Track order', description: 'Users track fulfillment.' }, 'needs_clarification');
+  stageExtraction(iidReq, 'nonfunctional_req', { title: 'Fast fulfillment', description: 'Must be quick.', measurable_target: '< 3 days' }, 'staged');
+  stageExtraction(iidReq, 'functional_req', { title: 'Rejected one', description: 'Should not appear.' }, 'rejected');
+  stageExtraction(iidReq, 'functional_req', { title: 'Already promoted', description: 'Should not appear either.' }, 'promoted');
+
+  const docReqs = crossCheck.loadDocumentRequirements(iidReq);
+  ok(docReqs.length === 3, `returns only staged/needs_clarification FR+NFR (got ${docReqs.length})`);
+  ok(docReqs.filter(r => r.req_type === 'functional').every(r => /^FR-draft-\d+$/.test(r.slug)), 'FR rows get a synthesized FR-draft-N ref, not a real slug');
+  ok(docReqs.find(r => r.req_type === 'nonfunctional').slug === 'NFR-draft-1', 'NFR rows get their own independent NFR-draft-N counter');
+  ok(docReqs.every(r => r.draft === true), 'every row is flagged draft:true');
+  ok(docReqs.find(r => r.title === 'Track order').text.includes('Users track fulfillment'), 'text mirrors what loadRequirements builds from title+description');
+  ok(!docReqs.some(r => r.title === 'Rejected one' || r.title === 'Already promoted'), 'rejected/promoted extractions are excluded');
+
+  const docReqsAgain = crossCheck.loadDocumentRequirements(iidReq);
+  ok(JSON.stringify(docReqsAgain.map(r => r.slug)) === JSON.stringify(docReqs.map(r => r.slug)), 'draft refs are stable across a re-run that adds nothing new');
+
+  // ── Part 7: discovery: clarification helpers ─────────────────────────────────
+  console.log('\n--- Part 7: discovery clarification helpers ---');
+  const iidDisc = makeIngestDoc(pidReq);
+  ok(crossCheck.getNextDiscoveryRound(iidDisc) === 1, 'first discovery round is 1 (no rows yet)');
+
+  const wrote1 = crossCheck.writeDiscoveryClarification(iidDisc, 1, { question: 'Which workflow?', context: 'ambiguous', related_tables: ['sys_hub_flow'] });
+  ok(wrote1 === true, 'first discovery clarification on a table is written');
+  const wrote2 = crossCheck.writeDiscoveryClarification(iidDisc, 1, { question: 'Which workflow? (again)', related_tables: ['sys_hub_flow'] });
+  ok(wrote2 === false, 'a second, still-unanswered question about the SAME table is deduped (not duplicated)');
+  const wroteOther = crossCheck.writeDiscoveryClarification(iidDisc, 1, { question: 'Which catalog category?', related_tables: ['sc_category'] });
+  ok(wroteOther === true, 'a question about a DIFFERENT table is not deduped');
+
+  ok(crossCheck.getAnsweredDiscoveryClarifications(iidDisc).length === 0, 'nothing answered yet');
+  const openDiscRow = db.prepare("SELECT clarification_id FROM asdlc_ingest_clarification WHERE ingest_id=? AND target_field='discovery:sys_hub_flow'").get(iidDisc);
+  db.prepare("UPDATE asdlc_ingest_clarification SET answer_text='Use WF-1', answered_at=datetime('now'), answered_by='tester' WHERE clarification_id=?").run(openDiscRow.clarification_id);
+  const answered = crossCheck.getAnsweredDiscoveryClarifications(iidDisc);
+  ok(answered.length === 1 && answered[0].answer_text === 'Use WF-1', 'getAnsweredDiscoveryClarifications returns only answered discovery: rows');
+  ok(crossCheck.getNextDiscoveryRound(iidDisc) === 2, 'next round increments past the highest existing discovery round');
+
+  // ── Part 8: four-file open-question-count fix (regression guard) ────────────
+  console.log('\n--- Part 8: open-question-count fix ---');
+  for (const f of ['agent/processor.js', 'agent/claude-processor.js', 'agent/stub-processor.js', 'run-live-extract.js']) {
+    const src = fs.readFileSync(path.join(base, f), 'utf8');
+    ok(/answer_text IS NULL AND target_field NOT LIKE/.test(src), `${f} excludes discovery: rows from its open-question count`);
+  }
+
+  // ── Part 9: HTTP — approve maps a draft plan to the import-profile slice ────
+  console.log('\n--- Part 9: HTTP approve ---');
   const pid = makeProject('x_test_http');
+  const iid = makeIngestDoc(pid);
   const planId = generateId();
-  db.prepare(`INSERT INTO asdlc_sn_discovery_plan (plan_id, project_id, scope, status, plan_json, created_by, updated_at)
-              VALUES (?,?,?, 'draft', ?, ?, datetime('now'))`)
-    .run(planId, pid, 'x_test_http', JSON.stringify({
+  db.prepare(`INSERT INTO asdlc_sn_discovery_plan (plan_id, project_id, ingest_id, scope, status, plan_json, created_by, updated_at)
+              VALUES (?,?,?,?, 'draft', ?, ?, datetime('now'))`)
+    .run(planId, pid, iid, 'x_test_http', JSON.stringify({
       include: [
-        { table: 'sc_cat_item', relation: 'direct', rationale: 'FR-001', mapped_requirement_slugs: ['FR-001'], confidence: 0.9 },
+        { table: 'sc_cat_item', relation: 'direct', rationale: 'FR-draft-1', mapped_requirement_slugs: ['FR-draft-1'], confidence: 0.9 },
         { table: 'sys_hub_flow', relation: 'related', related_to: 'sc_cat_item', rationale: 'fulfillment', confidence: 0.7, record_filter: 'active=true' },
       ], exclude: [{ table: 'sys_script', reason: 'not referenced by any requirement' }], notes: 'test plan',
     }), 'tester');
@@ -172,18 +235,31 @@ function makeProject(scope) {
   const savedProfile = db.prepare('SELECT sn_import_profile_json FROM asdlc_project WHERE project_id=?').get(pid);
   ok(!!savedProfile.sn_import_profile_json, 'the SAME import-profile column the manual grid writes is now populated');
 
-  // ── Part 7: HTTP — GET returns the latest plan ───────────────────────────────
-  console.log('\n--- Part 7: HTTP get ---');
-  const got = await get(`/projects/${pid}/servicenow/discovery-plan`);
-  ok(got.status === 200 && got.body.plan_id === planId, 'GET returns the latest plan for the project');
+  // ── Part 10: HTTP — GET now requires ingest_id, scoped per document ─────────
+  console.log('\n--- Part 10: HTTP get (ingest_id-scoped) ---');
+  const noIngestParam = await get(`/projects/${pid}/servicenow/discovery-plan`);
+  ok(noIngestParam.status === 400, 'GET without ?ingest_id= -> 400');
+
+  const got = await get(`/projects/${pid}/servicenow/discovery-plan?ingest_id=${iid}`);
+  ok(got.status === 200 && got.body.plan_id === planId, 'GET ?ingest_id= returns the latest plan for that document');
   ok(got.body.plan && got.body.plan.include.length === 2, 'plan_json is parsed back into an object');
 
-  const noPlan = await get(`/projects/${generateId()}/servicenow/discovery-plan`);
-  ok(noPlan.status === 200 && noPlan.body.plan === null, 'a project with no plans yet returns {plan:null}');
+  const otherIid = makeIngestDoc(pid);
+  const noPlan = await get(`/projects/${pid}/servicenow/discovery-plan?ingest_id=${otherIid}`);
+  ok(noPlan.status === 200 && noPlan.body.plan === null, 'a DIFFERENT document with no plan yet returns {plan:null} — never sees another document\'s plan');
 
-  // ── Part 8: HTTP — generate end-to-end (mocked network, stub AI) ─────────────
-  console.log('\n--- Part 8: HTTP generate (mocked network) ---');
+  // ── Part 11: HTTP — generate requires ingest_id ──────────────────────────────
+  console.log('\n--- Part 11: HTTP generate — ingest_id validation ---');
+  const noIngestBody = await post(`/projects/${pid}/servicenow/discovery-plan`, {});
+  ok(noIngestBody.status === 400, 'generate without ingest_id -> 400');
+  const badIngest = await post(`/projects/${pid}/servicenow/discovery-plan`, { ingest_id: 'nope' });
+  ok(badIngest.status === 404, 'generate with an ingest_id not in this project -> 404');
+
+  // ── Part 12: HTTP — generate reuses an existing assessment that covers the scope ──
+  console.log('\n--- Part 12: HTTP generate — reuse existing assessment ---');
   const pid2 = makeProject('x_test_gen');
+  const iid2 = makeIngestDoc(pid2);
+  stageExtraction(iid2, 'functional_req', { title: 'Order laptop', description: 'From the catalog.' }, 'staged');
   const asrId = generateId();
   db.prepare(`INSERT INTO asdlc_sn_assessment (assessment_id, project_id, status, report_json, created_at)
               VALUES (?,?, 'complete', ?, datetime('now'))`)
@@ -195,16 +271,68 @@ function makeProject(scope) {
     return { ok: true, status: 200, json: async () => ({ result: [] }), headers: { get: () => null } };
   };
 
-  const gen = await post(`/projects/${pid2}/servicenow/discovery-plan`, { instance: 'https://example.service-now.com', user: 'u', pw: 'p' });
+  const gen = await post(`/projects/${pid2}/servicenow/discovery-plan`, { ingest_id: iid2, instance: 'https://example.service-now.com', user: 'u', pw: 'p' });
   ok(gen.status === 200, `generate succeeds (got ${gen.status}: ${JSON.stringify(gen.body)})`);
   ok(gen.body._stub === true, 'generate ran in stub AI mode (no ANTHROPIC_API_KEY)');
   ok(gen.body.plan && Array.isArray(gen.body.plan.include), 'generate returns a plan with an include[] array');
   ok(gen.body.status === 'draft', 'a freshly generated plan is draft, not approved');
+  ok(gen.body.assessment_auto_run === false, 'an existing assessment covering the scope is reused, not re-run');
+  const assessCountAfter = db.prepare('SELECT COUNT(*) c FROM asdlc_sn_assessment WHERE project_id=?').get(pid2).c;
+  ok(assessCountAfter === 1, 'no NEW assessment row was created when an existing one already covers the scope');
   mockRoutes.current = null;
 
+  // ── Part 13: HTTP — generate AUTO-RUNS an assessment when none covers the scope ──
+  console.log('\n--- Part 13: HTTP generate — automatic assessment ---');
   const pid3 = makeProject('x_test_noassess');
-  const noAssess = await post(`/projects/${pid3}/servicenow/discovery-plan`, { instance: 'https://example.service-now.com', user: 'u', pw: 'p' });
-  ok(noAssess.status === 409, 'generating without a completed assessment first -> 409, not a silent empty plan');
+  const iid3 = makeIngestDoc(pid3);
+  stageExtraction(iid3, 'functional_req', { title: 'Order laptop', description: 'From the catalog.' }, 'staged');
+
+  mockRoutes.current = (url) => {
+    if (url.includes('/api/now/table/sys_properties')) return { ok: true, status: 200, json: async () => ({ result: [{ sys_id: '1' }] }), headers: { get: () => null } };
+    if (url.includes('/api/now/stats/sc_cat_item')) return { ok: true, status: 200, json: async () => ({ result: { stats: { count: '3' } } }), headers: { get: () => null } };
+    if (url.includes('/api/now/table/sys_metadata')) return { ok: true, status: 200, json: async () => ({ result: [{ sys_id: 'M1', sys_class_name: 'sc_cat_item' }] }), headers: { get: () => null } };
+    return { ok: true, status: 200, json: async () => ({ result: [] }), headers: { get: () => null } };
+  };
+
+  const autoGen = await post(`/projects/${pid3}/servicenow/discovery-plan`, { ingest_id: iid3, instance: 'https://example.service-now.com', user: 'u', pw: 'p' });
+  ok(autoGen.status === 200, `generate succeeds via auto-assessment, not a silent empty plan or a 409 (got ${autoGen.status}: ${JSON.stringify(autoGen.body)})`);
+  ok(autoGen.body.assessment_auto_run === true, 'response flags that the assessment was run automatically');
+  const newAssessment = db.prepare("SELECT status FROM asdlc_sn_assessment WHERE project_id=? AND status='complete'").get(pid3);
+  ok(!!newAssessment, 'a real, persisted, complete assessment row now exists for this project — same as a manual scan would leave behind');
+  mockRoutes.current = null;
+
+  // ── Part 14: HTTP — generate surfaces a clear error when auto-assessment fails ──
+  console.log('\n--- Part 14: HTTP generate — auto-assessment failure ---');
+  const pid4 = makeProject('x_test_badcreds');
+  const iid4 = makeIngestDoc(pid4);
+  stageExtraction(iid4, 'functional_req', { title: 'Order laptop', description: 'From the catalog.' }, 'staged');
+  mockRoutes.current = (url) => {
+    if (url.includes('/api/now/table/sys_properties')) return { ok: false, status: 401, json: async () => null, headers: { get: () => null } };
+    return { ok: true, status: 200, json: async () => ({ result: [] }), headers: { get: () => null } };
+  };
+  const badAuth = await post(`/projects/${pid4}/servicenow/discovery-plan`, { ingest_id: iid4, instance: 'https://example.service-now.com', user: 'u', pw: 'p' });
+  ok(badAuth.status === 502, `bad credentials fail loudly (got ${badAuth.status}: ${JSON.stringify(badAuth.body)}) — never a silent empty plan`);
+  mockRoutes.current = null;
+
+  // ── Part 15: HTTP — discovery-answer endpoint, discovery:-only guard ─────────
+  console.log('\n--- Part 15: HTTP discovery-answer endpoint ---');
+  const iid5 = makeIngestDoc(pid);
+  const discCid = generateId();
+  db.prepare(`INSERT INTO asdlc_ingest_clarification (clarification_id, ingest_id, round, question_text, target_entity_type, target_field, created_at)
+              VALUES (?,?,1,?,?,?,datetime('now'))`).run(discCid, iid5, 'Which table?', 'sn_discovery_plan', 'discovery:sc_cat_item');
+  const conflictCid = generateId();
+  db.prepare(`INSERT INTO asdlc_ingest_clarification (clarification_id, ingest_id, round, question_text, target_entity_type, target_field, created_at)
+              VALUES (?,?,1,?,?,?,datetime('now'))`).run(conflictCid, iid5, 'Real conflict?', 'design', 'conflict:title');
+
+  const answerRes = await post(`/projects/${pid}/servicenow/discovery-plan/clarifications/answer`, {
+    ingest_id: iid5, answers: { [discCid]: 'Use sc_cat_item', [conflictCid]: 'Trying to sneak this through' },
+  });
+  ok(answerRes.status === 200, `discovery-answer succeeds (got ${answerRes.status})`);
+  ok(answerRes.body.answered === 1, 'only the discovery: row is reported as answered, even though 2 answers were submitted');
+
+  const rows = db.prepare('SELECT clarification_id, answer_text FROM asdlc_ingest_clarification WHERE ingest_id=?').all(iid5);
+  ok(rows.find(r => r.clarification_id === discCid).answer_text === 'Use sc_cat_item', 'the discovery: row WAS answered');
+  ok(rows.find(r => r.clarification_id === conflictCid).answer_text === null, "the conflict: row was NOT answered — this endpoint can never bypass a real clarification's normal side effects");
 
   console.log(`\n${pass} passed, ${fail} failed`);
   done(fail ? 1 : 0);

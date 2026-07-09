@@ -51,6 +51,12 @@ const PLANNER_SYSTEM_PROMPT = [
   'records. Do not include ServiceNow system/audit plumbing tables. If a requirement does not map to',
   'anything in the inventory, say so in notes rather than guessing.',
   '',
+  'Clarifications vs notes: use `clarifications` ONLY for a genuine fork you are not confident enough',
+  'to resolve alone — a real ambiguity where a human\'s answer would change which table(s) you pick.',
+  'These become real questions the human answers before you get another look. Use `notes` for caveats',
+  'that do not need an answer (e.g. a requirement that maps to nothing in the inventory). Most plans',
+  'should raise zero clarifications — reserve them for cases that actually warrant a human decision.',
+  '',
   'Call the emit_import_plan tool exactly once with your analysis. Do not write a prose reply.',
 ].join('\n');
 
@@ -92,6 +98,19 @@ const EMIT_TOOL = {
         },
       },
       notes: { type: 'string', description: 'Any caveats — e.g. a requirement that maps to nothing in the inventory' },
+      clarifications: {
+        type: 'array',
+        description: 'Genuine ambiguities you were not confident enough to resolve alone. Empty if your plan above is your confident best answer.',
+        items: {
+          type: 'object',
+          properties: {
+            question: { type: 'string', description: 'The question to ask the human' },
+            context: { type: 'string', description: 'Why this is ambiguous / what would resolve it' },
+            related_tables: { type: 'array', items: { type: 'string' }, description: 'The table(s) this question concerns' },
+          },
+          required: ['question'],
+        },
+      },
     },
     required: ['include'],
   },
@@ -114,7 +133,7 @@ function referenceLines(table, edges) {
   return [...out, ...inbound];
 }
 
-function buildPlanUserMessage({ requirements, inventory, scope }) {
+function buildPlanUserMessage({ requirements, inventory, scope, pastDiscoveryQA }) {
   const lines = [`ServiceNow scope: ${scope || '(unspecified)'}`, ''];
   lines.push(`Requirements (${(requirements || []).length}):`);
   if (!requirements || !requirements.length) {
@@ -131,6 +150,12 @@ function buildPlanUserMessage({ requirements, inventory, scope }) {
     if (refs.length) lines.push(...refs);
   }
   if (!tables.length) lines.push('  (no tables with records found in this scope)');
+  // Placed in the (per-call-varying) user message, not the byte-identical, cache-tagged
+  // system prompt — a prior clarification round's answers, if any, refine this call's plan.
+  if (Array.isArray(pastDiscoveryQA) && pastDiscoveryQA.length) {
+    lines.push('', `A human already answered ${pastDiscoveryQA.length} of your prior clarifying question(s) — use these answers:`);
+    for (const qa of pastDiscoveryQA) lines.push(`  - Q: ${qa.question}\n    A: ${qa.answer}`);
+  }
   lines.push('', 'Identify the focused import plan and call emit_import_plan.');
   return lines.join('\n');
 }
@@ -199,7 +224,7 @@ function stubPlan({ inventory }) {
       });
     }
   }
-  return { include, exclude: [], notes: '[stub — no ANTHROPIC_API_KEY; offline deterministic plan]', _stub: true };
+  return { include, exclude: [], notes: '[stub — no ANTHROPIC_API_KEY; offline deterministic plan]', clarifications: [], _stub: true };
 }
 
 /**
@@ -241,7 +266,7 @@ async function planDiscovery(input, ctx = {}) {
   aiConfig.logToolCalls('sn_discovery_planner', (resp.content || []).filter(b => b.type === 'tool_use'));
 
   const tu = (resp.content || []).find(b => b.type === 'tool_use' && b.name === EMIT_TOOL.name);
-  const plan = tu ? { include: tu.input.include || [], exclude: tu.input.exclude || [], notes: tu.input.notes || '' }
+  const plan = tu ? { include: tu.input.include || [], exclude: tu.input.exclude || [], notes: tu.input.notes || '', clarifications: tu.input.clarifications || [] }
                   : { ...stubPlan(input), notes: 'model did not call emit_import_plan — deterministic fallback used', _unparsed: true };
   return { plan, usage: resp.usage, model };
 }

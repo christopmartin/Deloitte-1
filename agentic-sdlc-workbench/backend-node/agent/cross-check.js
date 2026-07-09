@@ -34,8 +34,9 @@ const aiConfig = require('./ai-config');
 const MAX_NEIGHBORHOOD = 40;   // cap candidates fed to the deep scan; beyond → manual-review flag
 const SYSTEM_ALIASES = ['sap', 'oracle', 'servicenow', 'workday', 'salesforce', 'netsuite', 'coupa', 'ariba'];
 const STOPWORDS = new Set(['the','a','an','for','and','or','of','to','via','only','with','from','detail','lookup','retrieval','invoice','agent','step','system','data','read','write','new']);
-const CONFLICT_PREFIX = 'conflict:';   // blocking clarification marker
+const CONFLICT_PREFIX  = 'conflict:';   // blocking clarification marker
 const FYI_PREFIX       = 'fyi:';        // non-blocking note marker
+const DISCOVERY_PREFIX = 'discovery:';  // ServiceNow discovery-plan ambiguity marker (advisory, never blocks promote)
 
 // Resolve platform-scoped AI Guidance (house rules) for this document and render it
 // as prompt lines. The conflict/ripple judges honour the same rules the extractor
@@ -210,6 +211,45 @@ function loadRequirements(projectId) {
     out.push({ req_type: 'functional', id: r.id, slug: r.slug, title: r.title, text: `${r.title} ${r.description || ''}` });
   for (const r of db.prepare("SELECT nfr_id id, slug, title, description, measurable_target FROM asdlc_nonfunctional_req WHERE project_id=? AND status!='deleted'").all(projectId))
     out.push({ req_type: 'nonfunctional', id: r.id, slug: r.slug, title: r.title, text: `${r.title} ${r.description || ''} ${r.measurable_target || ''}` });
+  return out;
+}
+
+/**
+ * Requirements from ONE document's own STAGED extractions — i.e. before promote, before any
+ * Change Packet exists. Unlike loadRequirements() (materialized, project-wide, only visible
+ * after full promote+approve), this reads asdlc_ingest_extraction directly so the ServiceNow
+ * discovery planner can see a document's requirements as early as its own review window allows.
+ * Staged extractions have no real slug yet (assigned at promote) — synthesizes a display-only
+ * draft ref ('FR-draft-1', 'NFR-draft-1', ...) into the same `slug` field, ordered by
+ * created_at so it stays stable across a re-run that doesn't add new extractions. NEVER
+ * persisted anywhere — a pure read-time label. entity_data mirrors the extract_functional_req/
+ * extract_nonfunctional_req tool schemas (entity-registry.js), so `title`/`description`/
+ * `measurable_target` line up with what loadRequirements() reads from the materialized columns.
+ */
+function loadDocumentRequirements(ingestId) {
+  const rows = db.prepare(
+    `SELECT extraction_id, entity_type, entity_data, confidence, status, created_at
+     FROM asdlc_ingest_extraction
+     WHERE ingest_id=? AND entity_type IN ('functional_req','nonfunctional_req')
+       AND status IN ('staged','needs_clarification')
+     ORDER BY created_at, extraction_id`
+  ).all(ingestId);
+  const counters = { functional_req: 0, nonfunctional_req: 0 };
+  const prefix = { functional_req: 'FR', nonfunctional_req: 'NFR' };
+  const out = [];
+  for (const r of rows) {
+    let data; try { data = JSON.parse(r.entity_data) || {}; } catch { data = {}; }
+    counters[r.entity_type]++;
+    const slug = `${prefix[r.entity_type]}-draft-${counters[r.entity_type]}`;
+    const text = r.entity_type === 'nonfunctional_req'
+      ? `${data.title || ''} ${data.description || ''} ${data.measurable_target || ''}`
+      : `${data.title || ''} ${data.description || ''}`;
+    out.push({
+      req_type: r.entity_type === 'nonfunctional_req' ? 'nonfunctional' : 'functional',
+      id: r.extraction_id, slug, title: data.title || '', text, draft: true,
+      confidence: r.confidence, status: r.status,
+    });
+  }
   return out;
 }
 
@@ -445,6 +485,38 @@ function hasOpenConflicts(ingestId) {
   ).get(ingestId).c > 0;
 }
 
+// ── ServiceNow discovery-plan clarifications (advisory, never block promote) ──────
+// Reuses the EXACT writeMarkedClarification mechanism/dedup as conflict:/fyi: — a genuine
+// planner ambiguity becomes a real question in the document's own Q&A, not a passive note.
+/**
+ * Raise ONE discovery-planner ambiguity in the document's Q&A. `item` is one entry of the
+ * planner's emit_import_plan `clarifications[]` ({question, context, related_tables}). Keyed
+ * on the first related table (a coarse dedup key, matching the coarseness already accepted
+ * on the extraction side) — never blocks promote.
+ */
+function writeDiscoveryClarification(ingestId, round, item) {
+  const table = (Array.isArray(item.related_tables) && item.related_tables[0]) || 'general';
+  return writeMarkedClarification(ingestId, round, DISCOVERY_PREFIX, {
+    question: item.question, context: item.context,
+    target_entity_type: 'sn_discovery_plan', target_field: table,
+  });
+}
+
+/** Next round number for discovery: clarifications on this document (independent of the real Q&A round counter). */
+function getNextDiscoveryRound(ingestId) {
+  const row = db.prepare(
+    "SELECT MAX(round) AS r FROM asdlc_ingest_clarification WHERE ingest_id=? AND target_field LIKE ?"
+  ).get(ingestId, `${DISCOVERY_PREFIX}%`);
+  return (row && row.r != null ? row.r : 0) + 1;
+}
+
+/** Answered discovery: clarifications for this document, in round order — fed back into a re-plan call. */
+function getAnsweredDiscoveryClarifications(ingestId) {
+  return db.prepare(
+    "SELECT * FROM asdlc_ingest_clarification WHERE ingest_id=? AND target_field LIKE ? AND answer_text IS NOT NULL ORDER BY round, created_at"
+  ).all(ingestId, `${DISCOVERY_PREFIX}%`);
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────────
 /**
  * Run the ingest cross-check over a round's staged extractions.
@@ -655,6 +727,7 @@ function runPostApplyCheck(cpId) {
   }
 }
 
-module.exports = { runCrossCheck, hasOpenConflicts, runPostApplyCheck, CONFLICT_PREFIX, FYI_PREFIX, loadRequirements,
+module.exports = { runCrossCheck, hasOpenConflicts, runPostApplyCheck, CONFLICT_PREFIX, FYI_PREFIX, DISCOVERY_PREFIX,
+  loadRequirements, loadDocumentRequirements, writeDiscoveryClarification, getNextDiscoveryRound, getAnsweredDiscoveryClarifications,
   _internal: { salientTokens, scanDesignDrift, synthesiseFollowups, loadDesignCorpus,
     findMergeSurvivor, droppedInterfaceFields } };

@@ -8,7 +8,7 @@
  */
 import {
   apiFetch, tag, statusTag, formatDateTime,
-  el, escHtml, showToast, getCurrentProjectId, getCurrentUserId, loadCatalog,
+  el, escHtml, showToast, getCurrentProjectId, getCurrentUserId, loadCatalog, navigate,
 } from '../app.js';
 
 const DOC_TYPES = [
@@ -567,16 +567,25 @@ async function renderDetail(doc, pane) {
   stopProcessingPoll();
   pane.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div></div>';
 
-  // Fetch live state + extractions + clarifications + AI usage in parallel
-  let fresh = doc, extractions = [], clarifications = [], usage = [];
+  // Fetch live state + extractions + clarifications + AI usage + the ServiceNow plan (if
+  // any) for this document, in parallel.
+  let fresh = doc, extractions = [], clarifications = [], usage = [], planRow = { plan: null };
   try {
-    [fresh, extractions, clarifications, usage] = await Promise.all([
+    [fresh, extractions, clarifications, usage, planRow] = await Promise.all([
       apiFetch(`/ingest-documents/${doc.ingest_id}`).catch(() => doc),
       apiFetch(`/ingest-documents/${doc.ingest_id}/extractions`).catch(() => []),
       apiFetch(`/ingest-documents/${doc.ingest_id}/clarifications`).catch(() => []),
       apiFetch(`/ingest-documents/${doc.ingest_id}/usage`).catch(() => []),
+      apiFetch(`/projects/${doc.project_id}/servicenow/discovery-plan?ingest_id=${doc.ingest_id}`).catch(() => ({ plan: null })),
     ]);
   } catch { /* use defaults */ }
+
+  // Split BEFORE any branch below uses `clarifications` — discovery: rows are advisory
+  // ServiceNow-plan ambiguities, answered through their OWN mini-form (buildServiceNowPlanSection),
+  // never the real Q&A batch (buildClarificationForm), which would otherwise re-trigger a full,
+  // unrelated, costly extraction re-run just to answer a ServiceNow-table question.
+  const discoveryQs = clarifications.filter(c => typeof c.target_field === 'string' && c.target_field.startsWith('discovery:'));
+  const normalQs = clarifications.filter(c => !(typeof c.target_field === 'string' && c.target_field.startsWith('discovery:')));
 
   pane.innerHTML = '';
 
@@ -648,8 +657,8 @@ async function renderDetail(doc, pane) {
     startProcessingPoll(fresh, pane);   // auto-refresh when extraction resolves
 
   } else if (fresh.ingest_status === 'review_required') {
-    const openQ = clarifications.filter(c => !c.answer_text);
-    const answered = clarifications.filter(c => c.answer_text);
+    const openQ = normalQs.filter(c => !c.answer_text);
+    const answered = normalQs.filter(c => c.answer_text);
     const currentRound = openQ.length > 0 ? Math.max(...openQ.map(c => c.round)) : 1;
 
     // Staged so far
@@ -667,14 +676,25 @@ async function renderDetail(doc, pane) {
     // Current round questions
     body.appendChild(buildClarificationForm(fresh, openQ, currentRound, pane));
 
+    // ServiceNow import plan — available as early as possible in the pre-promote window,
+    // as soon as any FR/NFR has been staged (independent of the real Q&A above).
+    if (extractions.some(e => e.status === 'staged' && (e.entity_type === 'functional_req' || e.entity_type === 'nonfunctional_req'))) {
+      body.appendChild(buildServiceNowPlanSection(fresh, planRow, discoveryQs.filter(c => !c.answer_text), pane));
+    }
+
   } else if (fresh.ingest_status === 'staged') {
     body.appendChild(buildExtractionsSection(
       extractions.filter(e => e.status === 'staged'), true, fresh, pane
     ));
 
     // Show answered history
-    if (clarifications.some(c => c.answer_text)) {
-      body.appendChild(buildAnsweredSummary(clarifications.filter(c => c.answer_text)));
+    if (normalQs.some(c => c.answer_text)) {
+      body.appendChild(buildAnsweredSummary(normalQs.filter(c => c.answer_text)));
+    }
+
+    // ServiceNow import plan — still pre-promote here too.
+    if (extractions.some(e => e.status === 'staged' && (e.entity_type === 'functional_req' || e.entity_type === 'nonfunctional_req'))) {
+      body.appendChild(buildServiceNowPlanSection(fresh, planRow, discoveryQs.filter(c => !c.answer_text), pane));
     }
 
   } else if (fresh.ingest_status === 'promoted') {
@@ -821,6 +841,85 @@ function buildProcessingSection() {
   return sec;
 }
 
+/**
+ * ONE clarifying-question card — colored border/badge keyed off the target_field prefix
+ * convention (conflict:/fyi:/standing:/discovery:), plus a single answer textarea. Shared by
+ * buildClarificationForm's real Q&A batch and buildServiceNowPlanSection's SEPARATE discovery
+ * mini-form — never the same DOM/submit path, since answering a discovery: question must
+ * never trigger the full extraction re-run that answering a real question does.
+ * @returns {{block: HTMLElement, textarea: HTMLElement}}
+ */
+function buildQuestionCard(q, index) {
+  const isConflict  = typeof q.target_field === 'string' && q.target_field.startsWith('conflict:');
+  const isFyi       = typeof q.target_field === 'string' && q.target_field.startsWith('fyi:');
+  const isStanding  = typeof q.target_field === 'string' && q.target_field.startsWith('standing:');
+  const isDiscovery = typeof q.target_field === 'string' && q.target_field.startsWith('discovery:');
+
+  const qBlock = el('div', { style: {
+    background: 'var(--color-bg)',
+    border: isConflict  ? '1px solid var(--color-danger, #C62828)'
+          : isStanding  ? '1px solid var(--color-warn, #E65100)'
+          : isDiscovery ? '1px solid var(--color-accent)'
+          :               '1px solid var(--color-border)',
+    borderLeft: isConflict  ? '3px solid var(--color-danger, #C62828)'
+             : isStanding  ? '3px solid var(--color-warn, #E65100)'
+             : isDiscovery ? '3px solid var(--color-accent)'
+             :               '1px solid var(--color-border)',
+    borderRadius: 'var(--radius)',
+    padding: '12px',
+    marginBottom: '12px',
+  }});
+
+  // Question header
+  const qHdr = el('div', { style: { display: 'flex', alignItems: 'flex-start', gap: '10px', marginBottom: '8px' } });
+  qHdr.appendChild(el('span', { style: {
+    background: isConflict ? 'var(--color-danger, #C62828)' : isStanding ? 'var(--color-warn, #E65100)' : 'var(--color-accent)',
+    color: '#fff',
+    borderRadius: '50%',
+    width: '20px', height: '20px', minWidth: '20px',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    fontSize: '11px', fontWeight: '700',
+  }}, String(index + 1)));
+  const qText = el('span', { style: { fontSize: '13px', fontWeight: '500', lineHeight: '1.5' } });
+  if (isConflict) qText.appendChild(tag('⚠ Conflict', 'danger'));
+  else if (isFyi) qText.appendChild(tag('ℹ FYI', 'muted'));
+  else if (isStanding) qText.appendChild(tag('💰 Cost Setup', 'warn'));
+  else if (isDiscovery) qText.appendChild(tag('🔎 ServiceNow', 'accent'));
+  if (isConflict || isFyi || isStanding || isDiscovery) qText.appendChild(el('span', { style: { marginRight: '6px' } }, ' '));
+  qText.appendChild(document.createTextNode(q.question_text));
+  qHdr.appendChild(qText);
+  qBlock.appendChild(qHdr);
+
+  // Context snippet
+  if (q.context_snippet) {
+    let ctx = q.context_snippet;
+    try { const parsed = JSON.parse(ctx); ctx = Object.entries(parsed).slice(0, 3).map(([k,v]) => `${k}: ${v}`).join(' · '); } catch {}
+    qBlock.appendChild(el('div', { style: {
+      fontSize: '11px', color: 'var(--color-text-muted)',
+      background: 'var(--color-panel)',
+      borderRadius: '4px', padding: '4px 8px',
+      marginBottom: '8px', fontFamily: 'var(--font-mono)',
+    }}, `Context → ${ctx}`));
+  }
+
+  // Entity type tag (skip the synthetic 'sn_discovery_plan' marker — meaningless to a user)
+  if (q.target_entity_type && q.target_entity_type !== 'sn_discovery_plan') {
+    const typeRow = el('div', { style: { marginBottom: '8px' } });
+    typeRow.appendChild(tag(ENTITY_LABELS[q.target_entity_type] || q.target_entity_type, 'muted'));
+    qBlock.appendChild(typeRow);
+  }
+
+  // Answer textarea
+  const answerLabel = el('label', { className: 'form-label', style: { marginBottom: '4px' } }, 'Your answer:');
+  const answerInput = el('textarea', { className: 'form-input', rows: '2',
+    style: { resize: 'vertical', minHeight: '56px' },
+    placeholder: 'Type your answer here…' });
+  qBlock.appendChild(answerLabel);
+  qBlock.appendChild(answerInput);
+
+  return { block: qBlock, textarea: answerInput };
+}
+
 function buildClarificationForm(doc, questions, round, pane) {
   const sec = el('div', { className: 'detail-section' });
 
@@ -839,74 +938,9 @@ function buildClarificationForm(doc, questions, round, pane) {
   const answerMap = {}; // clarification_id → textarea
 
   questions.forEach((q, i) => {
-    // Cross-check clarifications are namespaced in target_field: 'conflict:' = blocking
-    // ripple/requirement conflict (blocks promote), 'fyi:' = non-blocking heads-up.
-    // 'standing:' = cost-setup question auto-injected for every new application.
-    const isConflict  = typeof q.target_field === 'string' && q.target_field.startsWith('conflict:');
-    const isFyi       = typeof q.target_field === 'string' && q.target_field.startsWith('fyi:');
-    const isStanding  = typeof q.target_field === 'string' && q.target_field.startsWith('standing:');
-
-    const qBlock = el('div', { style: {
-      background: 'var(--color-bg)',
-      border: isConflict  ? '1px solid var(--color-danger, #C62828)'
-            : isStanding  ? '1px solid var(--color-warn, #E65100)'
-            :               '1px solid var(--color-border)',
-      borderLeft: isConflict  ? '3px solid var(--color-danger, #C62828)'
-               : isStanding  ? '3px solid var(--color-warn, #E65100)'
-               :               '1px solid var(--color-border)',
-      borderRadius: 'var(--radius)',
-      padding: '12px',
-      marginBottom: '12px',
-    }});
-
-    // Question header
-    const qHdr = el('div', { style: { display: 'flex', alignItems: 'flex-start', gap: '10px', marginBottom: '8px' } });
-    qHdr.appendChild(el('span', { style: {
-      background: isConflict ? 'var(--color-danger, #C62828)' : isStanding ? 'var(--color-warn, #E65100)' : 'var(--color-accent)',
-      color: '#fff',
-      borderRadius: '50%',
-      width: '20px', height: '20px', minWidth: '20px',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      fontSize: '11px', fontWeight: '700',
-    }}, String(i + 1)));
-    const qText = el('span', { style: { fontSize: '13px', fontWeight: '500', lineHeight: '1.5' } });
-    if (isConflict) qText.appendChild(tag('⚠ Conflict', 'danger'));
-    else if (isFyi) qText.appendChild(tag('ℹ FYI', 'muted'));
-    else if (isStanding) qText.appendChild(tag('💰 Cost Setup', 'warn'));
-    if (isConflict || isFyi || isStanding) qText.appendChild(el('span', { style: { marginRight: '6px' } }, ' '));
-    qText.appendChild(document.createTextNode(q.question_text));
-    qHdr.appendChild(qText);
-    qBlock.appendChild(qHdr);
-
-    // Context snippet
-    if (q.context_snippet) {
-      let ctx = q.context_snippet;
-      try { const parsed = JSON.parse(ctx); ctx = Object.entries(parsed).slice(0, 3).map(([k,v]) => `${k}: ${v}`).join(' · '); } catch {}
-      qBlock.appendChild(el('div', { style: {
-        fontSize: '11px', color: 'var(--color-text-muted)',
-        background: 'var(--color-panel)',
-        borderRadius: '4px', padding: '4px 8px',
-        marginBottom: '8px', fontFamily: 'var(--font-mono)',
-      }}, `Context → ${ctx}`));
-    }
-
-    // Entity type tag
-    if (q.target_entity_type) {
-      const typeRow = el('div', { style: { marginBottom: '8px' } });
-      typeRow.appendChild(tag(ENTITY_LABELS[q.target_entity_type] || q.target_entity_type, 'muted'));
-      qBlock.appendChild(typeRow);
-    }
-
-    // Answer textarea
-    const answerLabel = el('label', { className: 'form-label', style: { marginBottom: '4px' } }, 'Your answer:');
-    const answerInput = el('textarea', { className: 'form-input', rows: '2',
-      style: { resize: 'vertical', minHeight: '56px' },
-      placeholder: 'Type your answer here…' });
-    answerMap[q.clarification_id] = answerInput;
-    qBlock.appendChild(answerLabel);
-    qBlock.appendChild(answerInput);
-
-    sec.appendChild(qBlock);
+    const { block, textarea } = buildQuestionCard(q, i);
+    answerMap[q.clarification_id] = textarea;
+    sec.appendChild(block);
   });
 
   // Submit button
@@ -968,6 +1002,149 @@ function buildClarificationForm(doc, questions, round, pane) {
   promoteRow.appendChild(qualityPanel);
   promoteRow.appendChild(promoteNowBtn);
   sec.appendChild(promoteRow);
+
+  return sec;
+}
+
+/** Relation badge for one plan item: tag('direct','ok') or tag('related → X','muted'). */
+function planRelationTag(item) {
+  return item.relation === 'related' ? tag(`related → ${item.related_to || '?'}`, 'muted') : tag('direct', 'ok');
+}
+
+/**
+ * ServiceNow import-plan section for ONE document — every read/write here is scoped to
+ * doc.ingest_id, reading THIS document's own not-yet-promoted requirements (pre-Change-
+ * Packet). `planRow` is the GET/generate response ({plan_id, status, plan:{include,exclude,
+ * notes}, ...} or {plan:null}). `discoveryQs` is the ALREADY-SPLIT list of this document's
+ * open discovery: clarifications — answered through their OWN mini-form below, never
+ * buildClarificationForm's batch, so answering one never triggers a full extraction re-run.
+ */
+function buildServiceNowPlanSection(doc, planRow, discoveryQs, pane) {
+  const sec = el('div', { className: 'detail-section' });
+  sec.appendChild(el('h4', {}, 'ServiceNow Import Plan'));
+  sec.appendChild(el('p', { style: { fontSize: '13px', color: 'var(--color-text-muted)', marginBottom: '12px' } },
+    'AI reads this document\'s own requirements (before they\'re promoted) plus your ServiceNow scope\'s ' +
+    'real inventory — surveying it automatically the first time — and proposes which tables to import. ' +
+    'You review and approve before anything is captured.'));
+
+  const hasPlan = !!(planRow && planRow.plan);
+  const genBtn = el('button', { className: 'btn btn-secondary' }, hasPlan ? 'Regenerate plan' : 'Generate ServiceNow import plan');
+  const resultBox = el('div', { style: { marginTop: '10px' } });
+  sec.appendChild(genBtn);
+  sec.appendChild(resultBox);
+
+  genBtn.addEventListener('click', async () => {
+    genBtn.disabled = true;
+    resultBox.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div>' +
+      '<span>Reading this document\'s requirements + your ServiceNow scope\'s inventory — first-time ' +
+      'setup may take a bit longer while we survey the instance…</span></div>';
+    try {
+      const r = await apiFetch(`/projects/${doc.project_id}/servicenow/discovery-plan`, {
+        method: 'POST', body: JSON.stringify({ ingest_id: doc.ingest_id }),
+      });
+      if (r.assessment_auto_run) showToast('First ServiceNow scan for this app complete — future plans will be faster.', 'info');
+      showToast('Plan generated — review and approve below.', 'success');
+      await renderDetail(doc, pane);
+    } catch (err) {
+      resultBox.innerHTML = '';
+      resultBox.appendChild(el('div', { className: 'error-state' }, 'Plan generation failed: ' + err.message));
+      genBtn.disabled = false;
+    }
+  });
+
+  if (hasPlan) {
+    const plan = planRow.plan;
+    const include = plan.include || [];
+    if (include.length) {
+      const table = el('table', { className: 'wf-table' });
+      table.innerHTML = '<thead><tr><th>Table</th><th></th><th>Rationale</th></tr></thead>';
+      const tbody = el('tbody');
+      include.forEach(item => {
+        const relCell = el('td', {}, planRelationTag(item));
+        (item.mapped_requirement_slugs || []).forEach(s => relCell.appendChild(tag(s, 'accent')));
+        tbody.appendChild(el('tr', {},
+          el('td', { style: { fontFamily: 'var(--font-mono)', fontSize: '12px' } }, item.table),
+          relCell,
+          el('td', { style: { fontSize: '12px', color: 'var(--color-text-muted)' } }, item.rationale || '')));
+      });
+      table.appendChild(tbody);
+      resultBox.appendChild(table);
+    }
+    const exclude = plan.exclude || [];
+    if (exclude.length) {
+      const details = el('details', { style: { marginTop: '8px' } });
+      details.appendChild(el('summary', { style: { fontSize: '12px', cursor: 'pointer' } }, `Excluded (${exclude.length})`));
+      const list = el('ul', { style: { margin: '6px 0 0 18px', fontSize: '12px' } });
+      exclude.forEach(x => list.appendChild(el('li', {}, el('code', {}, x.table), ' — ', x.reason)));
+      details.appendChild(list);
+      resultBox.appendChild(details);
+    }
+    if (plan.notes) resultBox.appendChild(el('div', { style: { fontSize: '12px', color: 'var(--color-text-muted)', marginTop: '6px' } }, plan.notes));
+
+    if (planRow.status === 'approved') {
+      resultBox.appendChild(el('div', { style: { marginTop: '10px' } },
+        tag('Approved', 'ok'),
+        el('span', { style: { fontSize: '12px', color: 'var(--color-text-muted)', marginLeft: '8px' } },
+          planRow.approved_at ? `on ${formatDateTime(planRow.approved_at)}` : '')));
+    } else if (include.length) {
+      const approveBtn = el('button', { className: 'btn btn-primary', style: { marginTop: '10px' } }, 'Approve & save plan');
+      resultBox.appendChild(approveBtn);
+      approveBtn.addEventListener('click', async () => {
+        approveBtn.disabled = true;
+        try {
+          const r = await apiFetch(`/projects/${doc.project_id}/servicenow/discovery-plan/${planRow.plan_id}/approve`, {
+            method: 'POST', body: JSON.stringify({}),
+          });
+          showToast(`Plan approved — import slice saved (${(r.profile && r.profile.include_surfaces || []).length} surface(s)).`, 'success');
+          const goBtn = el('button', { className: 'btn btn-secondary', style: { marginTop: '8px' } }, 'Go to ServiceNow Sync — see cost/time estimate →');
+          goBtn.addEventListener('click', () => navigate('servicenow_sync'));
+          resultBox.appendChild(el('div', {}, goBtn));
+          approveBtn.remove();
+        } catch (err) {
+          showToast('Approve failed: ' + err.message, 'error');
+          approveBtn.disabled = false;
+        }
+      });
+    }
+  }
+
+  // ── Separate discovery mini-form — deliberately its own DOM/submit path (decision #2) ──
+  if (discoveryQs && discoveryQs.length) {
+    const discSec = el('div', { style: { marginTop: '16px', paddingTop: '16px', borderTop: '1px solid var(--color-border)' } });
+    discSec.appendChild(el('h4', { style: { margin: '0 0 8px' } }, 'ServiceNow Plan Questions'));
+    discSec.appendChild(el('p', { style: { fontSize: '12px', color: 'var(--color-text-muted)', marginBottom: '10px' } },
+      'The planner is unsure about these — answer and click Regenerate above to refine the plan. ' +
+      'Answering here never re-runs this document\'s extraction.'));
+    const answerMap = {};
+    discoveryQs.forEach((q, i) => {
+      const { block, textarea } = buildQuestionCard(q, i);
+      answerMap[q.clarification_id] = textarea;
+      discSec.appendChild(block);
+    });
+    const submitBtn = el('button', { className: 'btn btn-primary' }, `Submit ServiceNow Answers (${discoveryQs.length})`);
+    submitBtn.addEventListener('click', async () => {
+      const answers = {};
+      let allFilled = true;
+      for (const [cid, ta] of Object.entries(answerMap)) {
+        if (!ta.value.trim()) { allFilled = false; break; }
+        answers[cid] = ta.value.trim();
+      }
+      if (!allFilled) { showToast('Please answer all questions before submitting.', 'error'); return; }
+      submitBtn.disabled = true;
+      try {
+        await apiFetch(`/projects/${doc.project_id}/servicenow/discovery-plan/clarifications/answer`, {
+          method: 'POST', body: JSON.stringify({ ingest_id: doc.ingest_id, answers }),
+        });
+        showToast('Answers saved — click Regenerate plan to refine it.', 'info');
+        await renderDetail(doc, pane);
+      } catch (err) {
+        showToast('Error: ' + err.message, 'error');
+        submitBtn.disabled = false;
+      }
+    });
+    discSec.appendChild(submitBtn);
+    sec.appendChild(discSec);
+  }
 
   return sec;
 }

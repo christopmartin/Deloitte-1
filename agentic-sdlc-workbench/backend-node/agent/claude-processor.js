@@ -853,9 +853,12 @@ async function processDocument(ingestId) {
   ).get(ingestId, round).c;
 
   // ── Determine final document status ───────────────────────────────────────
+  // Excludes discovery: rows (ServiceNow discovery-plan ambiguities) — those are
+  // advisory-only and live in their own mini-form, never this document's real Q&A loop.
+  const { DISCOVERY_PREFIX } = require('./cross-check');
   const openQ = db.prepare(
-    "SELECT COUNT(*) AS c FROM asdlc_ingest_clarification WHERE ingest_id=? AND answer_text IS NULL"
-  ).get(ingestId).c;
+    "SELECT COUNT(*) AS c FROM asdlc_ingest_clarification WHERE ingest_id=? AND answer_text IS NULL AND target_field NOT LIKE ?"
+  ).get(ingestId, `${DISCOVERY_PREFIX}%`).c;
 
   const newStatus = openQ > 0 ? 'review_required' : 'staged';
 

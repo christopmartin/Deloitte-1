@@ -27,7 +27,7 @@ async function processDocument(ingestId) {
   // Never fatal. May raise blocking 'conflict:' clarifications, which flips the
   // document back to review_required and blocks promote until answered.
   try {
-    const { runCrossCheck } = require('./cross-check');
+    const { runCrossCheck, DISCOVERY_PREFIX } = require('./cross-check');
     const doc = db.prepare(`
       SELECT d.*, p.project_name FROM asdlc_ingest_document d
       LEFT JOIN asdlc_project p ON p.project_id = d.project_id
@@ -38,10 +38,12 @@ async function processDocument(ingestId) {
       const cc = await runCrossCheck({ doc, round });
       const raised = (cc.conflicts_raised || 0) + (cc.fyi_raised || 0);
       if (raised > 0) {
-        // Recompute status to reflect any newly-raised (blocking) clarifications.
+        // Recompute status to reflect any newly-raised (blocking) clarifications. Excludes
+        // discovery: rows (ServiceNow discovery-plan ambiguities) — those are advisory-only
+        // and live in their own mini-form, never this document's real Q&A loop.
         const openQ = db.prepare(
-          "SELECT COUNT(*) c FROM asdlc_ingest_clarification WHERE ingest_id=? AND answer_text IS NULL"
-        ).get(ingestId).c;
+          "SELECT COUNT(*) c FROM asdlc_ingest_clarification WHERE ingest_id=? AND answer_text IS NULL AND target_field NOT LIKE ?"
+        ).get(ingestId, `${DISCOVERY_PREFIX}%`).c;
         const newStatus = openQ > 0 ? 'review_required' : (result.new_status || 'staged');
         db.prepare("UPDATE asdlc_ingest_document SET ingest_status=?, updated_at=datetime('now') WHERE ingest_id=?")
           .run(newStatus, ingestId);

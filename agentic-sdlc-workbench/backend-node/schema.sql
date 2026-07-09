@@ -1592,6 +1592,7 @@ CREATE INDEX IF NOT EXISTS idx_sn_catalog_project ON asdlc_sn_catalog_run(projec
 CREATE TABLE IF NOT EXISTS asdlc_sn_discovery_plan (
   plan_id             TEXT PRIMARY KEY,
   project_id          TEXT REFERENCES asdlc_project(project_id),
+  ingest_id           TEXT REFERENCES asdlc_ingest_document(ingest_id),
   scope               TEXT,
   assessment_id       TEXT REFERENCES asdlc_sn_assessment(assessment_id),
   status              TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','approved')),

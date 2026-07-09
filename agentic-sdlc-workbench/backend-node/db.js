@@ -529,6 +529,16 @@ const MIGRATIONS = [
   // Track when a Build Spec was last generated so the delta-export mode knows
   // which entity rows to include (only those updated after the last export timestamp).
   "ALTER TABLE asdlc_project ADD COLUMN last_build_spec_generated_at TEXT",
+
+  // ── Discovery planner: scope a plan to the document that spawned it ───────────
+  // Moves the planner from project-wide to document-scoped (pre-Change-Packet activity).
+  // Must be a MIGRATIONS entry, not a schema.sql column — this table already exists on
+  // deployed DBs (CREATE TABLE IF NOT EXISTS is a no-op there) and the index below
+  // references this column, so it must run AFTER the column is added, in the same
+  // try/catch-guarded loop (schema.sql's db.exec runs first and unguarded — an index on a
+  // not-yet-existent column there would crash boot on every pre-existing DB).
+  "ALTER TABLE asdlc_sn_discovery_plan ADD COLUMN ingest_id TEXT REFERENCES asdlc_ingest_document(ingest_id)",
+  "CREATE INDEX IF NOT EXISTS idx_sn_discovery_plan_ingest ON asdlc_sn_discovery_plan(ingest_id, created_at)",
 ];
 for (const migration of MIGRATIONS) {
   try { db.exec(migration); } catch { /* column already exists — safe to ignore */ }

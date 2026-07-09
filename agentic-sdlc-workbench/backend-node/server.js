@@ -412,6 +412,47 @@ app.get('/api/v1/servicenow/resolve-project', (req, res) => {
 const snAssess = require('./agent/sn-assess');
 const snCatalog = require('./agent/sn-instance-catalog');
 
+/**
+ * Insert a 'running' asdlc_sn_assessment row and return its id — synchronous, so a caller
+ * that needs to respond 202 immediately (the manual endpoint below) has the id in hand before
+ * the actual (possibly long) scan starts.
+ */
+function createAssessmentRow({ project, instance, scopes, uid }) {
+  const aid = generateId();
+  db.prepare(`
+    INSERT INTO asdlc_sn_assessment (assessment_id, project_id, instance_url, scopes_json, status, created_by, created_at, updated_at)
+    VALUES (?,?,?,?,'running',?,datetime('now'),datetime('now'))
+  `).run(aid, project.project_id, instance.replace(/\/$/, ''), JSON.stringify(scopes || []), uid);
+  return aid;
+}
+
+/**
+ * Run the actual read-only scan and persist its result (or failure) onto an existing
+ * 'running' row. Shared by the manual "Scan instance" endpoint (fire-and-forget) and the
+ * discovery-plan generate endpoint's automatic assessment (awaited) — same row shape either
+ * way, so a later visit to the Assessment page can't tell which path created it. Throws on
+ * failure (after persisting status='failed') so an awaiting caller can turn it into a clear
+ * error instead of silently continuing on missing data.
+ * @returns {Promise<object>} the report, on success.
+ */
+async function runAssessment(aid, { instance, user, pw, scopes }) {
+  try {
+    const report = await snAssess.assessInstance({ instance, user, pw, scopes });
+    report.assessed_at = new Date().toISOString();
+    const v = report.capacity_verdict || {};
+    const cov = report.coverage_summary || {};
+    const summary = `${report.version && report.version.family ? report.version.family : 'unknown'} · ${report.volume.total_artifacts} artifacts · capacity ${v.level || '?'} · coverage ${cov.mapped || 0} mapped/${cov.partial || 0} partial/${cov.unmapped || 0} unmapped`;
+    db.prepare("UPDATE asdlc_sn_assessment SET status='complete', report_json=?, summary=?, updated_at=datetime('now') WHERE assessment_id=?")
+      .run(JSON.stringify(report), summary, aid);
+    return report;
+  } catch (err) {
+    console.error('[sn-assess] failed:', err.message);
+    db.prepare("UPDATE asdlc_sn_assessment SET status='failed', error=?, updated_at=datetime('now') WHERE assessment_id=?")
+      .run(String(err.message).slice(0, 1000), aid);
+    throw err;
+  }
+}
+
 app.post('/api/v1/projects/:id/servicenow/assess', (req, res) => {
   const uid = userId(req);
   const project = db.prepare("SELECT * FROM asdlc_project WHERE project_id=?").get(req.params.id);
@@ -428,29 +469,9 @@ app.post('/api/v1/projects/:id/servicenow/assess', (req, res) => {
     ? body.scopes
     : (project.servicenow_scope ? [project.servicenow_scope] : undefined);
 
-  const aid = generateId();
-  db.prepare(`
-    INSERT INTO asdlc_sn_assessment (assessment_id, project_id, instance_url, scopes_json, status, created_by, created_at, updated_at)
-    VALUES (?,?,?,?,'running',?,datetime('now'),datetime('now'))
-  `).run(aid, project.project_id, instance.replace(/\/$/, ''), JSON.stringify(scopes || []), uid);
+  const aid = createAssessmentRow({ project, instance, scopes, uid });
   res.status(202).json({ assessment_id: aid, status: 'running' });
-
-  // Fire-and-forget; persist result (or error) back onto the row.
-  (async () => {
-    try {
-      const report = await snAssess.assessInstance({ instance, user, pw, scopes });
-      report.assessed_at = new Date().toISOString();
-      const v = report.capacity_verdict || {};
-      const cov = report.coverage_summary || {};
-      const summary = `${report.version && report.version.family ? report.version.family : 'unknown'} · ${report.volume.total_artifacts} artifacts · capacity ${v.level || '?'} · coverage ${cov.mapped || 0} mapped/${cov.partial || 0} partial/${cov.unmapped || 0} unmapped`;
-      db.prepare("UPDATE asdlc_sn_assessment SET status='complete', report_json=?, summary=?, updated_at=datetime('now') WHERE assessment_id=?")
-        .run(JSON.stringify(report), summary, aid);
-    } catch (err) {
-      console.error('[sn-assess] failed:', err.message);
-      db.prepare("UPDATE asdlc_sn_assessment SET status='failed', error=?, updated_at=datetime('now') WHERE assessment_id=?")
-        .run(String(err.message).slice(0, 1000), aid);
-    }
-  })();
+  runAssessment(aid, { instance, user, pw, scopes }).catch(() => { /* already persisted as failed */ });
 });
 
 // Fast, synchronous credential/connectivity check (no assessment row, no capability probing) —
@@ -559,15 +580,17 @@ app.put('/api/v1/projects/:id/servicenow/import-profile', (req, res) => {
 });
 
 // ── Requirements-driven discovery planner ──────────────────────────────────────
-// Replaces the manual "tick which surfaces to import" step with an AI plan: reads the
-// project's requirements + the target scope's REAL inventory (the latest completed
-// assessment's census + a whole-scope sys_metadata sweep + custom sys_db_object tables,
-// each flagged curated-rich vs generic, with a reference-relationship graph read from
-// THIS instance's data dictionary) and proposes a focused import slice — which tables to
-// pull and why, tied to requirements, plus related/supporting tables. A human
-// reviews/approves before anything is captured; approving writes the SAME import-profile
-// slice the manual grid writes (persistImportProfile, above) — every existing path
-// (manual selection, the deterministic recommendation, whole-scope, direct sync) is
+// Reads ONE Ingest Document's own not-yet-promoted requirements (pre-Change-Packet) plus
+// the target scope's REAL inventory (an existing or, if none exists yet, an automatically-
+// run assessment's census + a whole-scope sys_metadata sweep + custom sys_db_object tables,
+// each flagged curated-rich vs generic, with a reference-relationship graph read from THIS
+// instance's data dictionary) and proposes a focused import slice — which tables to pull and
+// why, tied to that document's requirements, plus related/supporting tables. The planner's
+// own genuine uncertainty is raised as real discovery: clarifications in that SAME document's
+// Q&A (never the project-wide/materialized requirements, never a passive note-only display).
+// A human reviews/approves before anything is captured; approving writes the SAME
+// import-profile slice the manual grid writes (persistImportProfile, above) — every existing
+// path (manual selection, the deterministic recommendation, whole-scope, direct sync) is
 // untouched.
 app.post('/api/v1/projects/:id/servicenow/discovery-plan', async (req, res) => {
   const uid = userId(req);
@@ -575,29 +598,50 @@ app.post('/api/v1/projects/:id/servicenow/discovery-plan', async (req, res) => {
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
   const body = req.body || {};
+  const ingestId = body.ingest_id;
+  if (!ingestId) return res.status(400).json({ error: 'ingest_id is required — the discovery plan is scoped to one Ingest Document.' });
+  const doc = db.prepare("SELECT ingest_id, lifecycle_status FROM asdlc_ingest_document WHERE ingest_id=? AND project_id=?").get(ingestId, project.project_id);
+  if (!doc) return res.status(404).json({ error: 'Ingest document not found in this project' });
+  if (doc.lifecycle_status === 'cancelled') return res.status(409).json({ error: 'This document has been cancelled — restore it first.' });
+
   const resolved = resolveSyncOpts(project, body);
   if (resolved.error) return res.status(resolved.error.status).json({ error: resolved.error.message });
   const { scope, instance, user, pw } = resolved.opts;
-
-  const assessment = db.prepare(
-    "SELECT assessment_id, report_json FROM asdlc_sn_assessment WHERE project_id=? AND status='complete' ORDER BY created_at DESC LIMIT 1"
-  ).get(project.project_id);
-  if (!assessment) return res.status(409).json({ error: 'Run a ServiceNow Assessment first (Administration ▸ ServiceNow Assessment) — the planner needs the real inventory of this scope before it can propose an import.' });
-  let report = null;
-  try { report = JSON.parse(assessment.report_json); } catch { report = null; }
-  if (!report) return res.status(409).json({ error: 'The latest assessment report could not be read — re-run the assessment.' });
 
   const { SN_CATALOG } = require('./agent/sn-catalog');
   const { sweepScopeMetadata, readReferenceGraph } = require('./agent/sn-capture');
   const snAssess = require('./agent/sn-assess');
   const { buildDiscoveryInventory, planDiscovery } = require('./agent/sn-discovery-planner');
-  const { loadRequirements } = require('./agent/cross-check');
+  const { loadDocumentRequirements, writeDiscoveryClarification, getNextDiscoveryRound, getAnsweredDiscoveryClarifications } = require('./agent/cross-check');
 
-  // Fail loudly on stale/bad credentials rather than silently planning off an empty
-  // inventory (the same class of bug fixed for Scan-instance and the sync estimate — a
-  // completed assessment can predate a credential change).
+  // Fail loudly on stale/bad credentials — checked BEFORE the assessment search/auto-run
+  // below, so a regular user is never told "run an assessment" when the real problem is
+  // their stored credentials (same class of fix as Scan-instance and the sync estimate).
   const connCheck = await snAssess.checkConnection({ instance, user, pw });
   if (!connCheck.ok) return res.status(502).json({ error: connCheck.message });
+
+  // ── Automatic assessment (a regular user is never sent to the Assessment page manually) ──
+  // Reuse any existing complete assessment whose OWN report already covers this scope
+  // (search history, not just the latest row — a whole-instance scan can cover a scope even
+  // with an empty scopes_json); otherwise run one now, scoped to just this one scope
+  // (bounded to the same cost a manual "Scan instance" already accepts). No freshness
+  // policy — any existing match is reused regardless of age; advanced users can re-scan
+  // manually from the Assessment page if they want a fresher one.
+  const history = db.prepare(
+    "SELECT assessment_id, report_json FROM asdlc_sn_assessment WHERE project_id=? AND status='complete' ORDER BY created_at DESC LIMIT 20"
+  ).all(project.project_id);
+  let assessmentId = null, report = null;
+  for (const row of history) {
+    let r; try { r = JSON.parse(row.report_json); } catch { continue; }
+    if (r && Array.isArray(r.scope_reports) && r.scope_reports.some(sr => sr.scope === scope)) { assessmentId = row.assessment_id; report = r; break; }
+  }
+  let assessmentAutoRun = false;
+  if (!report) {
+    assessmentAutoRun = true;
+    const aid = createAssessmentRow({ project, instance, scopes: [scope], uid });
+    try { report = await runAssessment(aid, { instance, user, pw, scopes: [scope] }); assessmentId = aid; }
+    catch (err) { return res.status(502).json({ error: `Could not survey the ServiceNow app: ${err.message}` }); }
+  }
 
   // Whole-scope, best-effort reads (each degrades gracefully — never breaks planning).
   const sweep = await sweepScopeMetadata({ scope, instance, user, pw, slice: null });
@@ -608,17 +652,19 @@ app.post('/api/v1/projects/:id/servicenow/discovery-plan', async (req, res) => {
   const refGraph = await readReferenceGraph({ instance, user, pw, tables: inventoryNoGraph.tables.map(t => t.table) });
   const inventory = { ...inventoryNoGraph, edges: refGraph.edges };
 
-  const requirements = loadRequirements(project.project_id);
+  const requirements = loadDocumentRequirements(ingestId);
+  const round = getNextDiscoveryRound(ingestId);
+  const pastDiscoveryQA = getAnsweredDiscoveryClarifications(ingestId).map(r => ({ question: r.question_text, answer: r.answer_text }));
 
   const planId = generateId();
   db.prepare(`INSERT INTO asdlc_sn_discovery_plan
-      (plan_id, project_id, scope, assessment_id, status, inventory_json, created_by, updated_at)
-      VALUES (?,?,?,?, 'draft', ?, ?, datetime('now'))`)
-    .run(planId, project.project_id, scope, assessment.assessment_id, JSON.stringify(inventory), uid);
+      (plan_id, project_id, ingest_id, scope, assessment_id, status, inventory_json, created_by, updated_at)
+      VALUES (?,?,?,?,?, 'draft', ?, ?, datetime('now'))`)
+    .run(planId, project.project_id, ingestId, scope, assessmentId, JSON.stringify(inventory), uid);
 
   let result;
   try {
-    result = await planDiscovery({ requirements, inventory, scope }, { projectId: project.project_id });
+    result = await planDiscovery({ requirements, inventory, scope, pastDiscoveryQA }, { projectId: project.project_id });
   } catch (err) {
     db.prepare("UPDATE asdlc_sn_discovery_plan SET error=?, updated_at=datetime('now') WHERE plan_id=?").run(err.message, planId);
     return res.status(502).json({ error: `Discovery planning failed: ${err.message}` });
@@ -627,18 +673,58 @@ app.post('/api/v1/projects/:id/servicenow/discovery-plan', async (req, res) => {
   db.prepare(`UPDATE asdlc_sn_discovery_plan SET plan_json=?, model=?, usage_json=?, stub=?, updated_at=datetime('now') WHERE plan_id=?`)
     .run(JSON.stringify(result.plan), result.model || null, result.usage ? JSON.stringify(result.usage) : null, result.stub ? 1 : 0, planId);
 
+  let discoveryClarificationsRaised = 0;
+  for (const item of (result.plan.clarifications || [])) {
+    if (writeDiscoveryClarification(ingestId, round, item)) discoveryClarificationsRaised++;
+  }
+
   const row = db.prepare('SELECT * FROM asdlc_sn_discovery_plan WHERE plan_id=?').get(planId);
-  res.json({ ...row, plan: result.plan, inventory, _stub: !!result.stub });
+  res.json({
+    ...row, plan: result.plan, inventory, _stub: !!result.stub,
+    assessment_auto_run: assessmentAutoRun, discovery_clarifications_raised: discoveryClarificationsRaised,
+  });
 });
 
-// GET the latest discovery plan for a project (draft or approved), parsed.
+// GET the latest discovery plan for one Ingest Document (draft or approved), parsed.
 app.get('/api/v1/projects/:id/servicenow/discovery-plan', (req, res) => {
-  const row = db.prepare('SELECT * FROM asdlc_sn_discovery_plan WHERE project_id=? ORDER BY created_at DESC LIMIT 1').get(req.params.id);
+  const ingestId = req.query.ingest_id;
+  if (!ingestId) return res.status(400).json({ error: 'ingest_id is required' });
+  const row = db.prepare('SELECT * FROM asdlc_sn_discovery_plan WHERE project_id=? AND ingest_id=? ORDER BY created_at DESC LIMIT 1').get(req.params.id, ingestId);
   if (!row) return res.json({ plan: null });
   let plan = null, inventory = null;
   try { plan = row.plan_json ? JSON.parse(row.plan_json) : null; } catch { plan = null; }
   try { inventory = row.inventory_json ? JSON.parse(row.inventory_json) : null; } catch { inventory = null; }
   res.json({ ...row, plan, inventory });
+});
+
+// Answer a discovery: clarification WITHOUT triggering the full-document extraction re-run
+// that answering a real clarification does — deliberately decoupled so refining the
+// ServiceNow plan never forces an unrelated, costly re-extraction. Defense-in-depth: the
+// WHERE clause filters to discovery: rows only, so this endpoint can never be used to
+// "answer" a conflict:/fyi:/standing: row without its normal (re-extraction/deterministic-
+// apply) side effects.
+app.post('/api/v1/projects/:id/servicenow/discovery-plan/clarifications/answer', (req, res) => {
+  const uid = userId(req);
+  const project = db.prepare('SELECT project_id FROM asdlc_project WHERE project_id=?').get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const body = req.body || {};
+  const ingestId = body.ingest_id;
+  if (!ingestId) return res.status(400).json({ error: 'ingest_id is required' });
+  const doc = db.prepare('SELECT ingest_id FROM asdlc_ingest_document WHERE ingest_id=? AND project_id=?').get(ingestId, project.project_id);
+  if (!doc) return res.status(404).json({ error: 'Ingest document not found in this project' });
+
+  const { DISCOVERY_PREFIX } = require('./agent/cross-check');
+  const upd = db.prepare(
+    `UPDATE asdlc_ingest_clarification SET answer_text=?, answered_at=datetime('now'), answered_by=?
+     WHERE clarification_id=? AND ingest_id=? AND target_field LIKE ?`
+  );
+  let answered = 0;
+  for (const [cid, text] of Object.entries(body.answers || {})) {
+    if (!text || !String(text).trim()) continue;
+    const r = upd.run(String(text).trim(), uid, cid, ingestId, `${DISCOVERY_PREFIX}%`);
+    if (r.changes) answered++;
+  }
+  res.json({ answered });
 });
 
 // Approve a draft plan: map its `include[]` to the 5-field import-profile slice and save it

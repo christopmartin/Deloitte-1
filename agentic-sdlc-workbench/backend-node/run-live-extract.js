@@ -77,7 +77,8 @@ async function wb(method, p, body) {
   await wb('POST', `/ingest-documents/${ingest_id}/process`);
   const staged = db.prepare("SELECT entity_type, COUNT(*) c FROM asdlc_ingest_extraction WHERE ingest_id=? AND status='staged' GROUP BY entity_type").all(ingest_id);
   const needClar = db.prepare("SELECT COUNT(*) c FROM asdlc_ingest_extraction WHERE ingest_id=? AND status='needs_clarification'").get(ingest_id).c;
-  const openClar = db.prepare("SELECT COUNT(*) c FROM asdlc_ingest_clarification WHERE ingest_id=? AND answer_text IS NULL").get(ingest_id).c;
+  const { DISCOVERY_PREFIX } = require('./agent/cross-check');
+  const openClar = db.prepare("SELECT COUNT(*) c FROM asdlc_ingest_clarification WHERE ingest_id=? AND answer_text IS NULL AND target_field NOT LIKE ?").get(ingest_id, `${DISCOVERY_PREFIX}%`).c;
   console.log('STAGED:', JSON.stringify(staged), '| needs_clarification:', needClar, '| open clarifications:', openClar);
 
   const totalStaged = staged.reduce((s, r) => s + r.c, 0);
