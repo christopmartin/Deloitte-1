@@ -283,6 +283,36 @@ async function assessInstance({ instance, user, pw, scopes, fetchImpl } = {}) {
   };
 }
 
+/**
+ * List custom business-data tables defined in a scope (sys_db_object rows NOT already in the
+ * curated catalog), with a cheap record count each — the read-only way the discovery planner
+ * (decision #2) learns about tables outside SN_CATALOG, e.g. a custom "Incident Extra" table.
+ * BEST-EFFORT: any failure degrades to an empty list, never throws. Bounded by `cap` (default
+ * 40) since this fans out one count call per table — a read-cost ceiling, not a design limit.
+ * @param {{instance,user,pw,scope,fetchImpl,excludeTables?:Set,cap?:number}} opts
+ * @returns {Promise<Array<{table:string,label:string,records:number|null}>>}
+ */
+async function listCustomDataTables({ instance, user, pw, scope, fetchImpl, excludeTables, cap } = {}) {
+  if (!instance || !user || !pw || !scope) return [];
+  try {
+    const client = makeClient({ instance, user, pw, fetchImpl });
+    const r = await client.get(
+      `/api/now/table/sys_db_object?sysparm_query=${q('sys_scope.scope=' + scope + '^ORDERBYname')}&sysparm_fields=${q('name,label')}&sysparm_limit=500`
+    );
+    if (!r.ok || !r.json || !Array.isArray(r.json.result)) return [];
+    const exclude = excludeTables instanceof Set ? excludeTables : new Set();
+    const rows = r.json.result.filter(x => x.name && !exclude.has(x.name)).slice(0, Math.max(1, cap || 40));
+    const out = [];
+    for (const row of rows) {
+      const { count } = await countRecords(client, row.name, null);
+      out.push({ table: row.name, label: row.label || row.name, records: count });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 function catalogMeta(c) {
   return { table: c.table, captureType: c.captureType, wbDesignType: c.wbDesignType, mappingStatus: c.mappingStatus, complexityWeight: c.complexityWeight };
 }
@@ -316,4 +346,4 @@ async function resolveUserSysId({ instance, user, pw, lookupUser, timeoutMs, fet
   }
 }
 
-module.exports = { assessInstance, checkConnection, capacityVerdict, resolveUserSysId };
+module.exports = { assessInstance, checkConnection, capacityVerdict, resolveUserSysId, listCustomDataTables, makeClient, countRecords };

@@ -20,11 +20,11 @@ const FILE_REGISTRY = require('./model-registry.json');
 const ROLES = [
   'extraction', 'synthesis', 'quality_reviewer', 'prompt_drafter', 'build_review',
   'req_linker', 'rasic_deriver', 'cost_estimate',
-  'reverse_engineer', 'reconciler', 'reconcile_reviewer',
+  'reverse_engineer', 'reconciler', 'reconcile_reviewer', 'discovery_planner',
 ];
 
 // Roles whose pipelines actually consume getThinkingConfig() (effort applies).
-const THINKING_ROLES = ['extraction', 'synthesis', 'rasic_deriver', 'reverse_engineer', 'reconciler', 'reconcile_reviewer'];
+const THINKING_ROLES = ['extraction', 'synthesis', 'rasic_deriver', 'reverse_engineer', 'reconciler', 'reconcile_reviewer', 'discovery_planner'];
 
 const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -94,6 +94,7 @@ const ROLE_ENV = {
   reverse_engineer:   'CLAUDE_REVERSE_ENGINEER_MODEL',
   reconciler:         'CLAUDE_RECONCILER_MODEL',
   reconcile_reviewer: 'CLAUDE_RECONCILE_REVIEWER_MODEL',
+  discovery_planner:  'CLAUDE_DISCOVERY_PLANNER_MODEL',
 };
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
@@ -109,11 +110,12 @@ const ROLE_DEFAULTS = {
   req_linker:         'claude-haiku-4-5-20251001',   // lightweight inference; fast + cheap
   synthesis:          'claude-opus-4-8',             // bold design-synthesis/enrichment pass (Phase 1) — most capable
   cost_estimate:      'claude-opus-4-8',             // Now Assist cost estimation; reasoning-heavy → Opus default, admin-overridable
+  discovery_planner:  'claude-opus-4-8',             // reasons over requirements + a real reference graph — one call per plan, worth the best model
   // rasic_deriver intentionally omitted → falls through to DEFAULT_MODEL (Sonnet).
   // Set rasic_deriver_model in Admin or CLAUDE_RASIC_DERIVER_MODEL env var for Opus.
 };
-const ROLE_THINKING_DEFAULT = { reverse_engineer: 'true', reconciler: 'true', reconcile_reviewer: 'true', synthesis: 'true' };
-const ROLE_THINKING_BUDGET  = { reverse_engineer: '8000', reconciler: '8000', reconcile_reviewer: '8000', synthesis: '8000' }; // ≥8000 → effort 'high'
+const ROLE_THINKING_DEFAULT = { reverse_engineer: 'true', reconciler: 'true', reconcile_reviewer: 'true', synthesis: 'true', discovery_planner: 'true' };
+const ROLE_THINKING_BUDGET  = { reverse_engineer: '8000', reconciler: '8000', reconcile_reviewer: '8000', synthesis: '8000', discovery_planner: '8000' }; // ≥8000 → effort 'high'
 
 /**
  * Resolve the model for a role: setting `<role>_model` → env var → per-role default

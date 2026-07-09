@@ -655,6 +655,6 @@ function runPostApplyCheck(cpId) {
   }
 }
 
-module.exports = { runCrossCheck, hasOpenConflicts, runPostApplyCheck, CONFLICT_PREFIX, FYI_PREFIX,
+module.exports = { runCrossCheck, hasOpenConflicts, runPostApplyCheck, CONFLICT_PREFIX, FYI_PREFIX, loadRequirements,
   _internal: { salientTokens, scanDesignDrift, synthesiseFollowups, loadDesignCorpus,
     findMergeSurvivor, droppedInterfaceFields } };

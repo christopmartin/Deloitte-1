@@ -519,21 +519,21 @@ app.get('/api/v1/projects/:id/servicenow/import-profile', (req, res) => {
   res.json({ profile: seed, source: seed ? 'assessment_seed' : 'none' });
 });
 
-// PUT saves the import profile (bounds later ingests), or resets to whole-scope with
-// {clear:true} / an empty include_surfaces. Validates the shape minimally.
-app.put('/api/v1/projects/:id/servicenow/import-profile', (req, res) => {
-  const uid = userId(req);
-  const project = db.prepare("SELECT * FROM asdlc_project WHERE project_id=?").get(req.params.id);
-  if (!project) return res.status(404).json({ error: 'Project not found' });
-  const body = req.body || {};
+/**
+ * Persist a project's import-profile slice (or clear it to whole-scope). Shared by the
+ * PUT /import-profile endpoint and the discovery-plan approve endpoint (below) so both
+ * write through the EXACT same validation + audit path. Never throws — returns
+ * { profile, source } on success or { error: { status, message } } on a bad request.
+ */
+function persistImportProfile(project, body, uid) {
   const surfaces = Array.isArray(body.include_surfaces) ? body.include_surfaces.filter(s => typeof s === 'string' && s) : [];
   const clear = body.clear === true || (!surfaces.length && !body.scope);
   if (clear) {
-    db.prepare("UPDATE asdlc_project SET sn_import_profile_json=NULL, updated_by=?, updated_at=datetime('now') WHERE project_id=?").run(uid, req.params.id);
-    auditLog('asdlc_project', req.params.id, 'UPDATE', { sn_import_profile_json: project.sn_import_profile_json }, { sn_import_profile_json: null }, uid);
-    return res.json({ profile: null, source: 'none' });
+    db.prepare("UPDATE asdlc_project SET sn_import_profile_json=NULL, updated_by=?, updated_at=datetime('now') WHERE project_id=?").run(uid, project.project_id);
+    auditLog('asdlc_project', project.project_id, 'UPDATE', { sn_import_profile_json: project.sn_import_profile_json }, { sn_import_profile_json: null }, uid);
+    return { profile: null, source: 'none' };
   }
-  if (!surfaces.length) return res.status(400).json({ error: 'include_surfaces must be a non-empty array of ServiceNow table names (or send {clear:true} to reset to whole-scope).' });
+  if (!surfaces.length) return { error: { status: 400, message: 'include_surfaces must be a non-empty array of ServiceNow table names (or send {clear:true} to reset to whole-scope).' } };
   const capNum = Number(body.per_surface_cap);
   const profile = {
     scope: (typeof body.scope === 'string' && body.scope) ? body.scope : (project.servicenow_scope || null),
@@ -542,9 +542,138 @@ app.put('/api/v1/projects/:id/servicenow/import-profile', (req, res) => {
     per_surface_cap: (Number.isFinite(capNum) && capNum > 0) ? Math.floor(capNum) : null,
     record_filters: (body.record_filters && typeof body.record_filters === 'object' && !Array.isArray(body.record_filters)) ? body.record_filters : {},
   };
-  db.prepare("UPDATE asdlc_project SET sn_import_profile_json=?, updated_by=?, updated_at=datetime('now') WHERE project_id=?").run(JSON.stringify(profile), uid, req.params.id);
-  auditLog('asdlc_project', req.params.id, 'UPDATE', { sn_import_profile_json: project.sn_import_profile_json }, { sn_import_profile_json: JSON.stringify(profile) }, uid);
-  res.json({ profile, source: 'saved' });
+  db.prepare("UPDATE asdlc_project SET sn_import_profile_json=?, updated_by=?, updated_at=datetime('now') WHERE project_id=?").run(JSON.stringify(profile), uid, project.project_id);
+  auditLog('asdlc_project', project.project_id, 'UPDATE', { sn_import_profile_json: project.sn_import_profile_json }, { sn_import_profile_json: JSON.stringify(profile) }, uid);
+  return { profile, source: 'saved' };
+}
+
+// PUT saves the import profile (bounds later ingests), or resets to whole-scope with
+// {clear:true} / an empty include_surfaces. Validates the shape minimally.
+app.put('/api/v1/projects/:id/servicenow/import-profile', (req, res) => {
+  const uid = userId(req);
+  const project = db.prepare("SELECT * FROM asdlc_project WHERE project_id=?").get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const result = persistImportProfile(project, req.body || {}, uid);
+  if (result.error) return res.status(result.error.status).json({ error: result.error.message });
+  res.json(result);
+});
+
+// ── Requirements-driven discovery planner ──────────────────────────────────────
+// Replaces the manual "tick which surfaces to import" step with an AI plan: reads the
+// project's requirements + the target scope's REAL inventory (the latest completed
+// assessment's census + a whole-scope sys_metadata sweep + custom sys_db_object tables,
+// each flagged curated-rich vs generic, with a reference-relationship graph read from
+// THIS instance's data dictionary) and proposes a focused import slice — which tables to
+// pull and why, tied to requirements, plus related/supporting tables. A human
+// reviews/approves before anything is captured; approving writes the SAME import-profile
+// slice the manual grid writes (persistImportProfile, above) — every existing path
+// (manual selection, the deterministic recommendation, whole-scope, direct sync) is
+// untouched.
+app.post('/api/v1/projects/:id/servicenow/discovery-plan', async (req, res) => {
+  const uid = userId(req);
+  const project = db.prepare("SELECT * FROM asdlc_project WHERE project_id=?").get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  const body = req.body || {};
+  const resolved = resolveSyncOpts(project, body);
+  if (resolved.error) return res.status(resolved.error.status).json({ error: resolved.error.message });
+  const { scope, instance, user, pw } = resolved.opts;
+
+  const assessment = db.prepare(
+    "SELECT assessment_id, report_json FROM asdlc_sn_assessment WHERE project_id=? AND status='complete' ORDER BY created_at DESC LIMIT 1"
+  ).get(project.project_id);
+  if (!assessment) return res.status(409).json({ error: 'Run a ServiceNow Assessment first (Administration ▸ ServiceNow Assessment) — the planner needs the real inventory of this scope before it can propose an import.' });
+  let report = null;
+  try { report = JSON.parse(assessment.report_json); } catch { report = null; }
+  if (!report) return res.status(409).json({ error: 'The latest assessment report could not be read — re-run the assessment.' });
+
+  const { SN_CATALOG } = require('./agent/sn-catalog');
+  const { sweepScopeMetadata, readReferenceGraph } = require('./agent/sn-capture');
+  const snAssess = require('./agent/sn-assess');
+  const { buildDiscoveryInventory, planDiscovery } = require('./agent/sn-discovery-planner');
+  const { loadRequirements } = require('./agent/cross-check');
+
+  // Fail loudly on stale/bad credentials rather than silently planning off an empty
+  // inventory (the same class of bug fixed for Scan-instance and the sync estimate — a
+  // completed assessment can predate a credential change).
+  const connCheck = await snAssess.checkConnection({ instance, user, pw });
+  if (!connCheck.ok) return res.status(502).json({ error: connCheck.message });
+
+  // Whole-scope, best-effort reads (each degrades gracefully — never breaks planning).
+  const sweep = await sweepScopeMetadata({ scope, instance, user, pw, slice: null });
+  const curatedTables = new Set(SN_CATALOG.map(c => c.table));
+  const customTables = await snAssess.listCustomDataTables({ instance, user, pw, scope, excludeTables: curatedTables });
+
+  const inventoryNoGraph = buildDiscoveryInventory({ report, sweep, customTables, edges: [], scope });
+  const refGraph = await readReferenceGraph({ instance, user, pw, tables: inventoryNoGraph.tables.map(t => t.table) });
+  const inventory = { ...inventoryNoGraph, edges: refGraph.edges };
+
+  const requirements = loadRequirements(project.project_id);
+
+  const planId = generateId();
+  db.prepare(`INSERT INTO asdlc_sn_discovery_plan
+      (plan_id, project_id, scope, assessment_id, status, inventory_json, created_by, updated_at)
+      VALUES (?,?,?,?, 'draft', ?, ?, datetime('now'))`)
+    .run(planId, project.project_id, scope, assessment.assessment_id, JSON.stringify(inventory), uid);
+
+  let result;
+  try {
+    result = await planDiscovery({ requirements, inventory, scope }, { projectId: project.project_id });
+  } catch (err) {
+    db.prepare("UPDATE asdlc_sn_discovery_plan SET error=?, updated_at=datetime('now') WHERE plan_id=?").run(err.message, planId);
+    return res.status(502).json({ error: `Discovery planning failed: ${err.message}` });
+  }
+
+  db.prepare(`UPDATE asdlc_sn_discovery_plan SET plan_json=?, model=?, usage_json=?, stub=?, updated_at=datetime('now') WHERE plan_id=?`)
+    .run(JSON.stringify(result.plan), result.model || null, result.usage ? JSON.stringify(result.usage) : null, result.stub ? 1 : 0, planId);
+
+  const row = db.prepare('SELECT * FROM asdlc_sn_discovery_plan WHERE plan_id=?').get(planId);
+  res.json({ ...row, plan: result.plan, inventory, _stub: !!result.stub });
+});
+
+// GET the latest discovery plan for a project (draft or approved), parsed.
+app.get('/api/v1/projects/:id/servicenow/discovery-plan', (req, res) => {
+  const row = db.prepare('SELECT * FROM asdlc_sn_discovery_plan WHERE project_id=? ORDER BY created_at DESC LIMIT 1').get(req.params.id);
+  if (!row) return res.json({ plan: null });
+  let plan = null, inventory = null;
+  try { plan = row.plan_json ? JSON.parse(row.plan_json) : null; } catch { plan = null; }
+  try { inventory = row.inventory_json ? JSON.parse(row.inventory_json) : null; } catch { inventory = null; }
+  res.json({ ...row, plan, inventory });
+});
+
+// Approve a draft plan: map its `include[]` to the 5-field import-profile slice and save it
+// through the SAME path the manual checkbox grid uses (persistImportProfile) — so a
+// planner-approved slice is indistinguishable, downstream, from a human-picked one.
+app.post('/api/v1/projects/:id/servicenow/discovery-plan/:planId/approve', (req, res) => {
+  const uid = userId(req);
+  const project = db.prepare('SELECT * FROM asdlc_project WHERE project_id=?').get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const row = db.prepare('SELECT * FROM asdlc_sn_discovery_plan WHERE plan_id=? AND project_id=?').get(req.params.planId, req.params.id);
+  if (!row) return res.status(404).json({ error: 'Discovery plan not found in this project' });
+  let plan = null;
+  try { plan = row.plan_json ? JSON.parse(row.plan_json) : null; } catch { plan = null; }
+  const include = (plan && Array.isArray(plan.include)) ? plan.include : [];
+  if (!include.length) return res.status(400).json({ error: 'This plan has no included tables — nothing to approve.' });
+
+  const body = req.body || {};
+  // The body may override the cap; per-table record_filter (if the model proposed one)
+  // folds into the record_filters map — the same LIVE, dormant hook sliceQuery reads.
+  const record_filters = {};
+  for (const item of include) if (item && item.table && item.record_filter) record_filters[item.table] = item.record_filter;
+  const result = persistImportProfile(project, {
+    scope: row.scope,
+    include_surfaces: include.map(i => i.table).filter(Boolean),
+    per_surface_cap: body.per_surface_cap,
+    record_filters,
+  }, uid);
+  if (result.error) return res.status(result.error.status).json({ error: result.error.message });
+
+  db.prepare(`UPDATE asdlc_sn_discovery_plan SET status='approved', import_profile_json=?, approved_by=?, approved_at=datetime('now'), updated_at=datetime('now') WHERE plan_id=?`)
+    .run(JSON.stringify(result.profile), uid, row.plan_id);
+  auditLog('asdlc_sn_discovery_plan', row.plan_id, 'UPDATE', { status: 'draft' }, { status: 'approved' }, uid);
+
+  const updated = db.prepare('SELECT * FROM asdlc_sn_discovery_plan WHERE plan_id=?').get(row.plan_id);
+  res.json({ ...updated, plan, profile: result.profile });
 });
 
 // ── ServiceNow whole-instance CATALOG (read-only awareness sweep) ─────────────

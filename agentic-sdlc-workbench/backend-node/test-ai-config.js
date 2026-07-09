@@ -183,7 +183,7 @@ async function testHttp() {
   let r = await fetch(`${BASEURL}/settings/ai`, { headers: HEADERS });
   let j = await r.json();
   const roleKeys = (j.roles || []).map(role => `${role}_model`);
-  assert(j.roles && j.roles.length === 11, 'GET /settings/ai lists all 11 roles');
+  assert(j.roles && j.roles.length === 12, 'GET /settings/ai lists all 12 roles (incl. discovery_planner)');
   assert(roleKeys.every(k => k in j.settings), 'settings carry a model for every role (incl. SN reasoning + synthesis + cost_estimate)');
   assert(j.settings.reverse_engineer_thinking_effort === 'high', 'effective effort exposed per role');
   assert(j.validation && j.validation.ok === true, 'validation block present and clean');

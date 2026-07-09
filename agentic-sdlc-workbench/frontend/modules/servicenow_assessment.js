@@ -6,7 +6,7 @@
  * counts, a coverage map (mapped/partial/unmapped vs. the Workbench), a volume/cost
  * estimate, a capacity verdict, and a recommended import profile (bounds for extraction).
  */
-import { apiFetch, el, showToast, getCurrentProjectId } from '../app.js';
+import { apiFetch, el, showToast, getCurrentProjectId, navigate } from '../app.js';
 
 function pill(text, color) {
   return el('span', { style: `display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;color:#fff;background:${color}` }, text);
@@ -169,9 +169,120 @@ function renderReport(panel, report, row, pid) {
   // Per-scope census — surfaces are SELECTABLE to define the import "slice" (checkboxes).
   const prof = report.recommended_profile || {};
   const recommended = new Set(prof.include_surfaces || []);   // default selection until a saved profile loads
-  const surfaceCbs = [];   // { table, checkbox }
+  const surfaceCbs = [];      // { table, checkbox, row }
+  const scopeTbodies = {};    // scope -> tbody (so a generated plan can add rows for tables outside the census)
+  const scopeForProfile = (report.scope_reports && report.scope_reports[0] && report.scope_reports[0].scope)
+    || (prof.scopes && prof.scopes[0]) || null;
+
   panel.appendChild(el('div', { style: 'font-size:12px;color:var(--text-muted);margin:16px 0 4px' },
-    'Tick the surfaces to ingest — this defines the import slice used by ServiceNow Sync. Leave all ticked to ingest the whole scope.'));
+    'Tick the surfaces to ingest — this defines the import slice used by ServiceNow Sync. Leave all ticked to ' +
+    'ingest the whole scope, or generate a plan from your requirements below.'));
+
+  // ── Requirements-driven discovery plan (optional entry path; the manual checkbox grid
+  // below still works exactly as before whether or not a plan is ever generated) ─────────
+  const planWrap = el('div', { style: 'font-size:13px;background:var(--surface-raised,#f6f8fa);border:1px solid var(--border-color,#d0d7de);border-radius:6px;padding:12px;display:grid;gap:10px;margin-bottom:14px' });
+  const planBtn = el('button', { className: 'btn btn-secondary' }, 'Generate plan from requirements');
+  const planStatus = el('div', { style: 'font-size:12px;color:var(--text-muted)' },
+    'AI reads this Application\'s requirements plus the real inventory of this scope (including related/' +
+    'supporting tables) and proposes which ServiceNow tables to import — you review and approve before anything is captured.');
+  const planResult = el('div', {});
+  planWrap.appendChild(el('div', {}, planBtn));
+  planWrap.appendChild(planStatus);
+  planWrap.appendChild(planResult);
+  panel.appendChild(planWrap);
+
+  const relationBadge = (item) => item.relation === 'related'
+    ? pill(`related${item.related_to ? ' → ' + item.related_to : ''}`, '#6b7280')
+    : pill('direct', '#1a7f37');
+  const reqPills = (slugs) => (slugs && slugs.length) ? el('span', { style: 'margin-left:6px' }, ...slugs.map(s => pill(s, '#0969da'))) : el('span', {});
+  const planCellContent = (item) => el('div', {}, relationBadge(item), reqPills(item.mapped_requirement_slugs),
+    el('div', { style: 'font-size:11px;color:var(--text-muted);margin-top:2px' }, item.rationale || ''));
+
+  function renderPlanReview(plan, planRow) {
+    planResult.innerHTML = '';
+    const include = plan.include || [];
+    const byTable = new Map(include.map(i => [i.table, i]));
+    const handled = new Set();
+
+    surfaceCbs.forEach(({ table, checkbox, row }) => {
+      const item = byTable.get(table);
+      checkbox.checked = !!item;
+      if (!item) return;
+      handled.add(table);
+      const cell = row && row.querySelector('[data-plan-cell]');
+      if (cell) { cell.innerHTML = ''; cell.appendChild(planCellContent(item)); }
+    });
+
+    // Planner-named tables absent from the census grid — imports as generic; add tick-able rows.
+    const extra = include.filter(i => !handled.has(i.table));
+    if (extra.length) {
+      let tb = scopeTbodies[scopeForProfile];
+      if (!tb) {
+        const t = el('table', { className: 'dr-compact-table', style: 'width:100%;margin-top:8px' });
+        t.appendChild(el('thead', {}, el('tr', {}, el('th', { style: 'width:32px' }, ''), el('th', {}, 'Surface'), el('th', {}, 'Workbench type'), el('th', { style: 'text-align:right' }, 'Records'), el('th', {}, 'Plan'))));
+        tb = el('tbody');
+        t.appendChild(tb);
+        panel.insertBefore(t, planWrap.nextSibling);
+        scopeTbodies[scopeForProfile] = tb;
+      }
+      extra.forEach(item => {
+        const cb = el('input', { type: 'checkbox', 'data-surface': item.table });
+        cb.checked = true;
+        const row = el('tr', {},
+          el('td', {}, cb),
+          el('td', { style: 'font-family:monospace;font-size:12px' }, item.table),
+          el('td', {}, pill('imports as generic', '#6b7280')),
+          el('td', { style: 'text-align:right;font-family:monospace' }, '—'),
+          el('td', { 'data-plan-cell': '1' }, planCellContent(item)));
+        tb.appendChild(row);
+        surfaceCbs.push({ table: item.table, checkbox: cb, row });
+      });
+    }
+
+    const exclude = plan.exclude || [];
+    if (exclude.length) {
+      const details = el('details', { style: 'margin-top:4px' });
+      details.appendChild(el('summary', { style: 'font-size:12px;cursor:pointer' }, `Excluded (${exclude.length})`));
+      details.appendChild(el('ul', { style: 'margin:6px 0 0 18px;font-size:12px' },
+        ...exclude.map(x => el('li', {}, el('code', {}, x.table), ' — ', x.reason))));
+      planResult.appendChild(details);
+    }
+    if (plan.notes) planResult.appendChild(el('div', { style: 'font-size:12px;color:var(--text-muted);margin-top:6px' }, plan.notes));
+
+    const approveBtn = el('button', { className: 'btn btn-primary', style: 'margin-top:8px' }, 'Approve & save plan');
+    planResult.appendChild(el('div', {}, approveBtn));
+    approveBtn.addEventListener('click', async () => {
+      approveBtn.disabled = true;
+      try {
+        const r = await apiFetch(`/projects/${pid}/servicenow/discovery-plan/${planRow.plan_id}/approve`, { method: 'POST', body: JSON.stringify({}) });
+        applyProfileToUI(r.profile);
+        const goBtn = el('button', { className: 'btn btn-secondary' }, 'Go to ServiceNow Sync — see cost/time estimate →');
+        goBtn.addEventListener('click', () => navigate('servicenow_sync'));
+        planStatus.innerHTML = '';
+        planStatus.appendChild(el('div', {}, `Plan approved — import slice saved (${(r.profile.include_surfaces || []).length} surface(s)). `, goBtn));
+        showToast('Plan approved and saved as the import slice.', 'success');
+      } catch (err) { showToast('Approve failed: ' + err.message, 'error'); }
+      finally { approveBtn.disabled = false; }
+    });
+  }
+
+  planBtn.addEventListener('click', async () => {
+    planBtn.disabled = true;
+    planResult.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><span>Reading requirements + scope inventory, generating plan…</span></div>';
+    try {
+      const body = scopeForProfile ? { scope: scopeForProfile } : {};
+      const r = await apiFetch(`/projects/${pid}/servicenow/discovery-plan`, { method: 'POST', body: JSON.stringify(body) });
+      planResult.innerHTML = '';
+      if (r._stub) planResult.appendChild(el('div', { style: 'font-size:12px;color:#bf8700;margin-bottom:6px' },
+        '⚠ No AI key configured — showing a deterministic offline plan (curated tables with records, plus their direct references).'));
+      renderPlanReview(r.plan, r);
+      showToast('Plan generated — review and approve below.', 'success');
+    } catch (err) {
+      planResult.innerHTML = '';
+      planResult.appendChild(el('div', { className: 'error-state' }, 'Plan generation failed: ' + err.message));
+    } finally { planBtn.disabled = false; }
+  });
+
   (report.scope_reports || []).forEach(sr => {
     panel.appendChild(el('h4', { style: 'margin:14px 0 6px' }, `Scope: ${sr.scope} — ${num(sr.artifact_count)} artifacts`));
     const present = (sr.surfaces || []).filter(s => s.present && s.count > 0);
@@ -179,20 +290,23 @@ function renderReport(panel, report, row, pid) {
       panel.appendChild(el('div', { className: 'empty-state' }, 'No records in the captured surfaces for this scope.'));
     } else {
       const t = el('table', { className: 'dr-compact-table', style: 'width:100%' });
-      t.appendChild(el('thead', {}, el('tr', {}, el('th', { style: 'width:32px' }, ''), el('th', {}, 'Surface'), el('th', {}, 'Workbench type'), el('th', { style: 'text-align:right' }, 'Records'))));
+      t.appendChild(el('thead', {}, el('tr', {}, el('th', { style: 'width:32px' }, ''), el('th', {}, 'Surface'), el('th', {}, 'Workbench type'), el('th', { style: 'text-align:right' }, 'Records'), el('th', {}, 'Plan'))));
       const tb = el('tbody');
       present.forEach(s => {
         const cb = el('input', { type: 'checkbox', 'data-surface': s.table });
         if (recommended.has(s.table)) cb.checked = true;
-        surfaceCbs.push({ table: s.table, checkbox: cb });
-        tb.appendChild(el('tr', {},
+        const row = el('tr', {},
           el('td', {}, cb),
           el('td', { style: 'font-family:monospace;font-size:12px' }, s.table),
           el('td', {}, s.wbDesignType),
-          el('td', { style: 'text-align:right;font-family:monospace' }, num(s.count))));
+          el('td', { style: 'text-align:right;font-family:monospace' }, num(s.count)),
+          el('td', { 'data-plan-cell': '1' }, ''));
+        surfaceCbs.push({ table: s.table, checkbox: cb, row });
+        tb.appendChild(row);
       });
       t.appendChild(tb);
       panel.appendChild(t);
+      scopeTbodies[sr.scope] = tb;
     }
     const cx = (sr.complexity || []).filter(c => c.present && c.count > 0);
     if (cx.length) panel.appendChild(el('div', { style: 'font-size:12px;color:var(--text-muted);margin-top:4px' },
@@ -218,8 +332,6 @@ function renderReport(panel, report, row, pid) {
   panel.appendChild(el('div', { style: 'font-size:11px;color:var(--text-muted);margin-top:6px' },
     'The saved slice bounds ServiceNow Sync (ingest + write-back). ' + (row && row.created_at ? `Assessed ${String(row.created_at).slice(0, 16).replace('T', ' ')}.` : '')));
 
-  const scopeForProfile = (report.scope_reports && report.scope_reports[0] && report.scope_reports[0].scope)
-    || (prof.scopes && prof.scopes[0]) || null;
   const applyProfileToUI = (profile) => {
     if (!profile) { statusLine.textContent = 'No saved slice — ingesting the whole scope. Tick surfaces and Save to bound it.'; return; }
     const sel = new Set(profile.include_surfaces || []);

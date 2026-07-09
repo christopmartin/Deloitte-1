@@ -1583,6 +1583,33 @@ CREATE TABLE IF NOT EXISTS asdlc_sn_catalog_run (
 );
 CREATE INDEX IF NOT EXISTS idx_sn_catalog_project ON asdlc_sn_catalog_run(project_id, created_at);
 
+-- Requirements-driven ServiceNow discovery plan (AI picks the import slice). An auditable
+-- record of one planDiscovery() call: the inventory the model saw, the plan it proposed
+-- (which tables to import and why, incl. related/supporting tables), and — once a human
+-- approves — the resulting import profile actually saved. Additive/standalone; does not
+-- alter asdlc_project or asdlc_sn_assessment. A project may have many plans over time;
+-- callers read the latest by (project_id, created_at).
+CREATE TABLE IF NOT EXISTS asdlc_sn_discovery_plan (
+  plan_id             TEXT PRIMARY KEY,
+  project_id          TEXT REFERENCES asdlc_project(project_id),
+  scope               TEXT,
+  assessment_id       TEXT REFERENCES asdlc_sn_assessment(assessment_id),
+  status              TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','approved')),
+  plan_json           TEXT,                          -- the model's { include[], exclude[], notes }
+  inventory_json      TEXT,                           -- audit: what the model saw (census+sweep+refgraph)
+  import_profile_json TEXT,                           -- the slice written on approve (mirrors asdlc_project.sn_import_profile_json)
+  model               TEXT,
+  usage_json          TEXT,
+  stub                INTEGER NOT NULL DEFAULT 0,
+  error               TEXT,
+  approved_by         TEXT,
+  approved_at         TEXT,
+  created_by          TEXT,
+  created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_sn_discovery_plan_project ON asdlc_sn_discovery_plan(project_id, created_at);
+
 -- ServiceNow per-record change signals (#86 part b). One row per (project, sys_id): the
 -- last-synced sys_metadata modification counter + audit fields. Lets the sync (a) skip
 -- re-reasoning a record whose ServiceNow copy demonstrably did NOT move (sys_mod_count

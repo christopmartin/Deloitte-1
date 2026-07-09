@@ -433,6 +433,7 @@
       <div class="rolecard">
         <h4><span class="d ai"></span>ServiceNow Round-Trip AI Agents</h4>
         <ul>
+          <li><b>Discovery Planner</b> — requirements + real inventory → a focused import slice, incl. related/supporting tables via a reference-relationship graph <span class="model">· Opus 4.8 + thinking</span> <em>(human reviews/approves before any capture; #106)</em></li>
           <li><b>Reverse-Engineer</b> — live SN app → design <span class="model">· Opus 4.8 + thinking</span> <em>(interpretive types only: AI agents, use cases, tools; #103)</em></li>
           <li><b>Reconcile</b> — merge against Workbench design <span class="model">· Opus 4.8</span></li>
           <li><b>Review</b> — validate reconciled output <span class="model">· Opus 4.8</span></li>
@@ -450,6 +451,7 @@
           <li><b>capture · gate · seed</b> — pipeline plumbing</li>
           <li><b>sys_metadata sweep</b> — completeness + per-record change signals (#86)</li>
           <li><b>sn-direct-map</b> — deterministic field-copy for literal SN types (catalog items, tables, forms, integrations, business logic); zero-AI capture, narrative on request (#103)</li>
+          <li><b>readReferenceGraph</b> — reads this instance's real `sys_dictionary` reference fields, no AI (#106)</li>
         </ul>
       </div>
     </div>

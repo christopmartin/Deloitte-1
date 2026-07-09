@@ -287,6 +287,47 @@ async function captureScope({ scope, instance, user, pw, fetchImpl, slice }) {
     }
   }
 
+  // ── Extra SLICE surfaces (discovery planner, decision #2) ────────────────────
+  // A slice only FILTERS the three static iteration sources above — it never adds a name.
+  // A planner (or a human) may name a table that is present in the scope but NOT in
+  // SN_SURFACES / genericSurfaces() / CHILD_SURFACES (typically a custom business-data
+  // table). This is the one place a slice-named table gets fetched anyway: same generic
+  // Table API pull, stored as a generic (Tier-C) artifact via the existing substrate — no
+  // new materializer. Guarded entirely on `allow`, so a whole-scope (unsliced) capture is
+  // byte-for-byte unchanged.
+  if (allow) {
+    const alreadyIterated = new Set([
+      ...SN_SURFACES.map(s => s.table),
+      ...genericSurfaces().map(s => s.table),
+      ...CHILD_SURFACES.map(cs => cs.childTable),
+    ]);
+    const extraSurfaces = [...allow].filter(t => !alreadyIterated.has(t));
+    for (const table of extraSurfaces) {
+      const baseUrl = `${base}/api/now/table/${table}?sysparm_query=${encodeURIComponent(sliceQuery(scope, table, slice))}&sysparm_exclude_reference_link=true`;
+      let rows = [];
+      try {
+        const out = await fetchAllRows(f, baseUrl, headers, sliceCap);
+        rows = out.rows;
+        if (out.capped) artifacts.push({ __warn: `${table} -> capped at ${maxRows()} rows; import is PARTIAL for this surface (raise SN_CAPTURE_MAX_ROWS)` });
+      } catch (e) { artifacts.push({ __error: `${table} -> ${e.message}` }); continue; }
+      const entry = reg.resolveType(table);
+      for (const row of rows) {
+        const payload = {};
+        for (const [k, v] of Object.entries(row)) {
+          if (PAYLOAD_NOISE.has(k)) continue;
+          if (v === '' || v == null) continue;
+          payload[k] = v;
+        }
+        artifacts.push({
+          source_table: table, design_type: entry.sn_metadata_type, sn_metadata_type: entry.sn_metadata_type,
+          tier: entry.tier || 'C', generic: true, source_sys_id: row.sys_id,
+          name: row.name || row.short_description || row.label || payload.name || '(unnamed)',
+          salient: payload, payload, hash: hashArtifact(payload),
+        });
+      }
+    }
+  }
+
   // ── Recursive CHILD capture: columns under tables, actions under flows ───────
   // Link each child to its captured parent (by table name or flow sys_id) so it
   // materializes under parent_artifact_id and round-trips with its own sys_id.
@@ -417,6 +458,44 @@ async function sweepScopeMetadata({ scope, instance, user, pw, fetchImpl, slice 
     return sweep;
   } catch (e) {
     return { available: false, error: e.message, capped: false, total: 0, bySysId: new Map(), byClass: {} };
+  }
+}
+
+// Bound how many candidate tables a single readReferenceGraph call will query the
+// dictionary for — a runaway/OOM + read-latency ceiling, not a design limit.
+const REF_GRAPH_TABLE_CAP = Math.max(1, parseInt(process.env.SN_REF_GRAPH_TABLE_CAP || '150', 10) || 150);
+
+/**
+ * Read-only reference-relationship graph (discovery planner, decision #4): for the given
+ * candidate tables, read `sys_dictionary` rows where a field is a table reference, to learn
+ * which OTHER tables each one points at. This is what grounds "related record types" in
+ * THIS instance's real schema rather than generic ServiceNow structural knowledge alone.
+ * Bounded by a table cap; BEST-EFFORT — any failure (unreadable dictionary, bad creds)
+ * degrades to an empty, unavailable graph and never breaks planning.
+ * @param {{scope,instance,user,pw,fetchImpl,tables:string[],cap?:number}} opts
+ * @returns {Promise<{edges:Array<{from_table,field,to_table,label}>, available:boolean, error?:string}>}
+ */
+async function readReferenceGraph({ instance, user, pw, fetchImpl, tables, cap } = {}) {
+  const wantCap = (cap != null && Number.isFinite(Number(cap)) && Number(cap) > 0) ? Number(cap) : REF_GRAPH_TABLE_CAP;
+  const list = Array.from(new Set((tables || []).filter(Boolean))).slice(0, wantCap);
+  if (!list.length) return { edges: [], available: true };
+  try {
+    const f = makeFetch(fetchImpl);
+    const auth = 'Basic ' + Buffer.from(`${user}:${pw}`).toString('base64');
+    const base = normalizeInstanceUrl(instance);
+    const headers = { Authorization: auth, Accept: 'application/json' };
+    const q = `nameIN${list.join(',')}^internal_type=reference^referenceISNOTEMPTY^ORDERBYsys_id`;
+    const fields = 'name,element,reference,column_label';
+    const baseUrl = `${base}/api/now/table/sys_dictionary?sysparm_query=${encodeURIComponent(q)}&sysparm_fields=${encodeURIComponent(fields)}&sysparm_display_value=false&sysparm_exclude_reference_link=true`;
+    const { rows } = await fetchAllRows(f, baseUrl, headers, null);
+    const edges = [];
+    for (const r of rows) {
+      if (!r.name || !r.element || !r.reference) continue;
+      edges.push({ from_table: r.name, field: r.element, to_table: r.reference, label: r.column_label || r.element });
+    }
+    return { edges, available: true };
+  } catch (e) {
+    return { edges: [], available: false, error: e.message };
   }
 }
 
@@ -721,4 +800,4 @@ function classifyArtifacts(artifacts, projectId, opts = {}) {
   return res;
 }
 
-module.exports = { SN_SURFACES, WB_PROVENANCE_TABLES, hashArtifact, captureScope, fetchAllRows, findWbBySysId, findWbBySlug, parseWbTag, classifyArtifacts, makeFetch, sweepScopeMetadata, buildSweep, normalizeSweep, analyzeCompleteness, readChangeSignals, persistChangeSignals, sweepSignals, normalizeSlice, expandSliceSurfaces, sliceQuery, sliceMetadataQuery };
+module.exports = { SN_SURFACES, WB_PROVENANCE_TABLES, hashArtifact, captureScope, fetchAllRows, findWbBySysId, findWbBySlug, parseWbTag, classifyArtifacts, makeFetch, sweepScopeMetadata, buildSweep, normalizeSweep, analyzeCompleteness, readChangeSignals, persistChangeSignals, sweepSignals, normalizeSlice, expandSliceSurfaces, sliceQuery, sliceMetadataQuery, readReferenceGraph, genericSurfaces };
