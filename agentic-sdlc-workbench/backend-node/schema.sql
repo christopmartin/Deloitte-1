@@ -1602,6 +1602,7 @@ CREATE TABLE IF NOT EXISTS asdlc_sn_discovery_plan (
   model               TEXT,
   usage_json          TEXT,
   stub                INTEGER NOT NULL DEFAULT 0,
+  open_ended          INTEGER NOT NULL DEFAULT 0,       -- set at generation time; approve gates on THIS, never the request body
   error               TEXT,
   approved_by         TEXT,
   approved_at         TEXT,

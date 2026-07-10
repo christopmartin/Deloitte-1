@@ -29,6 +29,14 @@ function getClient() {
   return _client;
 }
 
+// The 9 real wbDesignType values SN_CATALOG maps to (see sn-catalog.js) — passed to
+// getActiveBestPractices so the planner can see entity-scoped house rules, not just
+// scope='global' ones (every other AI call site passes real scopes; this one didn't).
+const DISCOVERY_ENTITY_SCOPES = [
+  'agent_spec', 'use_case', 'tool', 'data_model', 'business_logic',
+  'form_design', 'catalog_item', 'workflow', 'integration',
+];
+
 // ── Static, cache-friendly system guidance (byte-identical across all calls) ──
 const PLANNER_SYSTEM_PROMPT = [
   'You are a senior ServiceNow solution architect deciding WHICH ServiceNow tables to import into a',
@@ -57,6 +65,11 @@ const PLANNER_SYSTEM_PROMPT = [
   'that do not need an answer (e.g. a requirement that maps to nothing in the inventory). Most plans',
   'should raise zero clarifications — reserve them for cases that actually warrant a human decision.',
   '',
+  'If a "House rules / platform guidance" block appears below and one of those rules directly shaped',
+  'a table you included or a clarifying question you raised, name that rule by its title in the',
+  'relevant `rationale` or `context` field — only when it actually changed your answer, never as',
+  'decoration, and never invent a rule title that was not given to you.',
+  '',
   'Call the emit_import_plan tool exactly once with your analysis. Do not write a prose reply.',
 ].join('\n');
 
@@ -81,6 +94,7 @@ const EMIT_TOOL = {
             mapped_requirement_slugs: { type: 'array', items: { type: 'string' }, description: 'Requirement slugs (e.g. FR-003) this table serves; empty for a purely related/supporting table' },
             confidence: { type: 'number', minimum: 0, maximum: 1, description: 'Honest confidence (0-1) that this table belongs in the import' },
             record_filter: { type: 'string', description: 'Optional encoded ServiceNow query fragment to narrow this surface further (leave empty to import all in-scope records)' },
+            platform_wide: { type: 'boolean', description: 'true ONLY in open-ended mode, for a table you named from your own ServiceNow knowledge that is NOT in the provided inventory — it gets no scope filter and no record_filter. Omit/false for every table drawn from the inventory.' },
           },
           required: ['table', 'relation', 'rationale', 'confidence'],
         },
@@ -227,9 +241,22 @@ function stubPlan({ inventory }) {
   return { include, exclude: [], notes: '[stub — no ANTHROPIC_API_KEY; offline deterministic plan]', clarifications: [], _stub: true };
 }
 
+// ── Open-ended escalation (§3): an UNCACHED, conditional addition appended only when the
+// caller explicitly opts in — the main PLANNER_SYSTEM_PROMPT block above stays byte-
+// identical for every normal call, so its cache tag is never invalidated by this.
+const OPEN_ENDED_ADDITION = [
+  'OPEN-ENDED MODE: the human found the inventory above insufficient and explicitly asked you to go',
+  'further. You may now name a real ServiceNow table that is NOT in the inventory above, drawing on',
+  'your own knowledge of ServiceNow\'s standard schema, when you are genuinely confident it is the',
+  'right table for a requirement. Mark every such table platform_wide:true and leave record_filter',
+  'empty — it will be imported with NO scope filter and no record filter at all, so only do this when',
+  'you are confident it is a REAL ServiceNow table name and it clearly serves a requirement. Never',
+  'mark a table platform_wide if it is already in the inventory above.',
+].join('\n');
+
 /**
  * Generate a requirements-driven import plan for one ServiceNow scope.
- * @param {{requirements:Array, inventory:object, scope:string}} input
+ * @param {{requirements:Array, inventory:object, scope:string, openEnded?:boolean}} input
  * @param {object} ctx {projectId}
  * @returns {Promise<{plan:object, usage?:object, model?:string, stub?:boolean}>}
  */
@@ -241,13 +268,14 @@ async function planDiscovery(input, ctx = {}) {
   const thinkCfg = aiConfig.getThinkingConfig('discovery_planner');
   const maxTokens = Math.max(aiConfig.getMaxTokens(), 12000);
 
-  const guidance = aiConfig.getActiveBestPractices([], aiConfig.getProjectPlatform(ctx.projectId));
+  const guidance = aiConfig.getActiveBestPractices(DISCOVERY_ENTITY_SCOPES, aiConfig.getProjectPlatform(ctx.projectId));
   const systemBlocks = [{ type: 'text', text: PLANNER_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }];
   if (guidance.length) {
     systemBlocks.push({ type: 'text', text:
       'House rules / platform guidance (FOLLOW THESE):\n' +
       guidance.map(b => `  - ${b.title ? b.title + ': ' : ''}${b.rule_text}`).join('\n') });
   }
+  if (input.openEnded) systemBlocks.push({ type: 'text', text: OPEN_ENDED_ADDITION });
 
   const req = {
     model,
@@ -271,4 +299,4 @@ async function planDiscovery(input, ctx = {}) {
   return { plan, usage: resp.usage, model };
 }
 
-module.exports = { planDiscovery, buildPlanUserMessage, buildDiscoveryInventory, stubPlan, EMIT_TOOL, PLANNER_SYSTEM_PROMPT };
+module.exports = { planDiscovery, buildPlanUserMessage, buildDiscoveryInventory, stubPlan, EMIT_TOOL, PLANNER_SYSTEM_PROMPT, DISCOVERY_ENTITY_SCOPES, OPEN_ENDED_ADDITION };

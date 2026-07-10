@@ -56,8 +56,13 @@ const done = (code) => { try { db.close(); } catch {} process.exit(code); };
   const arts = await cap.captureScope({ scope: 'x', instance: 'https://t', user: 'u', pw: 'p', fetchImpl: mockFetch, slice: { include_surfaces: ['sc_cat_item'] } });
   ok(queried.has('sc_cat_item'), 'in-slice surface (sc_cat_item) IS queried');
   ok(queried.has('item_option_new'), 'child of an in-slice parent (item_option_new) IS queried');
+  // #108 follow-up: sc_req_item is now ALSO a CHILD_SURFACES entry of sc_cat_item (catalog
+  // fulfillment work records), so it is queried too (it just returns 0 rows here, since this
+  // mock doesn't stub it) — sc_task (child of sc_req_item) is never queried because it has
+  // zero parents to iterate when sc_req_item returns no rows.
+  ok(queried.has('sc_req_item'), 'sc_req_item (child of the in-slice sc_cat_item) IS queried');
   ok(!queried.has('sys_script') && !queried.has('sn_aia_agent'), 'out-of-slice surfaces are NOT queried');
-  ok(queried.size === 2, `ONLY the slice surfaces were touched (got ${queried.size}: ${[...queried].join(', ')})`);
+  ok(queried.size === 3, `ONLY the slice surfaces were touched (got ${queried.size}: ${[...queried].join(', ')})`);
   ok(arts.filter(a => a.source_table === 'sc_cat_item' && !a.__warn && !a.__error).length === 3, 'all 3 in-slice records captured');
 
   queried.clear();

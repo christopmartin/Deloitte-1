@@ -548,18 +548,22 @@ app.get('/api/v1/projects/:id/servicenow/import-profile', (req, res) => {
  */
 function persistImportProfile(project, body, uid) {
   const surfaces = Array.isArray(body.include_surfaces) ? body.include_surfaces.filter(s => typeof s === 'string' && s) : [];
-  const clear = body.clear === true || (!surfaces.length && !body.scope);
+  // Open-ended/platform-wide tables (§3) — orthogonal to include_surfaces: these get NO scope
+  // filter and NO record filter at capture time (sn-capture.js's dedicated open-ended pass).
+  const platformWide = Array.isArray(body.platform_wide_surfaces) ? body.platform_wide_surfaces.filter(s => typeof s === 'string' && s) : [];
+  const clear = body.clear === true || (!surfaces.length && !platformWide.length && !body.scope);
   if (clear) {
     db.prepare("UPDATE asdlc_project SET sn_import_profile_json=NULL, updated_by=?, updated_at=datetime('now') WHERE project_id=?").run(uid, project.project_id);
     auditLog('asdlc_project', project.project_id, 'UPDATE', { sn_import_profile_json: project.sn_import_profile_json }, { sn_import_profile_json: null }, uid);
     return { profile: null, source: 'none' };
   }
-  if (!surfaces.length) return { error: { status: 400, message: 'include_surfaces must be a non-empty array of ServiceNow table names (or send {clear:true} to reset to whole-scope).' } };
+  if (!surfaces.length && !platformWide.length) return { error: { status: 400, message: 'include_surfaces must be a non-empty array of ServiceNow table names (or send {clear:true} to reset to whole-scope).' } };
   const capNum = Number(body.per_surface_cap);
   const profile = {
     scope: (typeof body.scope === 'string' && body.scope) ? body.scope : (project.servicenow_scope || null),
     include_types: Array.isArray(body.include_types) ? body.include_types.filter(t => typeof t === 'string') : [],
     include_surfaces: surfaces,
+    platform_wide_surfaces: platformWide,
     per_surface_cap: (Number.isFinite(capNum) && capNum > 0) ? Math.floor(capNum) : null,
     record_filters: (body.record_filters && typeof body.record_filters === 'object' && !Array.isArray(body.record_filters)) ? body.record_filters : {},
   };
@@ -600,6 +604,10 @@ app.post('/api/v1/projects/:id/servicenow/discovery-plan', async (req, res) => {
   const body = req.body || {};
   const ingestId = body.ingest_id;
   if (!ingestId) return res.status(400).json({ error: 'ingest_id is required — the discovery plan is scoped to one Ingest Document.' });
+  // §3: explicit, separately-triggered escalation — never silently available. Persisted on
+  // the plan row at generation time; the approve endpoint gates on THAT column, never on
+  // whatever a later request happens to send.
+  const openEnded = body.open_ended === true;
   const doc = db.prepare("SELECT ingest_id, lifecycle_status FROM asdlc_ingest_document WHERE ingest_id=? AND project_id=?").get(ingestId, project.project_id);
   if (!doc) return res.status(404).json({ error: 'Ingest document not found in this project' });
   if (doc.lifecycle_status === 'cancelled') return res.status(409).json({ error: 'This document has been cancelled — restore it first.' });
@@ -658,13 +666,13 @@ app.post('/api/v1/projects/:id/servicenow/discovery-plan', async (req, res) => {
 
   const planId = generateId();
   db.prepare(`INSERT INTO asdlc_sn_discovery_plan
-      (plan_id, project_id, ingest_id, scope, assessment_id, status, inventory_json, created_by, updated_at)
-      VALUES (?,?,?,?,?, 'draft', ?, ?, datetime('now'))`)
-    .run(planId, project.project_id, ingestId, scope, assessmentId, JSON.stringify(inventory), uid);
+      (plan_id, project_id, ingest_id, scope, assessment_id, status, inventory_json, open_ended, created_by, updated_at)
+      VALUES (?,?,?,?,?, 'draft', ?, ?, ?, datetime('now'))`)
+    .run(planId, project.project_id, ingestId, scope, assessmentId, JSON.stringify(inventory), openEnded ? 1 : 0, uid);
 
   let result;
   try {
-    result = await planDiscovery({ requirements, inventory, scope, pastDiscoveryQA }, { projectId: project.project_id });
+    result = await planDiscovery({ requirements, inventory, scope, pastDiscoveryQA, openEnded }, { projectId: project.project_id });
   } catch (err) {
     db.prepare("UPDATE asdlc_sn_discovery_plan SET error=?, updated_at=datetime('now') WHERE plan_id=?").run(err.message, planId);
     return res.status(502).json({ error: `Discovery planning failed: ${err.message}` });
@@ -742,13 +750,29 @@ app.post('/api/v1/projects/:id/servicenow/discovery-plan/:planId/approve', (req,
   if (!include.length) return res.status(400).json({ error: 'This plan has no included tables — nothing to approve.' });
 
   const body = req.body || {};
-  // The body may override the cap; per-table record_filter (if the model proposed one)
-  // folds into the record_filters map — the same LIVE, dormant hook sliceQuery reads.
+  // Hallucination-defense gate: platform_wide is always a field the model COULD set (the tool
+  // schema doesn't change per call), so a normal-mode plan could carry a stray platform_wide:true
+  // item. Only honor it — capture with no scope filter — when THIS PLAN ROW was itself persisted
+  // as open_ended at generation time; never trust the live request. On a non-open-ended plan any
+  // platform_wide:true item is dropped entirely (not folded into either surfaces list) rather than
+  // silently treated as a normal, scope-filtered inclusion the model never actually vetted that way.
+  const openEnded = !!row.open_ended;
   const record_filters = {};
-  for (const item of include) if (item && item.table && item.record_filter) record_filters[item.table] = item.record_filter;
+  const normalItems = [];
+  const platformWideItems = [];
+  for (const item of include) {
+    if (!item || !item.table) continue;
+    if (item.platform_wide === true) {
+      if (openEnded) platformWideItems.push(item);
+      continue;
+    }
+    normalItems.push(item);
+    if (item.record_filter) record_filters[item.table] = item.record_filter;
+  }
   const result = persistImportProfile(project, {
     scope: row.scope,
-    include_surfaces: include.map(i => i.table).filter(Boolean),
+    include_surfaces: normalItems.map(i => i.table).filter(Boolean),
+    platform_wide_surfaces: platformWideItems.map(i => i.table).filter(Boolean),
     per_surface_cap: body.per_surface_cap,
     record_filters,
   }, uid);

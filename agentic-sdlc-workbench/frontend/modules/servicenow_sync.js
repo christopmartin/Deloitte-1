@@ -232,6 +232,14 @@ function renderEstimatePanel(out, est, { dryRun, onAbort, onStart }) {
   }
   if (est.total_unchanged) body.appendChild(el('div', { style: 'font-size:11px;color:var(--text-muted)' }, `${est.total_unchanged} record(s) unchanged — skipped.`));
 
+  // §3 — platform-wide (open-ended) tables: a distinct line, never folded into the counts
+  // above, since these are a capped best-effort sample rather than a complete import.
+  if (est.platform_wide && est.platform_wide.total) {
+    const tableList = est.platform_wide.tables.map(t => `${t.table} (${t.count})`).join(', ');
+    body.appendChild(el('div', { style: 'font-size:12px;color:#9a6700;background:rgba(154,103,0,0.08);padding:8px;border-radius:6px' },
+      `⚠ Platform-wide table(s) — ${tableList}. ${est.platform_wide.note}.`));
+  }
+
   const startBtn = el('button', { className: 'btn btn-primary' }, dryRun ? 'Start preview' : 'Start sync');
   const abortBtn = el('button', { className: 'btn btn-ghost', style: 'margin-left:8px' }, 'Cancel');
   startBtn.addEventListener('click', onStart);

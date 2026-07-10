@@ -504,6 +504,16 @@ async function estimateSyncWork(opts = {}) {
   const totalRecords  = classified.new.length + classified.changed.length;
   const aiRecordCount = aiNew.length + aiChanged.length;
   const aiCalls = aiNew.length + aiChanged.length * 3;
+  // Open-ended/platform-wide rows (§3): a capped, most-recent sample with NO scope filter —
+  // called out as its own line so it is never silently folded into the normal count/estimate.
+  const platformWideArtifacts = (artifacts || []).filter(a => a && a.platform_wide && a.source_sys_id);
+  const platformWideByTable = {};
+  for (const a of platformWideArtifacts) platformWideByTable[a.source_table] = (platformWideByTable[a.source_table] || 0) + 1;
+  const platformWide = Object.keys(platformWideByTable).length ? {
+    tables: Object.entries(platformWideByTable).map(([table, count]) => ({ table, count })),
+    total: platformWideArtifacts.length,
+    note: 'capped, most-recent sample — not a complete import',
+  } : null;
   return {
     total_new: classified.new.length, total_changed: classified.changed.length,
     total_unchanged: classified.unchanged.length,
@@ -511,6 +521,7 @@ async function estimateSyncWork(opts = {}) {
     ai_path_count: aiRecordCount, deterministic_count: totalRecords - aiRecordCount,
     estimated_seconds: Math.round(aiCalls * EST_SECONDS_PER_CALL),
     estimated_cost_usd: Number((aiCalls * EST_COST_PER_CALL).toFixed(4)),
+    platform_wide: platformWide,
     // Handed back so a caller can start the real run without re-capturing from ServiceNow.
     artifacts, metadataSweep: sweep,
   };

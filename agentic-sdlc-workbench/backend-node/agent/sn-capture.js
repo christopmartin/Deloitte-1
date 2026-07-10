@@ -56,6 +56,41 @@ function makeFetch(fetchImpl) {
 const pageSize = () => Math.max(1, parseInt(process.env.SN_CAPTURE_PAGE_SIZE || '1000', 10) || 1000);
 const maxRows  = () => Math.max(1, parseInt(process.env.SN_CAPTURE_MAX_ROWS  || '50000', 10) || 50000);
 
+// ── Bounded reference-resolution (#108 follow-up, §2b) ──────────────────────────────
+// For a table that is REFERENCED (e.g. sc_task.assignment_group) rather than owned/child-of
+// anything captured, resolve ONLY the specific records actually seen — never the whole
+// target table, which would have no natural blast-radius limit. Adding a pair here is a
+// deliberate code change (an explicit, reviewable allow-list), never a generic "any
+// reference field" scan. Self-bounding: it can only ever resolve what capture already,
+// causally, pulled in — and a hard ceiling (SN_REF_RESOLVE_MAX_IDS) on top of that.
+// KNOWN LIMITATION (accepted, not fixed here): the sys_metadata completeness sweep is
+// itself scope-filtered, so a resolved row here (not scope-owned by the app) may be
+// mislabeled "vanished" by drift disambiguation later — never destructive, just a
+// misleading label.
+const REFERENCE_RESOLUTIONS = [
+  { sourceTable: 'sc_task', field: 'assignment_group', targetTable: 'sys_user_group', role: 'assignment_group' },
+];
+const refResolveMaxIds = () => Math.max(1, parseInt(process.env.SN_REF_RESOLVE_MAX_IDS || '200', 10) || 200);
+
+// ── Open-ended platform-wide capture (#108 follow-up, §3): an explicit, separately-
+// triggered escalation — tables the planner named from its OWN knowledge (no natural
+// scoping, no curated field list, no prior validation), never silently blended into a
+// normal plan. `slice.platform_wide_surfaces` (orthogonal to `include_surfaces`) is the
+// only path into this list. Deliberately different from every capture pass above: NO
+// scope filter at all (sidesteps the unresolved "does a scope-filtered query error on a
+// table with no sys_scope field" risk rather than gambling on it), a hard LOW row cap,
+// most-recently-updated-first ordering for a representative sample, and no recursive
+// child capture. `SN_OPEN_ENDED_ROW_CAP` is independent of, and always lower than, the
+// project's normal per_surface_cap.
+const openEndedRowCap = () => Math.max(1, parseInt(process.env.SN_OPEN_ENDED_ROW_CAP || '30', 10) || 30);
+
+/** Extract the (optional) open-ended/platform-wide table list from a raw slice object. */
+function openEndedTables(slice) {
+  return (slice && Array.isArray(slice.platform_wide_surfaces))
+    ? slice.platform_wide_surfaces.filter(t => typeof t === 'string' && t)
+    : [];
+}
+
 /**
  * Fetch ALL rows of a Table API query, paging by sysparm_offset until a short page
  * (or the safety ceiling) is reached. `baseUrl` must already carry the query
@@ -138,6 +173,15 @@ const CHILD_SURFACES = [
   // parent ref (cat_item) stays in the payload; order drives child_order.
   { childTable: 'item_option_new',          parentTable: 'sc_cat_item',   role: 'variable',
     parentKey: 'sysId', filter: p => `cat_item=${p.sysId}`,               nameField: 'question_text', orderField: 'order' },
+  // Catalog fulfillment work records (#108 follow-up — "reach" gap): a catalog item's actual
+  // work happens on the Requested Item and its Catalog Tasks, both standard Task-based tables,
+  // never a new custom table. sc_task is a 3rd-level chain — its parentTable (sc_req_item) is
+  // itself a CHILD_SURFACES entry, so it only resolves via the parentsByTable staleness fix
+  // (rows captured by an EARLIER entry are appended into the snapshot after that entry runs).
+  { childTable: 'sc_req_item',              parentTable: 'sc_cat_item',   role: 'request_item',
+    parentKey: 'sysId', filter: p => `cat_item=${p.sysId}`,               nameField: 'number',        orderField: null },
+  { childTable: 'sc_task',                  parentTable: 'sc_req_item',   role: 'catalog_task',
+    parentKey: 'sysId', filter: p => `request_item=${p.sysId}`,           nameField: 'number',        orderField: null },
   // Form sections: one row per (form, section) join. The section's own caption/name is
   // dot-walked onto the SAME row so no separate sys_ui_section fetch is needed.
   { childTable: 'sys_ui_form_section',      parentTable: 'sys_ui_form',   role: 'form_section',
@@ -158,7 +202,11 @@ const CHILD_SURFACES = [
 function normalizeSlice(slice) {
   if (!slice) return null;
   const surfaces = Array.isArray(slice.include_surfaces) ? slice.include_surfaces.filter(Boolean) : [];
-  if (!surfaces.length) return null;   // nothing selected ⇒ treat as whole-scope
+  // A platform_wide-only slice (no normal include_surfaces) must NOT collapse to null —
+  // null means "whole scope" everywhere below, which would defeat the entire point of the
+  // open-ended throttle by silently running every OTHER curated/generic pass unbounded.
+  const hasPlatformWide = Array.isArray(slice.platform_wide_surfaces) && slice.platform_wide_surfaces.some(Boolean);
+  if (!surfaces.length && !hasPlatformWide) return null;   // nothing selected at all ⇒ treat as whole-scope
   const capRaw = slice.per_surface_cap;
   const cap = (capRaw != null && Number.isFinite(Number(capRaw)) && Number(capRaw) > 0) ? Number(capRaw) : null;
   const filters = (slice.record_filters && typeof slice.record_filters === 'object') ? slice.record_filters : {};
@@ -347,6 +395,7 @@ async function captureScope({ scope, instance, user, pw, fetchImpl, slice }) {
       ? artifacts.filter(a => !a.__error && a.source_table === cs.parentTable && a.source_sys_id && a.payload && a.payload[cs.parentKeyField])
           .map(a => ({ sysId: a.source_sys_id, queryKey: a.payload[cs.parentKeyField] }))
       : (parentsByTable[cs.parentTable] || []);
+    const beforeThisEntry = artifacts.length;
     for (const parent of parents) {
       if (cs.parentKey === 'name' && !parent.name) continue;
       const fieldsParam = cs.fields ? `&sysparm_fields=${encodeURIComponent(cs.fields)}` : '';
@@ -373,6 +422,83 @@ async function captureScope({ scope, instance, user, pw, fetchImpl, slice }) {
           salient: payload, payload, hash: hashArtifact(payload),
         });
       }
+    }
+    // Staleness fix: make THIS entry's own freshly-captured rows visible as PARENTS to a
+    // LATER CHILD_SURFACES entry naming cs.childTable as ITS parentTable (a 3rd-level chain,
+    // e.g. sc_task under sc_req_item) — parentsByTable above is a once-built snapshot that
+    // never otherwise sees rows this very loop adds.
+    for (let i = beforeThisEntry; i < artifacts.length; i++) {
+      const art = artifacts[i];
+      if (art.__error || !art.source_sys_id) continue;
+      (parentsByTable[art.source_table] = parentsByTable[art.source_table] || [])
+        .push({ sysId: art.source_sys_id, name: (art.salient && art.salient.name) || art.name });
+    }
+  }
+
+  // ── Bounded reference-resolution: resolve SPECIFIC referenced records only ──────────
+  // Runs after CHILD_SURFACES so a chained source like sc_task has already been captured.
+  // Resolved rows are plain top-level generic artifacts (no parent_source_sys_id) — they
+  // are REFERENCED, not owned/child-of anything in this capture.
+  for (const rr of REFERENCE_RESOLUTIONS) {
+    if (allow && !allow.has(rr.sourceTable)) continue;   // source table itself out of the slice
+    const ids = new Set();
+    for (const art of artifacts) {
+      if (art.__error || art.source_table !== rr.sourceTable) continue;
+      const v = art.payload && art.payload[rr.field];
+      if (v && typeof v === 'string') ids.add(v);
+    }
+    if (!ids.size) continue;
+    const cap = refResolveMaxIds();
+    const idList = [...ids].slice(0, cap);
+    if (ids.size > cap) artifacts.push({ __warn: `${rr.targetTable} reference resolution -> capped at ${cap} distinct ${rr.sourceTable}.${rr.field} value(s) (raise SN_REF_RESOLVE_MAX_IDS)` });
+    const baseUrl = `${base}/api/now/table/${rr.targetTable}?sysparm_query=${encodeURIComponent('sys_idIN' + idList.join(','))}&sysparm_exclude_reference_link=true`;
+    let rows = [];
+    try {
+      const out = await fetchAllRows(f, baseUrl, headers, null);
+      rows = out.rows;
+    } catch (e) { artifacts.push({ __error: `${rr.targetTable} (referenced by ${rr.sourceTable}.${rr.field}) -> ${e.message}` }); continue; }
+    for (const row of rows) {
+      const payload = {};
+      for (const [k, v] of Object.entries(row)) {
+        if (PAYLOAD_NOISE.has(k)) continue;
+        if (v === '' || v == null) continue;
+        payload[k] = v;
+      }
+      artifacts.push({
+        source_table: rr.targetTable, design_type: rr.role, sn_metadata_type: rr.role, tier: 'C',
+        generic: true, resolved_reference: true, source_sys_id: row.sys_id,
+        name: row.name || payload.name || '(unnamed)',
+        salient: payload, payload, hash: hashArtifact(payload),
+      });
+    }
+  }
+
+  // ── Open-ended platform-wide capture: its own dedicated pass, not folded into the ────
+  // extra-slice-surface pass above (which always applies the scope filter) — avoids any
+  // collision with a §2a CHILD_SURFACES entry of the same table name, and keeps the
+  // "no scope filter" behavior isolated to exactly this opt-in path.
+  for (const table of openEndedTables(slice)) {
+    if (!REAL_TABLE.test(table)) { artifacts.push({ __warn: `${table} -> skipped (not a valid ServiceNow table name)` }); continue; }
+    const cap = openEndedRowCap();
+    const baseUrl = `${base}/api/now/table/${table}?sysparm_query=${encodeURIComponent('ORDERBYDESCsys_updated_on')}&sysparm_exclude_reference_link=true`;
+    let rows = [];
+    try {
+      const out = await fetchAllRows(f, baseUrl, headers, cap);
+      rows = out.rows;
+    } catch (e) { artifacts.push({ __error: `${table} (platform-wide) -> ${e.message}` }); continue; }
+    for (const row of rows) {
+      const payload = {};
+      for (const [k, v] of Object.entries(row)) {
+        if (PAYLOAD_NOISE.has(k)) continue;
+        if (v === '' || v == null) continue;
+        payload[k] = v;
+      }
+      artifacts.push({
+        source_table: table, design_type: 'platform_wide', sn_metadata_type: 'platform_wide', tier: 'C',
+        generic: true, platform_wide: true, source_sys_id: row.sys_id,
+        name: row.name || row.short_description || row.label || payload.name || '(unnamed)',
+        salient: payload, payload, hash: hashArtifact(payload),
+      });
     }
   }
 
@@ -800,4 +926,4 @@ function classifyArtifacts(artifacts, projectId, opts = {}) {
   return res;
 }
 
-module.exports = { SN_SURFACES, WB_PROVENANCE_TABLES, hashArtifact, captureScope, fetchAllRows, findWbBySysId, findWbBySlug, parseWbTag, classifyArtifacts, makeFetch, sweepScopeMetadata, buildSweep, normalizeSweep, analyzeCompleteness, readChangeSignals, persistChangeSignals, sweepSignals, normalizeSlice, expandSliceSurfaces, sliceQuery, sliceMetadataQuery, readReferenceGraph, genericSurfaces };
+module.exports = { SN_SURFACES, WB_PROVENANCE_TABLES, CHILD_SURFACES, REFERENCE_RESOLUTIONS, hashArtifact, captureScope, fetchAllRows, findWbBySysId, findWbBySlug, parseWbTag, classifyArtifacts, makeFetch, sweepScopeMetadata, buildSweep, normalizeSweep, analyzeCompleteness, readChangeSignals, persistChangeSignals, sweepSignals, normalizeSlice, expandSliceSurfaces, sliceQuery, sliceMetadataQuery, readReferenceGraph, genericSurfaces, openEndedTables, REAL_TABLE };

@@ -288,6 +288,11 @@ function buildSystemPrompt(doc, threshold, answeredClarifications, existingSumma
       ``,
       `## Best practices / house rules (FOLLOW THESE)`,
       ...bestPractices.map(b => `  - ${b.title ? b.title + ': ' : ''}${b.rule_text}`),
+      ``,
+      `If one of the above rules directly shaped an extracted field or a clarification you raise,`,
+      `name it by its title in that item's own free-text (e.g. why_uncertain, or the entity's`,
+      `description) — only when it actually changed your answer, never as decoration, and never`,
+      `invent a rule title that was not given to you above.`,
     );
   }
 
@@ -540,6 +545,10 @@ function buildReconcileSystemPrompt(doc, bestPractices) {
       ``,
       `## Best practices / house rules (FOLLOW THESE)`,
       ...bestPractices.map(b => `  - ${b.title ? b.title + ': ' : ''}${b.rule_text}`),
+      ``,
+      `If one of the above rules directly shaped a reconciled field, name it by its title in that`,
+      `field's own free text (e.g. conflict_rationale) — only when it actually changed your answer,`,
+      `never as decoration, and never invent a rule title that was not given to you above.`,
     );
   }
 

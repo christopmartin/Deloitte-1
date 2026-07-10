@@ -433,7 +433,7 @@
       <div class="rolecard">
         <h4><span class="d ai"></span>ServiceNow Round-Trip AI Agents</h4>
         <ul>
-          <li><b>Discovery Planner</b> — ONE Ingest Document's own pre-promote requirements + real inventory → a focused import slice, incl. related/supporting tables via a reference-relationship graph; genuine ambiguity raises a real <code>discovery:</code> clarification in that document's own Q&amp;A (never the project-wide requirements, never a passive note) <span class="model">· Opus 4.8 + thinking</span> <em>(human reviews/approves before any capture; assessment runs automatically if none covers the scope; #106/#108)</em></li>
+          <li><b>Discovery Planner</b> — ONE Ingest Document's own pre-promote requirements + real inventory → a focused import slice, incl. related/supporting tables via a reference-relationship graph; sees entity-scoped house rules (not just global ones); genuine ambiguity raises a real <code>discovery:</code> clarification in that document's own Q&amp;A (never the project-wide requirements, never a passive note) <span class="model">· Opus 4.8 + thinking</span> <em>(human reviews/approves before any capture; assessment runs automatically if none covers the scope; #106/#108)</em> — an explicit, separate "Not enough? Let AI consider any ServiceNow table" escalation lets it name a table beyond the real inventory, throttled (30-row cap, no scope filter, most-recent sample, no recursion) and gated at approval on the plan's own persisted flag, never a live request (#109)</li>
           <li><b>Reverse-Engineer</b> — live SN app → design <span class="model">· Opus 4.8 + thinking</span> <em>(interpretive types only: AI agents, use cases, tools; #103)</em></li>
           <li><b>Reconcile</b> — merge against Workbench design <span class="model">· Opus 4.8</span></li>
           <li><b>Review</b> — validate reconciled output <span class="model">· Opus 4.8</span></li>
@@ -452,6 +452,7 @@
           <li><b>sys_metadata sweep</b> — completeness + per-record change signals (#86)</li>
           <li><b>sn-direct-map</b> — deterministic field-copy for literal SN types (catalog items, tables, forms, integrations, business logic); zero-AI capture, narrative on request (#103)</li>
           <li><b>readReferenceGraph</b> — reads this instance's real `sys_dictionary` reference fields, no AI (#106)</li>
+          <li><b>CHILD_SURFACES</b> — extended to a 3-level chain (sc_cat_item → sc_req_item → sc_task, catalog fulfillment work records) and a bounded reference-resolution pass (sc_task.assignment_group → sys_user_group, only the specific groups referenced — never the whole table) so shared platform "backbone" tables round-trip alongside app-owned ones (#109)</li>
         </ul>
       </div>
     </div>

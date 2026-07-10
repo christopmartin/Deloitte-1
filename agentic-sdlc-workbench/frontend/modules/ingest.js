@@ -1008,6 +1008,7 @@ function buildClarificationForm(doc, questions, round, pane) {
 
 /** Relation badge for one plan item: tag('direct','ok') or tag('related → X','muted'). */
 function planRelationTag(item) {
+  if (item.platform_wide) return tag('⚠ platform-wide — capped sample (most recent)', 'warn');
   return item.relation === 'related' ? tag(`related → ${item.related_to || '?'}`, 'muted') : tag('direct', 'ok');
 }
 
@@ -1029,28 +1030,41 @@ function buildServiceNowPlanSection(doc, planRow, discoveryQs, pane) {
 
   const hasPlan = !!(planRow && planRow.plan);
   const genBtn = el('button', { className: 'btn btn-secondary' }, hasPlan ? 'Regenerate plan' : 'Generate ServiceNow import plan');
+  // §3 — explicit, separately-triggered escalation: never blended into a normal Generate/
+  // Regenerate. Only reachable by clicking THIS button, so it's never silently available.
+  const openEndedBtn = el('button', { className: 'btn btn-ghost', style: { marginLeft: '8px' } },
+    'Not enough? Let AI consider any ServiceNow table');
   const resultBox = el('div', { style: { marginTop: '10px' } });
-  sec.appendChild(genBtn);
+  sec.appendChild(el('div', {}, genBtn, openEndedBtn));
   sec.appendChild(resultBox);
 
-  genBtn.addEventListener('click', async () => {
+  async function runGenerate(openEnded) {
     genBtn.disabled = true;
-    resultBox.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div>' +
-      '<span>Reading this document\'s requirements + your ServiceNow scope\'s inventory — first-time ' +
-      'setup may take a bit longer while we survey the instance…</span></div>';
+    openEndedBtn.disabled = true;
+    resultBox.innerHTML = openEnded
+      ? '<div class="loading-state"><div class="loading-spinner"></div>' +
+        '<span>Letting AI consider ServiceNow tables beyond the real inventory — a capped, best-effort pass…</span></div>'
+      : '<div class="loading-state"><div class="loading-spinner"></div>' +
+        '<span>Reading this document\'s requirements + your ServiceNow scope\'s inventory — first-time ' +
+        'setup may take a bit longer while we survey the instance…</span></div>';
     try {
       const r = await apiFetch(`/projects/${doc.project_id}/servicenow/discovery-plan`, {
-        method: 'POST', body: JSON.stringify({ ingest_id: doc.ingest_id }),
+        method: 'POST', body: JSON.stringify({ ingest_id: doc.ingest_id, open_ended: !!openEnded }),
       });
       if (r.assessment_auto_run) showToast('First ServiceNow scan for this app complete — future plans will be faster.', 'info');
-      showToast('Plan generated — review and approve below.', 'success');
+      showToast(openEnded
+        ? 'Open-ended plan generated — review the platform-wide table(s) below before approving.'
+        : 'Plan generated — review and approve below.', 'success');
       await renderDetail(doc, pane);
     } catch (err) {
       resultBox.innerHTML = '';
       resultBox.appendChild(el('div', { className: 'error-state' }, 'Plan generation failed: ' + err.message));
       genBtn.disabled = false;
+      openEndedBtn.disabled = false;
     }
-  });
+  }
+  genBtn.addEventListener('click', () => runGenerate(false));
+  openEndedBtn.addEventListener('click', () => runGenerate(true));
 
   if (hasPlan) {
     const plan = planRow.plan;
@@ -1095,7 +1109,9 @@ function buildServiceNowPlanSection(doc, planRow, discoveryQs, pane) {
           const r = await apiFetch(`/projects/${doc.project_id}/servicenow/discovery-plan/${planRow.plan_id}/approve`, {
             method: 'POST', body: JSON.stringify({}),
           });
-          showToast(`Plan approved — import slice saved (${(r.profile && r.profile.include_surfaces || []).length} surface(s)).`, 'success');
+          const pwCount = (r.profile && r.profile.platform_wide_surfaces || []).length;
+          showToast(`Plan approved — import slice saved (${(r.profile && r.profile.include_surfaces || []).length} surface(s)` +
+            (pwCount ? `, ${pwCount} platform-wide` : '') + ').', 'success');
           const goBtn = el('button', { className: 'btn btn-secondary', style: { marginTop: '8px' } }, 'Go to ServiceNow Sync — see cost/time estimate →');
           goBtn.addEventListener('click', () => navigate('servicenow_sync'));
           resultBox.appendChild(el('div', {}, goBtn));

@@ -334,6 +334,70 @@ function stageExtraction(ingestId, entityType, data, status) {
   ok(rows.find(r => r.clarification_id === discCid).answer_text === 'Use sc_cat_item', 'the discovery: row WAS answered');
   ok(rows.find(r => r.clarification_id === conflictCid).answer_text === null, "the conflict: row was NOT answered — this endpoint can never bypass a real clarification's normal side effects");
 
+  // ── Part 16: entityScopes fix — planner is no longer blind to entity-scoped house rules ──
+  console.log('\n--- Part 16: entityScopes fix ---');
+  const { SN_CATALOG } = require(path.join(base, 'agent', 'sn-catalog'));
+  const realTypes = [...new Set(SN_CATALOG.map(c => c.wbDesignType))].sort();
+  ok(Array.isArray(planner.DISCOVERY_ENTITY_SCOPES) && planner.DISCOVERY_ENTITY_SCOPES.length === 9,
+     `DISCOVERY_ENTITY_SCOPES has all 9 real wbDesignType values (got ${planner.DISCOVERY_ENTITY_SCOPES.length})`);
+  ok(JSON.stringify([...planner.DISCOVERY_ENTITY_SCOPES].sort()) === JSON.stringify(realTypes),
+     'DISCOVERY_ENTITY_SCOPES matches SN_CATALOG\'s actual wbDesignType set exactly (was hardcoded [] before #108 follow-up)');
+
+  // ── Part 17: open_ended threading — persisted at generation time ────────────────────
+  console.log('\n--- Part 17: HTTP generate — open_ended threading ---');
+  const pid5 = makeProject('x_test_openended');
+  const iid6 = makeIngestDoc(pid5);
+  stageExtraction(iid6, 'functional_req', { title: 'Triage queue', description: 'Route to Level 1 Triage.' }, 'staged');
+  const asrId5 = generateId();
+  db.prepare(`INSERT INTO asdlc_sn_assessment (assessment_id, project_id, status, report_json, created_at)
+              VALUES (?,?, 'complete', ?, datetime('now'))`)
+    .run(asrId5, pid5, JSON.stringify({ scope_reports: [{ scope: 'x_test_openended', surfaces: [{ table: 'sc_cat_item', wbDesignType: 'catalog_item', present: true, count: 3 }] }] }));
+  mockRoutes.current = (url) => {
+    if (url.includes('/api/now/table/sys_properties')) return { ok: true, status: 200, json: async () => ({ result: [{ sys_id: '1' }] }), headers: { get: () => null } };
+    return { ok: true, status: 200, json: async () => ({ result: [] }), headers: { get: () => null } };
+  };
+  const oeGen = await post(`/projects/${pid5}/servicenow/discovery-plan`, { ingest_id: iid6, open_ended: true, instance: 'https://example.service-now.com', user: 'u', pw: 'p' });
+  ok(oeGen.status === 200, `open_ended generate succeeds (got ${oeGen.status}: ${JSON.stringify(oeGen.body)})`);
+  ok(oeGen.body.open_ended === 1 || oeGen.body.open_ended === true, 'response reflects open_ended persisted on the plan row');
+  const oeRow = db.prepare('SELECT open_ended FROM asdlc_sn_discovery_plan WHERE plan_id=?').get(oeGen.body.plan_id);
+  ok(!!oeRow && Number(oeRow.open_ended) === 1, 'open_ended=1 is persisted in the DB at generation time, independent of what the (stub) AI returned');
+
+  const normalGen = await post(`/projects/${pid5}/servicenow/discovery-plan`, { ingest_id: iid6, instance: 'https://example.service-now.com', user: 'u', pw: 'p' });
+  const normalRow = db.prepare('SELECT open_ended FROM asdlc_sn_discovery_plan WHERE plan_id=?').get(normalGen.body.plan_id);
+  ok(!!normalRow && Number(normalRow.open_ended) === 0, 'a normal (non-open_ended) generate call persists open_ended=0');
+  mockRoutes.current = null;
+
+  // ── Part 18: approve — the hallucination-defense gate ────────────────────────────────
+  console.log('\n--- Part 18: HTTP approve — hallucination-defense gate on platform_wide ---');
+  const planPlanJson = JSON.stringify({
+    include: [
+      { table: 'sc_cat_item', relation: 'direct', rationale: 'FR-draft-1', mapped_requirement_slugs: [], confidence: 0.9 },
+      { table: 'cmdb_ci_service', relation: 'direct', rationale: 'hallucinated or genuine platform-wide pick', confidence: 0.6, platform_wide: true },
+    ], exclude: [], notes: 'platform_wide gate test',
+  });
+
+  // A normal-mode plan (open_ended=0) carrying a platform_wide:true item — must be DROPPED,
+  // never folded into include_surfaces OR platform_wide_surfaces.
+  const normalPlanId = generateId();
+  db.prepare(`INSERT INTO asdlc_sn_discovery_plan (plan_id, project_id, ingest_id, scope, status, plan_json, open_ended, created_by, updated_at)
+              VALUES (?,?,?,?, 'draft', ?, 0, ?, datetime('now'))`)
+    .run(normalPlanId, pid, iid, 'x_test_http', planPlanJson, 'tester');
+  const normalApprove = await post(`/projects/${pid}/servicenow/discovery-plan/${normalPlanId}/approve`, {});
+  ok(normalApprove.status === 200, `approve of the normal-mode plan succeeds (got ${normalApprove.status}: ${JSON.stringify(normalApprove.body)})`);
+  ok((normalApprove.body.profile.include_surfaces || []).join(',') === 'sc_cat_item', 'only the NON-platform_wide item made it into include_surfaces');
+  ok(!(normalApprove.body.profile.platform_wide_surfaces || []).length, 'the platform_wide:true item was dropped entirely — never trusted outside an open_ended plan');
+
+  // The SAME plan_json, but the plan row itself IS persisted open_ended=1 — now the
+  // platform_wide item is honored, routed to platform_wide_surfaces (not include_surfaces).
+  const oePlanId = generateId();
+  db.prepare(`INSERT INTO asdlc_sn_discovery_plan (plan_id, project_id, ingest_id, scope, status, plan_json, open_ended, created_by, updated_at)
+              VALUES (?,?,?,?, 'draft', ?, 1, ?, datetime('now'))`)
+    .run(oePlanId, pid, iid, 'x_test_http', planPlanJson, 'tester');
+  const oeApprove = await post(`/projects/${pid}/servicenow/discovery-plan/${oePlanId}/approve`, {});
+  ok(oeApprove.status === 200, `approve of the open_ended plan succeeds (got ${oeApprove.status}: ${JSON.stringify(oeApprove.body)})`);
+  ok((oeApprove.body.profile.include_surfaces || []).join(',') === 'sc_cat_item', 'the normal item still lands in include_surfaces');
+  ok((oeApprove.body.profile.platform_wide_surfaces || []).join(',') === 'cmdb_ci_service', 'on an open_ended plan, the platform_wide item is honored and routed to platform_wide_surfaces');
+
   console.log(`\n${pass} passed, ${fail} failed`);
   done(fail ? 1 : 0);
 })().catch(err => { console.error('FATAL', err); done(1); });

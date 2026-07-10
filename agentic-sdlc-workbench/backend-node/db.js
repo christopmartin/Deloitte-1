@@ -539,6 +539,12 @@ const MIGRATIONS = [
   // not-yet-existent column there would crash boot on every pre-existing DB).
   "ALTER TABLE asdlc_sn_discovery_plan ADD COLUMN ingest_id TEXT REFERENCES asdlc_ingest_document(ingest_id)",
   "CREATE INDEX IF NOT EXISTS idx_sn_discovery_plan_ingest ON asdlc_sn_discovery_plan(ingest_id, created_at)",
+
+  // ── Discovery planner: open-ended/platform-wide escalation (#108 follow-up, §3) ────
+  // Persisted ONCE at generation time; the approve endpoint gates on THIS column, never
+  // on whatever a later request happens to send — the defense against a hallucinated
+  // platform_wide:true item being smuggled onto a normal-mode plan's approval.
+  "ALTER TABLE asdlc_sn_discovery_plan ADD COLUMN open_ended INTEGER NOT NULL DEFAULT 0",
 ];
 for (const migration of MIGRATIONS) {
   try { db.exec(migration); } catch { /* column already exists — safe to ignore */ }
@@ -1005,6 +1011,43 @@ try {
   }
 } catch (err) {
   console.error('[db] ServiceNow design rules seed failed:', err.message);
+}
+
+// ─── ServiceNow "reach" gap-closing rules (draft, pending human review) ─────
+// Closes a real coverage gap found live: neither Task-based catalog-fulfillment tables
+// (sc_req_item/sc_task) nor sys_user_group (routing) were covered by any seeded rule, so
+// the discovery planner had no guidance to draw on for a "General Purpose Request +
+// Level 1 Triage" style requirement. Seeded as visibly DRAFT — title-guarded (not the
+// platform+source guard above) so it survives even if the 8-rule block above is ever
+// re-seeded, and so a reviewer's edit/delete of ONE of these two rows is never undone by
+// a restart re-inserting its sibling.
+try {
+  const DRAFT_RULES = [
+    ['catalog_item', '[DRAFT — pending approval] ServiceNow: catalog fulfillment → sc_req_item/sc_task',
+     'A Service Catalog request\'s actual fulfillment work already lives on standard ServiceNow tables — ' +
+     'the Requested Item (sc_req_item) and its Catalog Tasks (sc_task) — created automatically when the ' +
+     'catalog item is ordered. Do not model a new custom table for "the work record" behind a catalog ' +
+     'item; import/reference sc_req_item and sc_task instead.'],
+    ['workflow', '[DRAFT — pending approval] ServiceNow: work routing/queues → sys_user_group',
+     'Triage queues and work-routing destinations (e.g. "Level 1 Triage") are standardly modelled as ' +
+     'existing Assignment Groups (sys_user_group), with a flow or business rule setting a task\'s ' +
+     'assignment_group to route it — not as a new custom queue table.'],
+  ];
+  const insDraft = db.prepare(`
+    INSERT INTO asdlc_best_practice
+      (best_practice_id, scope, platform, title, rule_text, practice_type, is_active, sort_order, source, created_at, updated_at)
+    VALUES (?,?, 'servicenow', ?,?, 'rule', 1, ?, 'system', datetime('now'), datetime('now'))
+  `);
+  let seededAny = false;
+  DRAFT_RULES.forEach((r, i) => {
+    const exists = db.prepare('SELECT 1 FROM asdlc_best_practice WHERE title=?').get(r[1]);
+    if (exists) return;
+    insDraft.run(crypto.randomUUID(), r[0], r[1], r[2], 108 + i);
+    seededAny = true;
+  });
+  if (seededAny) console.log('[db] seeded draft ServiceNow "reach" rules — review in Admin > AI Guidance');
+} catch (err) {
+  console.error('[db] ServiceNow draft reach-rules seed failed:', err.message);
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
