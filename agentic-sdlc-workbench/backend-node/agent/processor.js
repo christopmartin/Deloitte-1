@@ -36,7 +36,19 @@ async function processDocument(ingestId) {
     if (doc) {
       const round = result && result.round ? result.round : 1;
       const cc = await runCrossCheck({ doc, round });
-      const raised = (cc.conflicts_raised || 0) + (cc.fyi_raised || 0);
+
+      // ── ServiceNow overlap check (BACKLOG #114) ────────────────────────────────
+      // Best-effort, never fatal, zero cost for a non-ServiceNow project (checked inside).
+      // Raises 'sn_overlap:' clarifications — same blocking weight as a real conflict.
+      let overlapRaised = 0;
+      try {
+        const { checkServiceNowOverlap } = require('./sn-overlap-check');
+        overlapRaised = (await checkServiceNowOverlap({ doc, ingestId, round })).raised || 0;
+      } catch (err) {
+        console.warn(`[processor] ServiceNow overlap check failed (non-fatal): ${err.message}`);
+      }
+
+      const raised = (cc.conflicts_raised || 0) + (cc.fyi_raised || 0) + overlapRaised;
       if (raised > 0) {
         // Recompute status to reflect any newly-raised (blocking) clarifications. Excludes
         // discovery: rows (ServiceNow discovery-plan ambiguities) — those are advisory-only

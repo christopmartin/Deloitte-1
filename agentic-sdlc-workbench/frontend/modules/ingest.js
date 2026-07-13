@@ -50,6 +50,20 @@ function ingestTag(status) {
   return tag(m.label, m.variant);
 }
 
+// 3-way classification: extracted (default, no badge) / AI's own judgment call /
+// a citation verified server-side against a real, currently-active house rule.
+// best_practice_title only ever arrives via a verified match (agent/ai-config.js's
+// applyBestPracticeGate) — never the model's unverified claim.
+const CATEGORY_META = {
+  ai_suggestion:       { label: 'AI Suggestion',      variant: 'warn'   },
+  best_practice_match: { label: 'Best-Practice Match', variant: 'purple' },
+};
+
+function extractionCategory(d) {
+  if (!d || d.system_generated !== true) return 'extracted';
+  return (d.best_practice_ref && d.best_practice_title) ? 'best_practice_match' : 'ai_suggestion';
+}
+
 function entityName(type, data) {
   if (!data) return type;
   // Check the common registry nameKeys first (title, name), then legacy *_name fields
@@ -65,6 +79,7 @@ function entityName(type, data) {
 // Fields that are internal links or should not be shown in the detail expansion
 const DETAIL_SKIP_FIELDS = new Set([
   'use_case_title','workflow_name','implements_requirements','dependencies','ingest_id',
+  'best_practice_ref',
 ]);
 
 /** Render entity_data as a readable key-value grid for the detail expansion row. */
@@ -854,14 +869,15 @@ function buildQuestionCard(q, index) {
   const isFyi       = typeof q.target_field === 'string' && q.target_field.startsWith('fyi:');
   const isStanding  = typeof q.target_field === 'string' && q.target_field.startsWith('standing:');
   const isDiscovery = typeof q.target_field === 'string' && q.target_field.startsWith('discovery:');
+  const isSnOverlap = typeof q.target_field === 'string' && q.target_field.startsWith('sn_overlap:');
 
   const qBlock = el('div', { style: {
     background: 'var(--color-bg)',
-    border: isConflict  ? '1px solid var(--color-danger, #C62828)'
+    border: isConflict || isSnOverlap ? '1px solid var(--color-danger, #C62828)'
           : isStanding  ? '1px solid var(--color-warn, #E65100)'
           : isDiscovery ? '1px solid var(--color-accent)'
           :               '1px solid var(--color-border)',
-    borderLeft: isConflict  ? '3px solid var(--color-danger, #C62828)'
+    borderLeft: isConflict || isSnOverlap ? '3px solid var(--color-danger, #C62828)'
              : isStanding  ? '3px solid var(--color-warn, #E65100)'
              : isDiscovery ? '3px solid var(--color-accent)'
              :               '1px solid var(--color-border)',
@@ -873,7 +889,7 @@ function buildQuestionCard(q, index) {
   // Question header
   const qHdr = el('div', { style: { display: 'flex', alignItems: 'flex-start', gap: '10px', marginBottom: '8px' } });
   qHdr.appendChild(el('span', { style: {
-    background: isConflict ? 'var(--color-danger, #C62828)' : isStanding ? 'var(--color-warn, #E65100)' : 'var(--color-accent)',
+    background: isConflict || isSnOverlap ? 'var(--color-danger, #C62828)' : isStanding ? 'var(--color-warn, #E65100)' : 'var(--color-accent)',
     color: '#fff',
     borderRadius: '50%',
     width: '20px', height: '20px', minWidth: '20px',
@@ -882,10 +898,11 @@ function buildQuestionCard(q, index) {
   }}, String(index + 1)));
   const qText = el('span', { style: { fontSize: '13px', fontWeight: '500', lineHeight: '1.5' } });
   if (isConflict) qText.appendChild(tag('⚠ Conflict', 'danger'));
+  else if (isSnOverlap) qText.appendChild(tag('🔁 Possible ServiceNow Duplicate', 'danger'));
   else if (isFyi) qText.appendChild(tag('ℹ FYI', 'muted'));
   else if (isStanding) qText.appendChild(tag('💰 Cost Setup', 'warn'));
   else if (isDiscovery) qText.appendChild(tag('🔎 ServiceNow', 'accent'));
-  if (isConflict || isFyi || isStanding || isDiscovery) qText.appendChild(el('span', { style: { marginRight: '6px' } }, ' '));
+  if (isConflict || isFyi || isStanding || isDiscovery || isSnOverlap) qText.appendChild(el('span', { style: { marginRight: '6px' } }, ' '));
   qText.appendChild(document.createTextNode(q.question_text));
   qHdr.appendChild(qText);
   qBlock.appendChild(qHdr);
@@ -977,17 +994,18 @@ function buildClarificationForm(doc, questions, round, pane) {
   // state) never appears. The PO may judge the staged design good enough already and
   // want to proceed, treating the remaining questions as optional suggestions.
   //
-  // The backend /promote only hard-blocks on unresolved 'conflict:' questions (ripple/
-  // requirement conflicts that must be reconciled). Everything else is advisory, so we
-  // offer promotion here and only gate it on open conflicts.
+  // The backend /promote only hard-blocks on unresolved 'conflict:' or 'sn_overlap:'
+  // questions (requirement conflicts, and possible ServiceNow duplicates — BACKLOG #114
+  // — that must be reconciled). Everything else is advisory, so we offer promotion here
+  // and only gate it on those two.
   const hasOpenConflict = questions.some(
-    q => typeof q.target_field === 'string' && q.target_field.startsWith('conflict:')
+    q => typeof q.target_field === 'string' && (q.target_field.startsWith('conflict:') || q.target_field.startsWith('sn_overlap:'))
   );
 
   const promoteRow = el('div', { style: { marginTop: '16px', paddingTop: '16px', borderTop: '1px solid var(--color-border)' } });
   promoteRow.appendChild(el('p', { style: { fontSize: '12px', color: 'var(--color-text-muted)', marginBottom: '8px', lineHeight: '1.5' } },
     hasOpenConflict
-      ? 'The questions above include an unresolved conflict (⚠). Resolve it before promoting — conflicts must be reconciled first.'
+      ? 'The questions above include an unresolved conflict or possible ServiceNow duplicate (⚠). Resolve it before promoting — these must be reconciled first.'
       : 'Happy with the staged design as-is? You can promote now and keep the remaining questions as open suggestions — they won\'t block the Change Packets.'
   ));
 
@@ -1254,7 +1272,13 @@ function renderQualityFindings(report) {
         borderLeft: `3px solid ${color}`, padding: '6px 10px', margin: '6px 0 0',
         background: 'var(--color-bg)', borderRadius: '4px',
       }});
-      item.appendChild(el('div', { style: { fontSize: '12px', fontWeight: '600', marginBottom: '2px' } }, f.title));
+      const titleRow = el('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' } },
+        el('span', { style: { fontSize: '12px', fontWeight: '600' } }, f.title));
+      if (CATEGORY_META[f.match_category]) {
+        const cm = CATEGORY_META[f.match_category];
+        titleRow.appendChild(tag(cm.label, cm.variant));
+      }
+      item.appendChild(titleRow);
       item.appendChild(el('div', { style: { fontSize: '11px', color: 'var(--color-text-muted)', lineHeight: '1.5' } }, f.detail));
       if (f.suggested_action) {
         item.appendChild(el('div', { style: { fontSize: '11px', color: 'var(--color-accent)', marginTop: '2px' } }, `→ ${f.suggested_action}`));
@@ -1300,6 +1324,12 @@ function buildExtractionsSection(extractions, showPromote, doc, pane) {
     const conf  = Math.round((ex.confidence ?? 0) * 100);
     const confColor = conf >= 85 ? 'var(--color-ok)' : conf >= 70 ? 'var(--color-warn)' : 'var(--color-danger)';
     const d = ex.entity_data || {};
+    const category = extractionCategory(d);
+    const confTitle = category === 'best_practice_match'
+      ? `AI's confidence in this house-rule-driven addition (rule: "${d.best_practice_title}")`
+      : category === 'ai_suggestion'
+        ? `AI's own confidence in this suggested addition — not backed by a specific house rule`
+        : `How clearly the source document stated this`;
 
     // Description preview — first non-title prose field, truncated
     const previewText = d.description || d.summary || d.scope || d.plain_english ||
@@ -1317,11 +1347,18 @@ function buildExtractionsSection(extractions, showPromote, doc, pane) {
     // Toggle indicator
     const toggleTd = el('td', { style: { width: '24px', color: 'var(--text-muted)', fontSize: '10px', userSelect: 'none' } }, '▶');
 
+    const typeTd = el('td', { style: { display: 'flex', gap: '4px', flexWrap: 'wrap' } },
+      tag(ENTITY_LABELS[ex.entity_type] || ex.entity_type, 'info'));
+    if (CATEGORY_META[category]) {
+      const cm = CATEGORY_META[category];
+      typeTd.appendChild(tag(cm.label, cm.variant));
+    }
+
     const tr = el('tr', { style: { cursor: 'pointer' } },
       toggleTd,
-      el('td', {}, tag(ENTITY_LABELS[ex.entity_type] || ex.entity_type, 'info')),
+      typeTd,
       nameTd,
-      el('td', {}, el('span', { style: { color: confColor, fontWeight: '600', fontSize: '13px' } }, `${conf}%`)),
+      el('td', {}, el('span', { title: confTitle, style: { color: confColor, fontWeight: '600', fontSize: '13px' } }, `${conf}%`)),
       el('td', { className: 'muted' }, `Round ${ex.round}`)
     );
 

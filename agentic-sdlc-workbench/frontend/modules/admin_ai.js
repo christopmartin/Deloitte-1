@@ -1,7 +1,7 @@
 /**
  * modules/admin_ai.js — Administration › AI Settings + Usage
  *
- * Global model selection per AI role (all 11 roles, grouped by pipeline), a
+ * Global model selection per AI role (13 roles, grouped by pipeline), a
  * thinking-effort dial for the reasoning roles, max tokens, a data-driven model
  * registry (extendable without code changes), plus a token/cost usage view.
  * Settings persist in asdlc_app_setting and take effect without a server restart.
@@ -29,6 +29,7 @@ const ROLE_GROUPS = [
   {
     group: 'ServiceNow Round-Trip',
     roles: [
+      { key: 'discovery_planner',  label: 'Discovery Planner AI Agent',thinking: true, hint: 'Proposes which ServiceNow tables to import based on project requirements' },
       { key: 'reverse_engineer',   label: 'Reverse-engineer AI Agent', thinking: true, hint: 'Infers design intent from captured ServiceNow records' },
       { key: 'reconciler',         label: 'Reconciler AI Agent',       thinking: true, hint: 'Proposes non-destructive merges of SN changes into the design' },
       { key: 'reconcile_reviewer', label: 'Reviewer AI Agent',         thinking: true, hint: 'Independent adversarial check on reconciliation proposals' },
@@ -37,9 +38,10 @@ const ROLE_GROUPS = [
   {
     group: 'Utilities',
     roles: [
-      { key: 'req_linker',    label: 'Requirement Linker',  thinking: false, hint: 'Infers use-case assignments for orphaned requirements at promote time' },
-      { key: 'rasic_deriver', label: 'RASIC deriver',       thinking: true,  hint: 'Infers the RASIC responsibility matrix' },
-      { key: 'cost_estimate', label: 'Now Assist cost estimate', thinking: false, hint: 'Maps workflow steps to Now Assist skills for cost projection' },
+      { key: 'req_linker',       label: 'Requirement Linker',      thinking: false, hint: 'Infers use-case assignments for orphaned requirements at promote time' },
+      { key: 'rasic_deriver',    label: 'RASIC deriver',           thinking: true,  hint: 'Infers the RASIC responsibility matrix' },
+      { key: 'cost_estimate',    label: 'Now Assist cost estimate',thinking: false, hint: 'Maps workflow steps to Now Assist skills for cost projection' },
+      { key: 'sn_overlap_check', label: 'ServiceNow overlap check',thinking: false, hint: 'Judges whether a live ServiceNow record already covers a newly-staged requirement' },
     ],
   },
 ];

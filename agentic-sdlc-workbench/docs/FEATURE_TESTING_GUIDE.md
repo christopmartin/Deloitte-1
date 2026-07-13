@@ -4,6 +4,20 @@ One running log of shipped features: what each one does, and exactly how to star
 
 ---
 
+## ServiceNow duplicate check on new requirements (Backlog #114) — 2026-07-13
+
+**What it does:** For projects connected to a ServiceNow instance, whenever a new requirement is staged from a document, the app now does a quick, free check of the live instance to see if something already covers it — before you (or the AI) design something ServiceNow already has. Most of the time nothing is found and nothing happens — no cost, no delay. Only when a real possible match turns up does it spend a small amount on the cheapest AI model to double-check and explain why. If it's confident enough, it raises a real, blocking question — the **same weight as a requirement conflict** — right alongside your other clarifying questions. It must be resolved before that document can be promoted.
+
+**How to start testing:**
+1. Make sure the Application you're testing has a ServiceNow connection configured (Application settings — instance, user, password).
+2. Go to **Ingest Documents** and submit a requirement that closely describes something you know already exists in that ServiceNow instance (e.g. an existing catalog item, Now Assist agent/tool, or flow) — the closer the wording, the more likely it triggers.
+3. After extraction completes, look at **Clarifying Questions** — a genuine match shows a **🔁 Possible ServiceNow Duplicate** card (same red styling as a conflict), naming the ServiceNow record and why it looks related.
+4. Confirm the **Promote now** button is greyed out while that question is open, and that clicking **Promote** is blocked until you answer it.
+5. Type an answer (e.g. confirm it's the same, or explain why it's genuinely different) and submit — the block clears and promote becomes available again (assuming no other open questions).
+6. To confirm it stays out of your way otherwise: submit an unrelated requirement — no question should appear, and nothing in **Admin ▸ AI Settings ▸ Usage** should show spend for the new "ServiceNow overlap check" role on that document.
+
+---
+
 ## Housekeeping: security patch, automated tests, automated backups (Backlog #90–#93) — 2026-07-13
 
 **What it does:** No visible change to the app itself — this is upkeep behind the scenes, closing five gaps flagged in the tech-debt reviews:
@@ -18,6 +32,24 @@ One running log of shipped features: what each one does, and exactly how to star
 2. Run `npm test` — should run all 30 suites and end with **"All 30 test suites passed."**
 3. Open Windows Task Scheduler and look for **"ASDLC Workbench DB Backup"** — should show as `Ready`, next run tomorrow 9:00 AM; `backend-node/backups/` should contain a file timestamped today.
 4. Confirm `agentic-sdlc-workbench/backend/` no longer exists, and `backend-node/.env.example` does.
+
+---
+
+## 3-way extraction classification: Extracted / AI Suggestion / Best-Practice Match (Backlog #110) — 2026-07-10
+
+**What it does:** Every staged extraction is now labeled one of three ways instead of one confidence number doing double duty:
+1. **Extracted** — a normal reading of the document. No badge — this stays the quiet default.
+2. **AI Suggestion** — the AI added this on its own judgment; nothing in your rule list backs it.
+3. **Best-Practice Match** — the AI added this AND it traces to one specific, currently-active rule in Admin ▸ AI Guidance. This is a verified link — the system checks the AI's claim against your real, live rule list before trusting it, so it can never be faked or hallucinated into looking more authoritative than it is.
+
+The confidence percentage on each row now means the right thing for that row — how clearly the document stated it (Extracted), or how confident the AI is in its own idea (the other two) — with a hover tooltip spelling out which.
+
+**How to start testing:**
+1. Go to **Ingest Documents**, open a document with staged extractions that include an AI-invented item (enrichment level "Balanced" or "Suggestive" on upload), and look at the **Staged Extractions** table — an invented item now shows an **AI Suggestion** or **Best-Practice Match** tag next to its entity-type badge.
+2. Hover the confidence percentage on a few different rows — the tooltip explains what that specific number means for that row.
+3. Expand a Best-Practice Match row (click it) — the detail grid shows **Best Practice Title**, naming the exact house rule that justified the addition.
+4. Scroll to the **Design Quality Check** panel (above the promote button) — each "Needs review"/"FYI" finding for an AI-invented agent/workflow/tool now names its category and, for a match, the rule, right in the finding text.
+5. To see a Best-Practice Match happen naturally rather than seeded: add a new rule in **Admin ▸ AI Guidance** that clearly covers a gap in one of your documents, then re-run extraction on that document.
 
 ---
 

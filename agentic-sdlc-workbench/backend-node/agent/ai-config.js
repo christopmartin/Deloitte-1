@@ -16,11 +16,11 @@ const { db, generateId, getSetting } = require('../db');
 // ── Model registry (file defaults + optional DB overlay) ─────────────────────
 const FILE_REGISTRY = require('./model-registry.json');
 
-// The 11 AI roles ("slots") — every Claude call site resolves through one of these.
+// The 13 AI roles ("slots") — every Claude call site resolves through one of these.
 const ROLES = [
   'extraction', 'synthesis', 'quality_reviewer', 'prompt_drafter', 'build_review',
   'req_linker', 'rasic_deriver', 'cost_estimate',
-  'reverse_engineer', 'reconciler', 'reconcile_reviewer', 'discovery_planner',
+  'reverse_engineer', 'reconciler', 'reconcile_reviewer', 'discovery_planner', 'sn_overlap_check',
 ];
 
 // Roles whose pipelines actually consume getThinkingConfig() (effort applies).
@@ -95,6 +95,7 @@ const ROLE_ENV = {
   reconciler:         'CLAUDE_RECONCILER_MODEL',
   reconcile_reviewer: 'CLAUDE_RECONCILE_REVIEWER_MODEL',
   discovery_planner:  'CLAUDE_DISCOVERY_PLANNER_MODEL',
+  sn_overlap_check:   'CLAUDE_SN_OVERLAP_CHECK_MODEL',
 };
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
@@ -108,6 +109,7 @@ const ROLE_DEFAULTS = {
   reconciler:         'claude-opus-4-8',
   reconcile_reviewer: 'claude-opus-4-8',
   req_linker:         'claude-haiku-4-5-20251001',   // lightweight inference; fast + cheap
+  sn_overlap_check:   'claude-haiku-4-5-20251001',   // small N-vs-M judgment over a short candidate list; fast + cheap
   synthesis:          'claude-opus-4-8',             // bold design-synthesis/enrichment pass (Phase 1) — most capable
   cost_estimate:      'claude-opus-4-8',             // Now Assist cost estimation; reasoning-heavy → Opus default, admin-overridable
   discovery_planner:  'claude-opus-4-8',             // reasons over requirements + a real reference graph — one call per plan, worth the best model
@@ -350,7 +352,7 @@ function getActiveBestPractices(entityScopes = [], platform = null) {
   try {
     // Only inject rules (practice_type='rule') into prompts — not standing questions.
     const rows = db.prepare(
-      "SELECT title, rule_text, scope, platform FROM asdlc_best_practice WHERE is_active = 1 AND (practice_type IS NULL OR practice_type = 'rule') ORDER BY sort_order, created_at"
+      "SELECT best_practice_id, slug, title, rule_text, scope, platform FROM asdlc_best_practice WHERE is_active = 1 AND (practice_type IS NULL OR practice_type = 'rule') ORDER BY sort_order, created_at"
     ).all();
     return rows.filter(r => {
       const scopeOk = r.scope === 'global' || entityScopes.includes(r.scope);
@@ -362,6 +364,27 @@ function getActiveBestPractices(entityScopes = [], platform = null) {
   } catch {
     return [];
   }
+}
+
+/**
+ * Hallucination-defense gate for best_practice_ref — never trust the model's claim,
+ * verify against a real, currently-active rule from the SAME bestPractices list this
+ * extraction call was given. Unmatched/blank refs are dropped silently: the item still
+ * stages, just as an "AI Suggestion" (category 2) rather than a "Best-Practice Match"
+ * (category 3). Pure — no DB access; the caller already has bestPractices in scope.
+ * Never mutates entityData; returns a new object.
+ * @param {object} entityData
+ * @param {Array<{slug:string,title:string}>} bestPractices
+ * @returns {object}
+ */
+function applyBestPracticeGate(entityData, bestPractices) {
+  if (!entityData || !entityData.best_practice_ref) return entityData;
+  const match = (bestPractices || []).find(b => b.slug === entityData.best_practice_ref);
+  if (!match) {
+    const { best_practice_ref, ...rest } = entityData;
+    return rest;
+  }
+  return { ...entityData, best_practice_ref: match.slug, best_practice_title: match.title };
 }
 
 /**
@@ -399,6 +422,7 @@ module.exports = {
   logToolCalls,
   getActiveBestPractices,
   getProjectPlatform,
+  applyBestPracticeGate,
 };
 
 // ── Legacy exports (registry-derived getters; keep sn-assess.js + old callers working) ─

@@ -34,9 +34,10 @@ const aiConfig = require('./ai-config');
 const MAX_NEIGHBORHOOD = 40;   // cap candidates fed to the deep scan; beyond → manual-review flag
 const SYSTEM_ALIASES = ['sap', 'oracle', 'servicenow', 'workday', 'salesforce', 'netsuite', 'coupa', 'ariba'];
 const STOPWORDS = new Set(['the','a','an','for','and','or','of','to','via','only','with','from','detail','lookup','retrieval','invoice','agent','step','system','data','read','write','new']);
-const CONFLICT_PREFIX  = 'conflict:';   // blocking clarification marker
-const FYI_PREFIX       = 'fyi:';        // non-blocking note marker
-const DISCOVERY_PREFIX = 'discovery:';  // ServiceNow discovery-plan ambiguity marker (advisory, never blocks promote)
+const CONFLICT_PREFIX   = 'conflict:';    // blocking clarification marker
+const FYI_PREFIX        = 'fyi:';         // non-blocking note marker
+const DISCOVERY_PREFIX  = 'discovery:';   // ServiceNow discovery-plan ambiguity marker (advisory, never blocks promote)
+const SN_OVERLAP_PREFIX = 'sn_overlap:';  // possible ServiceNow duplicate marker (blocking, same weight as conflict:)
 
 // Resolve platform-scoped AI Guidance (house rules) for this document and render it
 // as prompt lines. The conflict/ripple judges honour the same rules the extractor
@@ -477,12 +478,24 @@ function writeMarkedClarification(ingestId, round, marker, q) {
   return true;
 }
 
-/** True when the document has open conflict-type clarifications (blocks promote). */
+/** True when the document has open conflict-type OR possible-ServiceNow-duplicate clarifications (blocks promote). */
 function hasOpenConflicts(ingestId) {
   return db.prepare(
     `SELECT COUNT(*) c FROM asdlc_ingest_clarification
-     WHERE ingest_id=? AND answer_text IS NULL AND target_field LIKE '${CONFLICT_PREFIX}%'`
+     WHERE ingest_id=? AND answer_text IS NULL AND (target_field LIKE '${CONFLICT_PREFIX}%' OR target_field LIKE '${SN_OVERLAP_PREFIX}%')`
   ).get(ingestId).c > 0;
+}
+
+// ── ServiceNow overlap check (blocking — same weight as a real conflict) ──────────
+// Raised when a live, targeted search of the connected ServiceNow instance turns up a
+// record that may already satisfy a newly-staged requirement (see agent/sn-overlap-check.js).
+// Reuses the EXACT writeMarkedClarification mechanism/dedup as conflict: — this is a
+// genuine "don't build something ServiceNow already has" risk, so unlike discovery: it
+// blocks promote like any other conflict (hasOpenConflicts, above).
+function writeSnOverlapClarification(ingestId, round, { requirementRef, entityType, question, context }) {
+  return writeMarkedClarification(ingestId, round, SN_OVERLAP_PREFIX, {
+    question, context, target_entity_type: entityType || 'design', target_field: requirementRef,
+  });
 }
 
 // ── ServiceNow discovery-plan clarifications (advisory, never block promote) ──────
@@ -727,7 +740,8 @@ function runPostApplyCheck(cpId) {
   }
 }
 
-module.exports = { runCrossCheck, hasOpenConflicts, runPostApplyCheck, CONFLICT_PREFIX, FYI_PREFIX, DISCOVERY_PREFIX,
+module.exports = { runCrossCheck, hasOpenConflicts, runPostApplyCheck, CONFLICT_PREFIX, FYI_PREFIX, DISCOVERY_PREFIX, SN_OVERLAP_PREFIX,
   loadRequirements, loadDocumentRequirements, writeDiscoveryClarification, getNextDiscoveryRound, getAnsweredDiscoveryClarifications,
+  writeSnOverlapClarification,
   _internal: { salientTokens, scanDesignDrift, synthesiseFollowups, loadDesignCorpus,
-    findMergeSurvivor, droppedInterfaceFields } };
+    findMergeSurvivor, droppedInterfaceFields, tokenize, wordHit, nameJaccard } };

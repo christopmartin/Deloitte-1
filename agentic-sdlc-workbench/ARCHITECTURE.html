@@ -336,7 +336,7 @@ graph LR
       <div class="flow-steps">
         <div class="flow-step"><div class="flow-num">1</div><div class="flow-step-content"><h4>Upload</h4><p>Delivery team uploads a BRD, requirements transcript, or ServiceNow source (Fluent IR) via the Ingest module.</p></div></div>
         <div class="flow-step"><div class="flow-num">2</div><div class="flow-step-content"><h4>Extract</h4><p>Claude runs an agentic tool-call loop (up to 20 iterations) extracting use cases, workflows, agents, tools, requirements, guardrails, and data sources. Confidence determines enrichment level.</p></div></div>
-        <div class="flow-step"><div class="flow-num">3</div><div class="flow-step-content"><h4>Cross-Check</h4><p>Deterministic + optional LLM tiers scan for design drift and requirement conflicts. Blocking questions pause the flow; FYI notes proceed.</p></div></div>
+        <div class="flow-step"><div class="flow-num">3</div><div class="flow-step-content"><h4>Cross-Check</h4><p>Deterministic + optional LLM tiers scan for design drift and requirement conflicts. Blocking questions pause the flow; FYI notes proceed. For ServiceNow-connected projects, a parallel cheap-model check also searches the live instance for a record that may already satisfy a new requirement — a possible duplicate blocks promote exactly like a conflict.</p></div></div>
         <div class="flow-step"><div class="flow-num">4</div><div class="flow-step-content"><h4>Change Packet Review</h4><p>Staged extractions become a Change Packet. Product owners approve or reject each item individually. Disputed items return to extraction. Quality-reviewer flags missing or inconsistent fields.</p></div></div>
         <div class="flow-step"><div class="flow-num">5</div><div class="flow-step-content"><h4>Apply &amp; Baseline</h4><p>Approved items are applied atomically to the design tables with a full audit trail. A locked Baseline captures an immutable snapshot (Draft → Build → Pilot → Production).</p></div></div>
         <div class="flow-step"><div class="flow-num">6</div><div class="flow-step-content"><h4>ServiceNow Round-Trip</h4><p>The approved design is exported as a Fluent deployment plan and pushed to the ServiceNow instance. <code>sys_id</code> provenance is written back to enable the next sync cycle.</p></div></div>
@@ -448,6 +448,9 @@ flowchart TD
     H -->|raise_clarification| J["Block → asdlc_ingest_clarification\nstatus = review_required"]
     H -->|get_existing_entity| G
     I --> K["cross-check.js\nTier 0: drift scan — FREE\nTier 1: req conflict scan — LLM\nTier 2: deep scan — conditional"]
+    I --> K2["sn-overlap-check.js — BACKLOG #114\nServiceNow-connected projects only\nlive keyword search (free) → Haiku\njudgment only if a candidate is found"]
+    K2 --> L2{"Possible SN\nduplicate?"}
+    L2 -->|Yes| O
     K --> L{"Conflicts?"}
     L -->|"Blocking"| O["Raise blocking clarification"]
     L -->|"FYI only"| P["Emit note · continue"]
@@ -537,8 +540,10 @@ graph LR
           <tr><td><code>claude-processor.js</code></td><td><span class="badge badge-blue">Ingest</span></td><td>Sonnet (config)</td><td>Agentic extraction loop; 30+ tools; raise_clarification blocks</td></tr>
           <tr><td><code>stub-processor.js</code></td><td><span class="badge badge-blue">Ingest</span></td><td>None</td><td>Regex fallback when no API key — safe for UI development</td></tr>
           <tr><td><code>cross-check.js</code></td><td><span class="badge badge-blue">Ingest</span></td><td>Sonnet (Tier 1+)</td><td>Tier 0 free drift scan / Tier 1 req conflict / Tier 2 deep scan</td></tr>
+          <tr><td><code>sn-overlap-check.js</code></td><td><span class="badge badge-blue">Ingest</span></td><td>Haiku (cond.)</td><td>BACKLOG #114 — free keyword search of live ServiceNow; Haiku judges only if a candidate is found; blocks promote like a conflict</td></tr>
           <tr><td><code>prompt-templates.js</code></td><td><span class="badge badge-blue">Ingest</span></td><td>N/A</td><td>Extraction system prompt with best-practice rules injected</td></tr>
           <tr><td><code>wiki-context.js</code></td><td><span class="badge badge-blue">Ingest</span></td><td>N/A</td><td>Load SN design wiki; inject core block + read_wiki_page tool</td></tr>
+          <tr><td><code>quality-check.js</code></td><td><span class="badge badge-blue">Ingest</span></td><td>N/A</td><td>Deterministic pre-promote gate — split/duplicate entities, placeholders, coverage gaps; labels every AI-invented item Extracted / AI Suggestion / Best-Practice Match (verified against a live house-rule slug, never a soft citation) (#110)</td></tr>
           <tr><td><code>quality-reviewer.js</code></td><td><span class="badge badge-green">Quality</span></td><td>Sonnet</td><td>Detect missing/incomplete/inconsistent fields; upsert asdlc_exception</td></tr>
           <tr><td><code>swimlane-deriver.js</code></td><td><span class="badge badge-green">Quality</span></td><td>Sonnet</td><td>Derive swimlane diagram from WF steps + participants</td></tr>
           <tr><td><code>rasic-deriver.js</code></td><td><span class="badge badge-green">Quality</span></td><td>Opus</td><td>Assign R/A/S/C/I codes per participant per step</td></tr>
@@ -801,6 +806,7 @@ erDiagram
       <h4>Cross-Check Tiers (Plan C)</h4>
       <p><strong>Tier 0 (always free):</strong> deterministic salient-token drift scan — extract key identifiers from changed entities and scan the design corpus for references. <strong>Tier 1 (bounded LLM):</strong> check new/changed extractions against all FR/NFR. <strong>Tier 2 (conditional):</strong> deep scan + new clarifications, only when Tier 0 or 1 found something with non-trivial severity. Never skip Tier 0.</p>
       <p><strong>Merge/duplicate-consolidation awareness:</strong> a <code>delete</code> that folds a duplicate into a surviving same-type sibling (matched by name-token overlap, staged merge target preferred over an existing row) does not remove that capability from the design. Tokens the survivor still carries are suppressed before Tier 0, so a deleted record's incidental mentions (e.g. a DockTrak tool naming "SAP") no longer spray false ripple across every element sharing the token. Only a structured interface field the survivor entirely lacks is raised — as one precise <code>conflict:merge:&lt;slug&gt;.&lt;field&gt;</code> question. Guarded by <code>test-merge-reconcile.js</code>.</p>
+      <p><strong>ServiceNow duplicate check (parallel, not a cross-check tier — BACKLOG #114):</strong> <code>sn-overlap-check.js</code> runs alongside cross-check for ServiceNow-connected projects only. It never touches the expensive sync/reverse-engineer pipeline — a handful of small, capped, keyword-filtered lookups against a curated table list (<code>sc_cat_item</code>, <code>sn_aia_agent/tool/usecase</code>, <code>sys_hub_flow</code>), scored in-process, with zero AI spend unless a real candidate surfaces. Only then does one cheap Haiku call (role <code>sn_overlap_check</code>) judge duplicate/close-duplicate/overlap. A match is raised as a <code>sn_overlap:&lt;req ref&gt;</code> clarification via the same <code>writeMarkedClarification</code> primitive as <code>conflict:</code> — same blocking weight, so <code>hasOpenConflicts</code> and the promote gate treat it identically. Answering it goes through the normal clarification-answer endpoint (full re-extraction), same as any other question.</p>
     </div>
   </div>
 

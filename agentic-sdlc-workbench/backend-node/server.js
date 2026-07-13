@@ -14,7 +14,7 @@ if (process.env.SN_INSECURE_TLS === 'true') {
 const path = require('path');
 const fs = require('fs');
 const express = require('express');
-const { db, generateId, auditLog, nextSlug, getSetting, setSetting } = require('./db');
+const { db, generateId, auditLog, nextSlug, nextBestPracticeSlug, getSetting, setSetting } = require('./db');
 const { encrypt: encryptField, decrypt: decryptField } = require('./crypto-util');
 const registry = require('./agent/entity-registry');
 const { deriveSwimlane } = require('./agent/swimlane-deriver');
@@ -2453,11 +2453,12 @@ app.post('/api/v1/best-practices', (req, res) => {
   const ptype = (practice_type === 'question' || practice_type === 'rule') ? practice_type : 'rule';
   const plat = ['any', 'servicenow', 'generic'].includes(platform) ? platform : 'any';
   const id = generateId();
+  const slug = nextBestPracticeSlug();
   db.prepare(`
     INSERT INTO asdlc_best_practice
-      (best_practice_id, scope, platform, title, rule_text, practice_type, is_active, sort_order, source, created_by, updated_by)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)
-  `).run(id, scope || 'global', plat, title, rule_text, ptype,
+      (best_practice_id, slug, scope, platform, title, rule_text, practice_type, is_active, sort_order, source, created_by, updated_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+  `).run(id, slug, scope || 'global', plat, title, rule_text, ptype,
          is_active === false ? 0 : 1, sort_order || 0, source || 'manual', uid, uid);
   auditLog('asdlc_best_practice', id, 'INSERT', null, { title, scope: scope || 'global', platform: plat, practice_type: ptype }, uid);
   res.status(201).json(db.prepare("SELECT * FROM asdlc_best_practice WHERE best_practice_id = ?").get(id));
@@ -9408,7 +9409,7 @@ app.post('/api/v1/ingest-documents/:id/promote', async (req, res) => {
   const { hasOpenConflicts } = require('./agent/cross-check');
   if (hasOpenConflicts(req.params.id)) {
     const open = db.prepare(
-      "SELECT clarification_id, question_text, target_entity_type, target_field FROM asdlc_ingest_clarification WHERE ingest_id=? AND answer_text IS NULL AND target_field LIKE 'conflict:%'"
+      "SELECT clarification_id, question_text, target_entity_type, target_field FROM asdlc_ingest_clarification WHERE ingest_id=? AND answer_text IS NULL AND (target_field LIKE 'conflict:%' OR target_field LIKE 'sn_overlap:%')"
     ).all(req.params.id);
     return res.status(409).json({
       error: 'Unresolved conflict clarifications must be answered before promoting.',
