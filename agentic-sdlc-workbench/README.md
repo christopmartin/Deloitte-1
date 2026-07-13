@@ -11,7 +11,7 @@ A local-prototype web workbench for designing and managing ServiceNow Agentic AI
 | Database | SQLite (file: `backend-node/asdlc.db`) |
 | Frontend | Vanilla JS SPA (ES modules, no framework) |
 
-> **Python/Docker alternative**: A full PostgreSQL + FastAPI backend lives in `backend/` (SQL schema, triggers, RLS, routers all written). Use it when Docker and Python are available — `backend-node/` is the zero-install fallback.
+See [backend-node/README.md](backend-node/README.md) for backend-specific setup, routes, and environment variables.
 
 ## Quick start
 
@@ -91,20 +91,14 @@ GET  /api/v1/library?scope=&record_type=&status=
 ```
 agentic-sdlc-workbench/
 ├── README.md
-├── docker-compose.yml          # PostgreSQL 16 (future use)
+├── docker-compose.yml          # PostgreSQL 16 (future use, see #75)
 ├── .env
-├── backend/                    # FastAPI + PostgreSQL (future use)
-│   ├── sql/001_schema.sql
-│   ├── sql/002_triggers.sql
-│   ├── sql/003_rls.sql
-│   ├── sql/004_seed.sql
-│   └── routers/
-├── backend-node/               # Active: Node.js + SQLite
+├── backend-node/               # Node.js + SQLite backend
 │   ├── package.json
 │   ├── server.js               # Express app + all API routes
 │   ├── db.js                   # DatabaseSync init + auditLog()
 │   ├── seed.js                 # Idempotent demo data
-│   └── schema.sql              # SQLite-compatible schema (28 tables)
+│   └── schema.sql              # SQLite-compatible schema
 └── frontend/
     ├── index.html
     ├── styles.css

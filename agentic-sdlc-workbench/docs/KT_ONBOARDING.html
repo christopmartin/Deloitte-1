@@ -558,7 +558,7 @@
           <tbody>
             <tr><td><strong>Runtime</strong></td><td><code>Node.js ≥ 22.5</code></td><td>Required for built-in <code>node:sqlite</code> module</td></tr>
             <tr><td><strong>Web framework</strong></td><td><code>Express 4.x</code></td><td>Single monolithic <code>server.js</code> (188 routes, 9,935 lines)</td></tr>
-            <tr><td><strong>Database</strong></td><td>SQLite via <code>node:sqlite</code></td><td>WAL mode; raw parameterized SQL; no ORM. (An early Python/FastAPI + Postgres prototype in <code>backend/</code> is abandoned and slated for removal — backlog #90.)</td></tr>
+            <tr><td><strong>Database</strong></td><td>SQLite via <code>node:sqlite</code></td><td>WAL mode; raw parameterized SQL; no ORM. (An early Python/FastAPI + Postgres prototype that predated this backend was deleted 2026-07-13 — backlog #90.)</td></tr>
             <tr><td><strong>AI provider</strong></td><td>Anthropic Claude</td><td><code>@anthropic-ai/sdk ^0.95.1</code>; multi-model routing per role</td></tr>
             <tr><td><strong>SN integration</strong></td><td>ServiceNow REST API</td><td>AES-256-GCM credential storage per project</td></tr>
             <tr><td><strong>File parsing</strong></td><td>mammoth (DOCX), plain fs (TXT/CSV)</td><td>PDF not yet properly supported — falls through to UTF-8 read</td></tr>

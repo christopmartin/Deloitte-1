@@ -4,6 +4,16 @@
 // Usage:  node backup-db.js            (backs up ./asdlc.db, or $ASDLC_DB_PATH)
 // Restore: stop the app, copy the backup over backend-node/asdlc.db, delete any
 //          asdlc.db-wal / asdlc.db-shm, then restart.
+//
+// Scheduled automatically (this is a local dev machine, not a managed server —
+// so Windows Task Scheduler stands in for a real ops cron):
+//   Task name : "ASDLC Workbench DB Backup"
+//   Frequency : Daily at 9:00 AM
+//   Action    : node.exe backup-db.js   (working directory: backend-node/)
+//   Created   : 2026-07-13, via PowerShell Register-ScheduledTask.
+// Inspect/change:  Get-ScheduledTask -TaskName "ASDLC Workbench DB Backup"
+//                  Set-ScheduledTask / Unregister-ScheduledTask, or Task Scheduler GUI (taskschd.msc).
+// Backups accumulate in backups/ with no pruning — periodically clear old ones by hand.
 'use strict';
 const path = require('path');
 const fs = require('fs');

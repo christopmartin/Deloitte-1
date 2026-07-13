@@ -16,14 +16,6 @@ backend-node/backups/
 backend-node/Tempcp_response.json
 backend-node/tmpproj.json
 
-# Python backend (legacy)
-backend/__pycache__/
-backend/**/__pycache__/
-backend/*.pyc
-backend/**/*.pyc
-backend/venv/
-backend/.venv/
-
 # Environment
 .env
 

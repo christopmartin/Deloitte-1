@@ -4,6 +4,23 @@ One running log of shipped features: what each one does, and exactly how to star
 
 ---
 
+## Housekeeping: security patch, automated tests, automated backups (Backlog #90–#93) — 2026-07-13
+
+**What it does:** No visible change to the app itself — this is upkeep behind the scenes, closing five gaps flagged in the tech-debt reviews:
+1. **Security patch.** Closed a known file-upload security vulnerability and a related one in a supporting library. Both were already fixed in newer library versions — this just picks those up.
+2. **Dead code removed.** Deleted an abandoned, never-used backup backend scaffold (Python) that predated today's actual backend and was only still confusing the documentation.
+3. **Automated test suite.** All 30 existing test scripts now run as one command instead of one at a time by hand — this is the safety net that catches a broken change before it ships.
+4. **Automated database backups.** The backup script now runs on its own every day at 9:00 AM via Windows Task Scheduler, instead of relying on someone remembering to run it manually (the last backup had gone stale for over 5 weeks).
+5. **Environment variable reference.** Added a checked-in list of every configuration setting the app reads (API keys, ServiceNow connection, tuning knobs) with a one-line explanation of each — no real credentials in it — so setting up the app on a new machine doesn't require reverse-engineering the code.
+
+**How to confirm it worked:**
+1. Open a command prompt in `backend-node/` and run `npm audit` — should report **0 vulnerabilities**.
+2. Run `npm test` — should run all 30 suites and end with **"All 30 test suites passed."**
+3. Open Windows Task Scheduler and look for **"ASDLC Workbench DB Backup"** — should show as `Ready`, next run tomorrow 9:00 AM; `backend-node/backups/` should contain a file timestamped today.
+4. Confirm `agentic-sdlc-workbench/backend/` no longer exists, and `backend-node/.env.example` does.
+
+---
+
 ## Reach shared ServiceNow tables + best-practice guidance (Backlog #109) — 2026-07-10
 
 **What it does:** Closes a real gap — until now, the import planner could only see tables an app *owns*; it had no way to reach shared ServiceNow tables like the standard work-ticket tables or routing groups, even when a requirement clearly needed them. Three changes:
