@@ -20,3 +20,10 @@ graphify-out/
 
 # Local test inputs / scratch cases
 workbench-test-cases/
+
+# claude-session-memory: local-only artifacts (session logs themselves are tracked)
+memory/transcript-archive/
+memory/memory_index.db
+memory/memory_index.db-wal
+memory/memory_index.db-shm
+memory/.history-imported

@@ -1,0 +1,10 @@
+# Core — required
+numpy
+
+# Preferred embedder: distilled static embeddings, numpy-only (no torch).
+# Falls back to a dependency-free local hashing embedder if absent.
+model2vec
+
+# Optional stronger backends (auto-detected if installed / configured):
+#   sentence-transformers   # needs torch
+#   openai                  # needs OPENAI_API_KEY
