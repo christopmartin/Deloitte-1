@@ -416,6 +416,7 @@ graph TB
           <tr><td><code>servicenow_assessment.js</code></td><td><span class="badge badge-teal">ServiceNow</span></td><td>assess, get assessments</td><td>Fit analysis + capability matrix report</td></tr>
           <tr><td><code>admin_ai.js</code></td><td><span class="badge badge-amber">Admin</span></td><td><code>GET/PUT /settings/ai</code>, usage</td><td>Per-role model selection + token dashboard</td></tr>
           <tr><td><code>admin_best_practices.js</code></td><td><span class="badge badge-amber">Admin</span></td><td><code>GET/POST/PUT/DELETE /best-practices</code></td><td>AI Guidance rules injected into prompts</td></tr>
+          <tr><td><code>admin_data_maintenance.js</code></td><td><span class="badge badge-amber">Admin</span></td><td><code>GET .../design-wipe-preview</code>, <code>POST .../design-wipe</code></td><td>Reset an application's design data; keeps setup + (optionally) Document Catalog</td></tr>
           <tr><td><code>cost_projections.js</code></td><td><span class="badge badge-amber">Admin</span></td><td><code>POST /cost-estimate</code>, cost-bindings</td><td>End-to-end Now Assist cost estimate</td></tr>
           <tr><td><code>cost_management.js</code></td><td><span class="badge badge-amber">Admin</span></td><td><code>GET/PUT /cost-assumption</code>, rate-card</td><td>Global + per-project cost params + rate card</td></tr>
           <tr><td><code>reports.js</code></td><td><span class="badge badge-amber">Admin</span></td><td><code>GET /design-report/*</code>, POST /reports</td><td>Design report builder + docx/json export</td></tr>
@@ -497,7 +498,11 @@ flowchart LR
     for a future record-level narrowing. Capture, the <code>sys_metadata</code> completeness sweep, <em>and</em> drift
     classification are all bounded to the same slice (<code>sn-capture.js</code>), so out-of-slice rows are never mis-read as
     deleted. The Assessment page makes census surfaces selectable; Sync shows the active slice; <code>wipe-project.js</code>
-    clears the SN substrate for a clean re-ingest.</p>
+    clears the SN substrate for a clean re-ingest (both it and the Admin &gt; Data Maintenance UI now share the same
+    table list via <code>design-wipe.js</code>, corrected 2026-07-13 to include the platform-table design entities —
+    business rules/logic, user groups, choice sets, portals, workspaces, variable sets, inbound REST APIs, dashboards,
+    reports, KPIs, SLAs, notifications, NL rules, discovery plans, outbound integrations — that had drifted out of the
+    original list).</p>
     <p><strong>Field-level two-way merge (R7).</strong> <code>agent/three-way-merge.js</code> compares each field across the
     last-synced base (<code>source_fluent</code>), the current Workbench value, and the current ServiceNow value
     (<code>unchanged / sn_only / wb_only / both_changed</code>). Generic artifacts are merged field-by-field — ServiceNow-only
@@ -907,6 +912,7 @@ erDiagram
           <tr><td>Reporting &amp; Build</td><td><code>/projects/:id/design-report/*</code>, <code>/reports</code></td><td><code>GET .../build-export</code></td><td>9 design-report sub-routes; build export is async</td></tr>
           <tr><td>Test Coverage</td><td><code>/projects/:id/test-cases</code>, <code>test-coverage</code></td><td><code>POST .../generate</code>, <code>POST .../infer</code></td><td>Generate test cases + infer coverage gaps</td></tr>
           <tr><td>Admin</td><td><code>/settings/ai</code>, <code>/best-practices</code>, <code>/usage</code></td><td>—</td><td>Model config, AI Guidance rules, token usage</td></tr>
+          <tr><td>Data Maintenance</td><td><code>/projects/:id/design-wipe*</code></td><td><code>POST .../design-wipe</code></td><td>Preview + reset an application's design data; setup and (optionally) documents kept</td></tr>
           <tr><td>Library</td><td><code>/library</code></td><td>—</td><td>Cross-project reusable entities by scope/type</td></tr>
         </tbody>
       </table>

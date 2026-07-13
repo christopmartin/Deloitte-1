@@ -2440,6 +2440,42 @@ app.get('/api/v1/admin/tool-calls/raw', (req, res) => {
 });
 
 // ──────────────────────────────────────────────
+// DATA MAINTENANCE — reset an application's design data (Administration > Data Maintenance)
+// ──────────────────────────────────────────────
+const { previewWipe, executeWipe } = require('./design-wipe');
+
+app.get('/api/v1/projects/:id/design-wipe-preview', (req, res) => {
+  const project = db.prepare('SELECT project_id, project_name FROM asdlc_project WHERE project_id=?').get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const keepDocuments = req.query.keepDocuments !== 'false';
+  const { rows, total } = previewWipe(project.project_id, { keepDocuments });
+  res.json({ project_name: project.project_name, rows, total, keepDocuments });
+});
+
+app.post('/api/v1/projects/:id/design-wipe', (req, res) => {
+  const uid = userId(req);
+  const project = db.prepare('SELECT project_id, project_name FROM asdlc_project WHERE project_id=?').get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  const { keepDocuments = true, confirmName } = req.body || {};
+  if (!confirmName || confirmName.trim() !== project.project_name) {
+    return res.status(400).json({ error: 'Application name confirmation does not match.' });
+  }
+
+  let result;
+  try {
+    result = executeWipe(project.project_id, { keepDocuments: !!keepDocuments });
+  } catch (err) {
+    return res.status(500).json({ error: 'Wipe failed — rolled back, no changes made: ' + err.message });
+  }
+
+  auditLog('asdlc_project', project.project_id, 'DESIGN_WIPE', null,
+    { keepDocuments: !!keepDocuments, total_deleted: result.total, fk_clean: result.fkClean }, uid);
+
+  res.json({ deleted: result.counts, total: result.total, fkClean: result.fkClean, warnings: result.warnings });
+});
+
+// ──────────────────────────────────────────────
 // BEST PRACTICES (global house rules for the AI) + LEARNING FEEDBACK
 // ──────────────────────────────────────────────
 app.get('/api/v1/best-practices', (_req, res) => {

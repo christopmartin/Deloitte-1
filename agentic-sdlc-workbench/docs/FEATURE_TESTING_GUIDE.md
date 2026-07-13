@@ -4,6 +4,21 @@ One running log of shipped features: what each one does, and exactly how to star
 
 ---
 
+## Admin: Data Maintenance — reset an application's design data — 2026-07-13
+
+**What it does:** A new Administration page lets you clear out one application's design data (use cases, workflows, requirements, everything else generated from ingest) so it can be re-ingested from scratch — without deleting the application itself or its setup. By default, it also keeps your uploaded Document Catalog entries and resets them so you can resubmit them into the fresh design without re-uploading files (there's a checkbox if you'd rather delete those too). Every delete shows an exact row-count preview first, and requires typing the application's name to confirm — this cannot be undone.
+
+While building this, we also found and fixed a gap in the existing wipe logic: 15 categories of ServiceNow-derived design data (business rules, user groups, choice sets, service portals, workspaces, variable sets, inbound REST APIs, dashboards, reports, KPIs, SLAs, email notifications, natural-language rules, ServiceNow discovery plans, and outbound integrations) had never been included in any wipe, on any application, to date. Any wipe run going forward — from this page or the existing command-line tool — now clears all of it.
+
+**How to start testing:**
+1. Go to **Administration ▸ Data Maintenance**.
+2. Pick an application with existing design data, leave **"Keep Document Catalog entries"** checked, and click **Preview what will be deleted** — confirm the row counts look right and the message says documents will be kept.
+3. Click **Delete Design Data…**, type the application's exact name in the confirmation box, and confirm.
+4. Check other tabs (Use Cases, Workflows, Requirements) — design data should be gone. Check **Ingest Documents** — your documents should still be listed, ready to resubmit.
+5. Repeat on a different application with the checkbox unchecked — confirm the documents are deleted too this time.
+
+---
+
 ## ServiceNow duplicate check on new requirements (Backlog #114) — 2026-07-13
 
 **What it does:** For projects connected to a ServiceNow instance, whenever a new requirement is staged from a document, the app now does a quick, free check of the live instance to see if something already covers it — before you (or the AI) design something ServiceNow already has. Most of the time nothing is found and nothing happens — no cost, no delay. Only when a real possible match turns up does it spend a small amount on the cheapest AI model to double-check and explain why. If it's confident enough, it raises a real, blocking question — the **same weight as a requirement conflict** — right alongside your other clarifying questions. It must be resolved before that document can be promoted.

@@ -13,6 +13,7 @@ let currentModule = null;
 const ADMIN_MODULES = new Set([
   'home', 'library', 'projects', 'trust', 'validation',
   'cost_management', 'admin_ai', 'admin_best_practices', 'sn_artifacts',
+  'admin_data_maintenance',
 ]);
 
 const MODULE_LOADERS = {
@@ -34,6 +35,7 @@ const MODULE_LOADERS = {
   reports: () => import('./modules/reports.js'),
   admin_ai: () => import('./modules/admin_ai.js'),
   admin_best_practices: () => import('./modules/admin_best_practices.js'),
+  admin_data_maintenance: () => import('./modules/admin_data_maintenance.js'),
   servicenow_sync: () => import('./modules/servicenow_sync.js'),
   servicenow_assessment: () => import('./modules/servicenow_assessment.js'),
   servicenow_catalog: () => import('./modules/servicenow_catalog.js'),
