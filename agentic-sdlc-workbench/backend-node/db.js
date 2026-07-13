@@ -230,6 +230,23 @@ const MIGRATIONS = [
   "ALTER TABLE asdlc_agent_spec         ADD COLUMN system_generated INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE asdlc_functional_req     ADD COLUMN system_generated INTEGER NOT NULL DEFAULT 0",
 
+  // ── 3-way classification (Extracted / AI Suggestion / Best-Practice Match) ──
+  // best_practice_ref carries a verified [BP-xxx] slug ONLY when system_generated=1
+  // AND the extraction gate matched it against a real, currently-active house rule
+  // (see agent/ai-config.js's applyBestPracticeGate). Same 8 tables as system_generated,
+  // same "rides in JSON pre-promotion, column post-promotion" durability.
+  "ALTER TABLE asdlc_nonfunctional_req ADD COLUMN best_practice_ref TEXT",
+  "ALTER TABLE asdlc_use_case          ADD COLUMN best_practice_ref TEXT",
+  "ALTER TABLE asdlc_workflow           ADD COLUMN best_practice_ref TEXT",
+  "ALTER TABLE asdlc_workflow_step      ADD COLUMN best_practice_ref TEXT",
+  "ALTER TABLE asdlc_tool               ADD COLUMN best_practice_ref TEXT",
+  "ALTER TABLE asdlc_data_source        ADD COLUMN best_practice_ref TEXT",
+  "ALTER TABLE asdlc_agent_spec         ADD COLUMN best_practice_ref TEXT",
+  "ALTER TABLE asdlc_functional_req     ADD COLUMN best_practice_ref TEXT",
+  // Short citable id for a house rule (BP-001, ...) — what the AI is asked to cite,
+  // never the best_practice_id UUID (too easy to mistranscribe character-for-character).
+  "ALTER TABLE asdlc_best_practice ADD COLUMN slug TEXT",
+
   // ── Standing cost questions: extend best_practice with practice_type ──────────
   // 'rule' = existing extraction rule injected into AI prompts
   // 'question' = standing question surfaced to product owners during ingest review
@@ -753,6 +770,19 @@ function nextSlug(table, prefix, projectId) {
   return `${prefix}-${String(num).padStart(3, '0')}`;
 }
 
+/**
+ * Compute the next BP-### slug for asdlc_best_practice. Not project-scoped
+ * (the table has no project_id column, unlike nextSlug's targets), so it's
+ * its own small function rather than a nextSlug() call.
+ * @returns {string} e.g. "BP-011"
+ */
+function nextBestPracticeSlug() {
+  const row = db.prepare(
+    "SELECT MAX(CAST(SUBSTR(slug, 4) AS INTEGER)) AS max_num FROM asdlc_best_practice WHERE slug LIKE 'BP-%'"
+  ).get();
+  return `BP-${String((row.max_num || 0) + 1).padStart(3, '0')}`;
+}
+
 // Run backfill on startup (idempotent)
 for (const spec of SLUG_TABLES) {
   try { backfillSlugsFor(spec); } catch (err) {
@@ -1050,6 +1080,21 @@ try {
   console.error('[db] ServiceNow draft reach-rules seed failed:', err.message);
 }
 
+// ── Backfill BP-### slugs for any pre-existing best-practice rows ───────────
+// Idempotent: only touches rows where slug IS NULL, assigned in creation order.
+try {
+  const unsluggd = db.prepare(
+    'SELECT best_practice_id FROM asdlc_best_practice WHERE slug IS NULL ORDER BY sort_order, created_at'
+  ).all();
+  if (unsluggd.length) {
+    const updSlug = db.prepare('UPDATE asdlc_best_practice SET slug = ? WHERE best_practice_id = ?');
+    for (const row of unsluggd) updSlug.run(nextBestPracticeSlug(), row.best_practice_id);
+    console.log(`[db] backfilled ${unsluggd.length} best-practice slug(s)`);
+  }
+} catch (err) {
+  console.error('[db] best-practice slug backfill failed:', err.message);
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 /**
@@ -1121,4 +1166,4 @@ function auditLog(tableName, recordId, operation, oldData, newData, userId) {
   }
 }
 
-module.exports = { db, generateId, auditLog, nextSlug, getSetting, setSetting };
+module.exports = { db, generateId, auditLog, nextSlug, nextBestPracticeSlug, getSetting, setSetting };

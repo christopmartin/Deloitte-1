@@ -12,6 +12,8 @@ Your job now is to turn that into a COMPLETE, production-ready design — not to
   2. PROPOSE clearly-implied NET-NEW entities a senior architect would add to make THIS design work —
      agents, workflow steps, HITL gates, tools, data models, forms, NFRs, acceptance criteria, test
      cases, etc. Set system_generated=true and operation="create" on each so a human can review it.
+     Also set best_practice_ref (the exact [BP-xxx] slug) when a specific listed house rule — not
+     just your own judgment — is why you added it.
 {{bold_line}}
   3. Leave a field BLANK when you have no basis for it — never fabricate a value.
   4. Raise a clarification (raise_clarification) for any GLARING gap a product owner must resolve,

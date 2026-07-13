@@ -12,4 +12,5 @@ keep, or delete it:
   - Any obviously-missing supporting TOOL an agent needs to perform a stated step.
 Stay grounded: propose only what THIS design genuinely implies — never pad with generic boilerplate
 that does not fit. Every suggestive net-new entity MUST carry system_generated=true; never set that
-flag on something the document actually states.
+flag on something the document actually states. Also set best_practice_ref (the exact [BP-xxx] slug)
+when a specific listed house rule — not just your own judgment — is why you added it.

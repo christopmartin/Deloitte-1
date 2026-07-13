@@ -276,6 +276,34 @@ function writeClarification(ingestId, round, q) {
 }
 
 // ── Prompt builders ───────────────────────────────────────────────────────────
+// Shared by buildSystemPrompt + buildReconcileSystemPrompt so the two prompts can't
+// drift out of sync on how house rules are rendered/cited. Two distinct behaviors:
+// (1) informational citation in a field's own free text — unverified, unchanged from
+// before; (2) a NEW, narrower one — only allowed when system_generated=true is because
+// one specific rule below is the reason — that copies the rule's [BP-xxx] slug into
+// best_practice_ref, which IS verified server-side (see ai-config.js's
+// applyBestPracticeGate) before it's trusted as a "Best-Practice Match".
+function renderBestPracticesBlock(bestPractices, citationFieldHint) {
+  if (!bestPractices || !bestPractices.length) return [];
+  return [
+    ``,
+    `## Best practices / house rules (FOLLOW THESE)`,
+    ...bestPractices.map(b => `  - [${b.slug || b.best_practice_id}] ${b.title ? b.title + ': ' : ''}${b.rule_text}`),
+    ``,
+    `If one of the above rules directly shaped a field, name it by its title in that field's own`,
+    `free text (e.g. ${citationFieldHint}) — only when it actually changed your answer, never as`,
+    `decoration, and never invent a rule title that was not given to you above.`,
+    ``,
+    `If you are ALSO setting system_generated=true on a net-new entity because one specific rule`,
+    `above is the reason you added it, set best_practice_ref to that rule's EXACT slug shown in`,
+    `[brackets] — copy it character-for-character, never a title, never invented. This is checked`,
+    `against the live rule list; a slug that doesn't match a real active rule is dropped silently`,
+    `(the item still stages, just as your own judgment call, not a rule citation). Leave it blank`,
+    `when system_generated=true is your own architectural judgment, not a citation of one specific`,
+    `rule above.`,
+  ];
+}
+
 function buildSystemPrompt(doc, threshold, answeredClarifications, existingSummary, bestPractices) {
   // Static prose lives in agent/prompts/*.md (versioned, diffable). The ASSEMBLY
   // logic — which sections to include and in what order — stays here. Dynamic
@@ -283,18 +311,7 @@ function buildSystemPrompt(doc, threshold, answeredClarifications, existingSumma
   // from DB data below. SCHEMA_SQL is injected from code as before.
   const lines = [ render('extraction/role') ];
 
-  if (bestPractices && bestPractices.length > 0) {
-    lines.push(
-      ``,
-      `## Best practices / house rules (FOLLOW THESE)`,
-      ...bestPractices.map(b => `  - ${b.title ? b.title + ': ' : ''}${b.rule_text}`),
-      ``,
-      `If one of the above rules directly shaped an extracted field or a clarification you raise,`,
-      `name it by its title in that item's own free-text (e.g. why_uncertain, or the entity's`,
-      `description) — only when it actually changed your answer, never as decoration, and never`,
-      `invent a rule title that was not given to you above.`,
-    );
-  }
+  lines.push(...renderBestPracticesBlock(bestPractices, 'why_uncertain, or the entity\'s description'));
 
   lines.push(
     ``, render('extraction/confidence-rules', { threshold }),
@@ -540,17 +557,7 @@ function deleteExtraction(extractionId) {
 function buildReconcileSystemPrompt(doc, bestPractices) {
   const lines = [ render('reconcile/intro', { project_name: doc.project_name || 'Unknown' }) ];
 
-  if (bestPractices && bestPractices.length > 0) {
-    lines.push(
-      ``,
-      `## Best practices / house rules (FOLLOW THESE)`,
-      ...bestPractices.map(b => `  - ${b.title ? b.title + ': ' : ''}${b.rule_text}`),
-      ``,
-      `If one of the above rules directly shaped a reconciled field, name it by its title in that`,
-      `field's own free text (e.g. conflict_rationale) — only when it actually changed your answer,`,
-      `never as decoration, and never invent a rule title that was not given to you above.`,
-    );
-  }
+  lines.push(...renderBestPracticesBlock(bestPractices, 'conflict_rationale'));
 
   lines.push(
     ``,
@@ -624,7 +631,8 @@ async function reconcileUpdates(doc, threshold, round, pass1Items, bestPractices
     if (name === 'raise_clarification') continue;
     const entityType = TOOL_TO_ENTITY[name];
     if (!entityType) continue;
-    const { confidence = 0, confidence_notes, ...entityData } = input;
+    const { confidence = 0, confidence_notes, ...entityDataRaw } = input;
+    const entityData = aiConfig.applyBestPracticeGate(entityDataRaw, bestPractices);
     const key = `${entityType}::${entityData.target_slug}`;
     if (!wanted.has(key)) continue; // ignore anything we didn't ask to reconcile
     corrected.push({ entityType, entityData, confidence, confidence_notes });
@@ -707,7 +715,8 @@ async function synthesizeDesign(doc, threshold, round, pass1Items, existingSumma
       }
       const entityType = TOOL_TO_ENTITY[name];
       if (!entityType) continue;
-      const { confidence = 0, confidence_notes, clarification_ref, ...entityData } = input;
+      const { confidence = 0, confidence_notes, clarification_ref, ...entityDataRaw } = input;
+      const entityData = aiConfig.applyBestPracticeGate(entityDataRaw, bestPractices);
       // Synthesis output is for human keep/delete review — system_generated items always stage.
       const status = (entityData.system_generated || confidence >= threshold) ? 'staged' : 'needs_clarification';
       upsertExtraction(doc.ingest_id, entityType, entityData, confidence, status, round, clarification_ref);
@@ -799,7 +808,8 @@ async function processDocument(ingestId) {
       }
 
       // Strip meta fields before storing entity_data
-      const { confidence = 0, confidence_notes, clarification_ref, ...entityData } = input;
+      const { confidence = 0, confidence_notes, clarification_ref, ...entityDataRaw } = input;
+      const entityData = aiConfig.applyBestPracticeGate(entityDataRaw, bestPractices);
       // Suggestive (system_generated) items are proposals for human keep/delete review — always stage
       // them and never auto-raise a clarification (confidence just informs the reviewer's decision).
       const status = (entityData.system_generated || confidence >= threshold) ? 'staged' : 'needs_clarification';

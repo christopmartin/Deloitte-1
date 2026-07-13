@@ -68,6 +68,14 @@ const COMMON_TOOL_FIELDS = {
       'addition that is NOT explicitly stated in the document (suggestive mode), so a human can ' +
       'review / keep / delete it. Leave false or omit for anything the document actually states.',
   },
+  best_practice_ref: {
+    type: 'string',
+    description: 'ONLY when system_generated=true AND one specific rule in the "Best practices / house ' +
+      'rules" section is the reason you added this entity: the EXACT [BP-xxx] slug shown next to that ' +
+      'rule. Copy it character-for-character — never invent one, never use a title instead of the slug. ' +
+      'Leave blank for anything the document states, and for system_generated=true items that are your ' +
+      'own architectural judgment rather than a citation of one specific listed rule.',
+  },
   clarification_ref: {
     type: 'string',
     description: 'During a clarification round ONLY: echo back EXACTLY the ref token shown next to this ' +
@@ -183,6 +191,7 @@ const REGISTRY = [
       dependencies:     { col: 'dependencies', json: true },
       ingest_id:        { col: 'ingest_id' },   // populated at promote time, not by AI
       system_generated: { col: 'system_generated', transform: boolInt },
+      best_practice_ref: { col: 'best_practice_ref' },
     },
     parentLinks: [
       { col: 'use_case_id', parentType: 'use_case', nameKeyInData: 'use_case_title', required: false, tryFallback: true },
@@ -229,6 +238,7 @@ const REGISTRY = [
       dependencies:        { col: 'dependencies', json: true },
       ingest_id:           { col: 'ingest_id' },
       system_generated:    { col: 'system_generated', transform: boolInt },
+      best_practice_ref:   { col: 'best_practice_ref' },
     },
     parentLinks: [
       { col: 'use_case_id', parentType: 'use_case', nameKeyInData: 'use_case_title', required: false, tryFallback: true },
@@ -284,6 +294,7 @@ const REGISTRY = [
       supervision_model:  { col: 'supervision_model',
         enumMap: { Assisted: 'Supervised HITL', Automated: 'Autonomous', 'Human-led': 'Advisory-only' } },
       system_generated:   { col: 'system_generated', transform: boolInt },
+      best_practice_ref:  { col: 'best_practice_ref' },
     },
     parentLinks: [],
   },
@@ -333,6 +344,7 @@ const REGISTRY = [
       runs_per_period:{ col: 'runs_per_period' },
       readiness:      { col: 'readiness' },
       system_generated: { col: 'system_generated', transform: boolInt },
+      best_practice_ref: { col: 'best_practice_ref' },
     },
     parentLinks: [
       { col: 'use_case_id', parentType: 'use_case', nameKeyInData: 'use_case_title', required: true },
@@ -381,6 +393,7 @@ const REGISTRY = [
       preconditions:  { col: 'preconditions' },
       evidence_captured: { col: 'evidence_captured' },
       system_generated: { col: 'system_generated', transform: boolInt },
+      best_practice_ref: { col: 'best_practice_ref' },
     },
     parentLinks: [
       { col: 'workflow_id', parentType: 'workflow', nameKeyInData: 'workflow_name', required: true },
@@ -475,6 +488,7 @@ const REGISTRY = [
       post_release_validation: { col: 'post_release_validation' },
       cost_model:       { col: 'cost_model' },
       system_generated: { col: 'system_generated', transform: boolInt },
+      best_practice_ref: { col: 'best_practice_ref' },
     },
     parentLinks: [
       { col: 'use_case_id', parentType: 'use_case', nameKeyInData: 'use_case_title', required: true },
@@ -530,6 +544,7 @@ const REGISTRY = [
       execution_mode:      { col: 'execution_mode' },
       dev_status:          { col: 'dev_status' },
       system_generated:    { col: 'system_generated', transform: boolInt },
+      best_practice_ref:   { col: 'best_practice_ref' },
     },
     parentLinks: [],
   },
@@ -1697,6 +1712,7 @@ const REGISTRY = [
       rate_limits:         { col: 'rate_limits' },
       ingest_id:           { col: 'ingest_id' },
       system_generated:    { col: 'system_generated', transform: boolInt },
+      best_practice_ref:   { col: 'best_practice_ref' },
     },
     parentLinks: [],
   },

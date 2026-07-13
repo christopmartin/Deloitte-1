@@ -142,6 +142,7 @@ CREATE TABLE IF NOT EXISTS asdlc_use_case (
     epic_or_feature_id       TEXT,                                  -- Decision #4: portfolio link, UI-hidden
     baseline_cost_annual_usd REAL,                                  -- Decision #17: for ROI computation
     system_generated         INTEGER NOT NULL DEFAULT 0,            -- 1 = AI-suggested (suggestive ingest), for human review
+    best_practice_ref        TEXT,                                  -- verified [BP-xxx] slug, when system_generated cites a specific house rule
     visibility_scope         TEXT NOT NULL DEFAULT 'PROJECT',
     lifecycle_status         TEXT NOT NULL DEFAULT 'draft',
     created_by               TEXT,
@@ -167,6 +168,7 @@ CREATE TABLE IF NOT EXISTS asdlc_workflow (
     risk_tier           TEXT CHECK (risk_tier IS NULL OR risk_tier IN ('High','Medium','Low')),
     runs_per_period     REAL,                                       -- Decision #17: volume for cost calc
     system_generated    INTEGER NOT NULL DEFAULT 0,                 -- 1 = AI-suggested (suggestive ingest), for human review
+    best_practice_ref   TEXT,                                       -- verified [BP-xxx] slug, when system_generated cites a specific house rule
     visibility_scope    TEXT NOT NULL DEFAULT 'PROJECT',
     lifecycle_status    TEXT NOT NULL DEFAULT 'draft',
     created_by          TEXT,
@@ -198,6 +200,7 @@ CREATE TABLE IF NOT EXISTS asdlc_workflow_step (
     evidence_captured   TEXT,                                       -- Decision log / audit evidence
     is_end_step         INTEGER NOT NULL DEFAULT 0,                 -- Convenience flag, derivable from step_type
     system_generated    INTEGER NOT NULL DEFAULT 0,                 -- 1 = AI-suggested (suggestive ingest), for human review
+    best_practice_ref   TEXT,                                       -- verified [BP-xxx] slug, when system_generated cites a specific house rule
     visibility_scope    TEXT NOT NULL DEFAULT 'PROJECT',
     lifecycle_status    TEXT NOT NULL DEFAULT 'draft',
     created_by          TEXT,
@@ -354,6 +357,7 @@ CREATE TABLE IF NOT EXISTS asdlc_tool (
     -- ── Phase 1 additions (Decision #14) ──────────────────────────────
     dev_status          TEXT CHECK (dev_status IS NULL OR dev_status IN ('Existing','To be built')),
     system_generated    INTEGER NOT NULL DEFAULT 0,                 -- 1 = AI-suggested (suggestive ingest), for human review
+    best_practice_ref   TEXT,                                       -- verified [BP-xxx] slug, when system_generated cites a specific house rule
     visibility_scope    TEXT NOT NULL DEFAULT 'PROJECT',            -- PROJECT | GLOBAL | ORGANIZATION | PROGRAM
     lifecycle_status    TEXT NOT NULL DEFAULT 'active',
     created_by          TEXT,
@@ -1195,6 +1199,7 @@ CREATE INDEX IF NOT EXISTS idx_tool_call_source ON asdlc_tool_call_log(source, c
 -- Human-authored, global house rules injected into the extraction prompt.
 CREATE TABLE IF NOT EXISTS asdlc_best_practice (
     best_practice_id TEXT PRIMARY KEY,
+    slug             TEXT,                             -- short citable id (BP-001, ...) — what the AI cites, never the UUID
     scope            TEXT NOT NULL DEFAULT 'global',   -- 'global' | <entity_type>
     platform         TEXT NOT NULL DEFAULT 'any',      -- 'any' | 'servicenow' | 'generic' (which target platform this rule applies to)
     title            TEXT NOT NULL,
@@ -1307,6 +1312,7 @@ CREATE TABLE IF NOT EXISTS asdlc_data_source (
     contains_pii        INTEGER NOT NULL DEFAULT 0,
     rate_limits         TEXT,
     system_generated    INTEGER NOT NULL DEFAULT 0,    -- 1 = AI-suggested (suggestive ingest), for human review
+    best_practice_ref   TEXT,                          -- verified [BP-xxx] slug, when system_generated cites a specific house rule
     visibility_scope    TEXT NOT NULL DEFAULT 'PROJECT',
     lifecycle_status    TEXT NOT NULL DEFAULT 'active',
     created_by          TEXT,
@@ -1492,6 +1498,7 @@ CREATE TABLE IF NOT EXISTS asdlc_nonfunctional_req (
     dependencies        TEXT NOT NULL DEFAULT '[]',  -- JSON array of FR/NFR slugs
     source              TEXT NOT NULL DEFAULT '',
     system_generated    INTEGER NOT NULL DEFAULT 0,   -- 1 = AI-suggested (suggestive ingest), for human review
+    best_practice_ref   TEXT,                         -- verified [BP-xxx] slug, when system_generated cites a specific house rule
     status              TEXT NOT NULL DEFAULT 'draft'
         CHECK (status IN ('draft','approved','implemented','verified','deleted')),
     deleted_at          TEXT,

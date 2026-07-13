@@ -155,13 +155,21 @@ function checkAiInventedStructure(items) {
     if (it.data.conflict_classification !== 'net_new') continue;
     const name = nameOf(it.type, it.data);
     const highStakes = it.type === 'agent_spec' || it.type === 'workflow';
+    // Category is provenance, not risk — severity stays keyed on entity type either way.
+    // best_practice_title only ever arrives via ai-config.js's applyBestPracticeGate, which
+    // already verified the ref against a real, active rule at extraction time — never the
+    // model's own unverified claim.
+    const matched = Boolean(it.data.best_practice_ref && it.data.best_practice_title);
     findings.push({
       severity: highStakes ? 'warn' : 'info',
       category: 'ai_invented_structure',
-      title: `AI-added ${humanType(it.type)}: "${name}"`,
-      detail: `Not explicitly named in the source material — added as a best-practice inference (confidence ${it.confidence}). ${it.data.conflict_rationale || ''}`.trim(),
-      entities: [{ type: it.type, name, extraction_id: it.id }],
-      suggested_action: 'Confirm this is wanted before it goes into the build.',
+      match_category: matched ? 'best_practice_match' : 'ai_suggestion',
+      title: `${matched ? 'Best-Practice Match' : 'AI Suggestion'}: ${humanType(it.type)} "${name}"`,
+      detail: matched
+        ? `Not explicitly named in the source material — added because of the house rule "${it.data.best_practice_title}" (confidence ${it.confidence}). ${it.data.conflict_rationale || ''}`.trim()
+        : `Not explicitly named in the source material — added as the AI's own judgment call, not backed by a specific house rule (confidence ${it.confidence}). ${it.data.conflict_rationale || ''}`.trim(),
+      entities: [{ type: it.type, name, extraction_id: it.id, best_practice_ref: it.data.best_practice_ref || null }],
+      suggested_action: 'Confirm this addition is wanted before it goes into the build.',
     });
   }
   return findings;
