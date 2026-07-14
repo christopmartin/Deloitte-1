@@ -64,13 +64,19 @@
       border-radius: 4px;
       flex-shrink: 0;
     }
-    .sw-phase   { background: #1e3a5f; }
-    .sw-action  { background: #3b82f6; }
-    .sw-decision{ background: #f59e0b; }
-    .sw-system  { background: #8b5cf6; }
-    .sw-patha   { background: #10b981; }
-    .sw-pathb   { background: #f97316; }
-    .sw-terminal{ background: #1e293b; border-radius: 50px; }
+    .legend-glyph {
+      font-size: 15px;
+      width: 20px;
+      text-align: center;
+    }
+    .sw-action    { background: #3b82f6; }
+    .sw-decision  { background: #f59e0b; }
+    .sw-system    { background: #8b5cf6; }
+    .sw-snoutline { background: #fff; border: 2px solid #0d9488; }
+    .sw-optional  { background: #ccfbf1; border: 2px dashed #0d9488; }
+    .sw-patha     { background: #10b981; }
+    .sw-pathb     { background: #f97316; }
+    .sw-terminal  { background: #1e293b; border-radius: 50px; }
 
     /* ── Diagram card ── */
     .diagram-card {
@@ -108,7 +114,7 @@
       max-width: 1100px;
       margin: 0 auto 16px;
       display: grid;
-      grid-template-columns: repeat(5, 1fr);
+      grid-template-columns: repeat(6, 1fr);
       gap: 8px;
     }
     .phase-pill {
@@ -122,25 +128,41 @@
     }
     .ph1 { background: #dbeafe; color: #1e40af; }
     .ph2 { background: #dcfce7; color: #166534; }
-    .ph3 { background: #fef3c7; color: #92400e; }
-    .ph4 { background: #fce7f3; color: #9d174d; }
-    .ph5 { background: #ede9fe; color: #5b21b6; }
+    .ph3 { background: #ccfbf1; color: #115e59; }
+    .ph4 { background: #fef3c7; color: #92400e; }
+    .ph5 { background: #fce7f3; color: #9d174d; }
+    .ph6 { background: #ede9fe; color: #5b21b6; }
+
+    /* ── Caveat / notes box ── */
+    .caveat {
+      max-width: 1100px;
+      margin: 20px auto 0;
+      font-size: 13px;
+      color: #64748b;
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 14px 18px;
+    }
+    .caveat b { color: #1e293b; }
   </style>
 </head>
 <body>
 
   <div class="page-header">
     <h1>Agentic SDLC Workbench — Main Flow</h1>
-    <p>End-to-end process from application creation through design approval and export. Admin flows not shown.</p>
-    <p style="margin-top:8px"><a href="ingest-to-build-flow.html" style="color:#2563eb;font-weight:600;text-decoration:none">→ See the role-by-role view (who performs each step + loop-backs)</a></p>
+    <p>One end-to-end process, from application setup through design approval, iteration, and deployment back to ServiceNow. Setting up from scratch (greenfield) happens once — after that first deploy to a Dev instance, the application exists in ServiceNow and every new requirement follows the ServiceNow-linked (brownfield) path. Admin flows not shown.</p>
+    <p style="margin-top:8px"><a href="big-picture-flow.html" style="color:#2563eb;font-weight:600;text-decoration:none">↑ Big-picture overview (the ten-step version)</a></p>
+    <p style="margin-top:4px"><a href="ingest-to-build-flow.html" style="color:#2563eb;font-weight:600;text-decoration:none">→ See the role-by-role view (who performs each step + loop-backs)</a></p>
   </div>
 
   <div class="phase-labels">
-    <div class="phase-pill ph1">Phase 1<br>Setup</div>
-    <div class="phase-pill ph2">Phase 2<br>Ingest</div>
-    <div class="phase-pill ph3">Phase 3<br>Approve</div>
-    <div class="phase-pill ph4">Phase 4<br>Iterate</div>
-    <div class="phase-pill ph5">Phase 5<br>Export</div>
+    <div class="phase-pill ph1">Phase 1<br>Set Up</div>
+    <div class="phase-pill ph2">Phase 2<br>Ingest &amp; Check</div>
+    <div class="phase-pill ph3">Phase 3<br>Map to ServiceNow</div>
+    <div class="phase-pill ph4">Phase 4<br>Approve &amp; Baseline</div>
+    <div class="phase-pill ph5">Phase 5<br>Iterate</div>
+    <div class="phase-pill ph6">Phase 6<br>Deploy Back</div>
   </div>
 
   <div class="legend">
@@ -148,8 +170,11 @@
     <div class="legend-item"><div class="legend-swatch sw-action"></div> User action</div>
     <div class="legend-item"><div class="legend-swatch sw-decision"></div> Decision point</div>
     <div class="legend-item"><div class="legend-swatch sw-system"></div> System action (auto)</div>
-    <div class="legend-item"><div class="legend-swatch sw-patha"></div> Iteration Path A — Requirements-driven</div>
-    <div class="legend-item"><div class="legend-swatch sw-pathb"></div> Iteration Path B — Direct edit</div>
+    <div class="legend-item"><div class="legend-glyph">✨</div> Uses AI</div>
+    <div class="legend-item"><div class="legend-swatch sw-snoutline"></div> ServiceNow-specific — teal outline (skipped when not linked)</div>
+    <div class="legend-item"><div class="legend-swatch sw-optional"></div> Optional / advisory — never blocks</div>
+    <div class="legend-item"><div class="legend-swatch sw-patha"></div> Iteration Path A — new requirements</div>
+    <div class="legend-item"><div class="legend-swatch sw-pathb"></div> Iteration Path B — direct edit</div>
     <div class="legend-item"><div class="legend-swatch sw-terminal"></div> Start / End</div>
   </div>
 
@@ -157,29 +182,41 @@
     <div class="mermaid">
 flowchart TD
 
-  %% PHASE 1: SETUP
+  %% ===== PHASE 1: SET UP (one-time) =====
   START([" Start "])
   CREATE["Create Application\n-----------------\nProjects module\nName / Client / Code / Stage"]
   MEMBERS{"Add team\nmembers?"}
   ADD_MEM["Add Members and Roles\nMethodology Owner / Reviewer\nFunctional Owner / Technical"]
+  SNLINK{"App already exists\nin ServiceNow?"}
+  LINK["Link ServiceNow Instance\n-----------------\nURL / Application Scope / credentials\nTest Connection → Save (encrypted)"]
 
-  %% PHASE 2: INGEST
-  INGEST["Navigate to\nIngest Documents\nSelect application"]
-  ENTRY{"How are\nrequirements\nbeing added?"}
+  %% ===== PHASE 2: INGEST & CHECK =====
+  INGEST["Ingest Documents\nSelect application"]
+  ENTRY{"How are\nrequirements\nadded?"}
   UPLOAD["Upload Document\ndocx / txt / md / pdf"]
-  PASTE["Type or Paste\nRequirements\ninto text area"]
-  SUBMIT["Set: Type / Title / Design Area\nSubmit for Processing"]
-  EXTRACT[["System Extracts Entities\n-----------------------------\nUse Cases / Workflows / Agents / Tools\nGuardrails / Data Sources / Test Scenarios\nUser Stories / Governance Controls"]]
-  CPS[["Change Packets Created\nOne per entity group\nStatus: pending"]]
+  PASTE["Type or Paste\nRequirements"]
+  SUBMIT["Set Type / Title / Design Area\nSubmit for Analysis"]
+  EXTRACT[["System Extracts Entities  ✨\n-----------------------------\nRequirements / Use Cases / Workflows\nAgents / Tools / Guardrails / Data /\nTest Scenarios / Governance"]]
+  DUPCHECK[["Duplicate &amp; Conflict Check — automatic  ✨\n-----------------------------\nTwo lenses: your existing design\n+ the live ServiceNow instance (when linked)\nA real match blocks promotion"]]
+  CLARDEC{"Duplicates, conflicts,\nor open questions?"}
+  CLARIFY["Answer Clarifications\nthen re-check"]
 
-  %% PHASE 3: REVIEW & APPROVE
-  DR["Browse Design Review\n10 scope tabs\nReview extracted design"]
-  DR_EDIT_DEC{"Direct edits\nneeded before\napproving CPs?"}
-  DR_PB_FIND["Find entity\nin Design Review"]
-  DR_PB_MODAL["Click Edit - Modal opens\nFields pre-populated"]
-  DR_PB_SAVE["Save Changes"]
-  DR_PB_AUTO[["Auto-Approved CP Created\nEDIT-XXXXXX / Who / When / What"]]
-  CP_Q["Open Change Packet Queue\nReview each pending CP\nView diff: null -> extracted value"]
+  %% ===== PHASE 3: MAP TO SERVICENOW (when linked) =====
+  SNDEC{"App linked to\nServiceNow?"}
+  PLANGEN["Generate ServiceNow Import Plan  ✨\n-----------------\nAI reads requirements + real inventory\n(assesses the instance automatically)"]
+  PLANQ{"Plan raises its\nown questions?"}
+  PLANCLAR["Answer Plan Questions\nAdvisory only — never blocks"]
+  PLANAPPR["Review &amp; Approve Plan\nWhich SN records to pull, and why"]
+  SYNC["ServiceNow Sync\n-----------------\nPreview cost / time estimate → Run\nLive progress · cancel anytime"]
+  CAPTURE[["System Pulls Approved Records  ✨\n-----------------------------\nStructured records copied as-is\nAI only for agents / use cases /\ntools / workflow intent"]]
+  RECONCILE[["System Reconciles  ✨\n-----------------------------\nClassify new / changed / unchanged\nPropose change · AI confidence check"]]
+  GATEDEC{"Confident and\nlow-risk?"}
+  AUTOCP[["Change Packet\nApplied Automatically"]]
+  HITLCP[["Change Packet\nQueued for Review"]]
+  CPS_DIRECT[["Change Packets Created\nOne per entity group"]]
+
+  %% ===== PHASE 4: APPROVE & BASELINE =====
+  CP_Q["Change Packet Queue\n-----------------\nReview each pending CP\nView diff: before → after"]
   CP_DEC{"For each CP"}
   APPROVE["Approve"]
   REJECT["Reject\nDiscarded"]
@@ -187,87 +224,88 @@ flowchart TD
   ALL_DONE{"All CPs\nreviewed?"}
   REL_TYPE{"Select\nRelease Type"}
   MASS["Mass Approve\nSelected CPs"]
-  BUMP[["Version String Bumps\ne.g. 1.0.0 -> 1.1.0"]]
-  BASELINE[["Locked Baseline Created\ne.g. v1.1.0 - Minor Release"]]
-  COMMITTED["Design Committed\nFully visible in Design Review"]
+  BASELINE[["Version Bump + Locked Baseline\ne.g. v1.1.0 — Minor Release"]]
+  COMMITTED["Design Committed\nVisible in Design Review"]
 
-  %% PHASE 4: ITERATE
+  %% ===== PHASE 5: ITERATE =====
   ITER{"Iterate\non design?"}
+  PA_START["Requirements-Driven\nNew / changed requirements"]
+  PB_FIND["Direct Edit\nDesign Review — find entity"]
+  PB_SAVE["Edit modal → Save Changes"]
+  PB_AUTO[["Auto-Approved CP\nEDIT-XXXXXX · Who / When / What"]]
 
-  %% Path A
-  PA_START["PATH A\nRequirements-Driven"]
-  PA_INGEST["Ingest Documents\nUpload or paste updated\nrequirements"]
-  PA_SUBMIT["Submit\nwith Design Area scope"]
-  PA_CPS[["New Change Packets\nDiff vs current design\nOld value -> New value"]]
+  %% ===== PHASE 6: DEPLOY BACK =====
+  EXPORT["Build Export\nSelect application + version · sections"]
+  CATALOG["Catalog Scan — optional\nWhole-instance inventory by name\nFeeds the deploy-time collision check"]
+  SPEC[["Markdown Build Spec\nUse Cases / Workflows / Agents / Tools\nEvidence / Governance\n(collision check folded in when linked)"]]
+  DEPLOY([" Supervised deploy → ServiceNow DEV\n(never production) "])
 
-  %% Path B
-  PB_START["PATH B\nDirect Edit"]
-  PB_FIND["Design Review\nFind entity to change\nUse Cases / Workflows\nAgents / Tools"]
-  PB_MODAL["Click Edit Button\nModal opens\nAll fields pre-populated"]
-  PB_SAVE["Save Changes"]
-  PB_AUTO[["Auto-Approved CP Created\nCode: EDIT-XXXXXX\nWho / When / What recorded\nProject version increments"]]
-
-  %% PHASE 5: EXPORT
-  EXPORT["Build Export\nSelect application + version\nChoose sections"]
-  SPEC[["Markdown Build Spec\nGenerated and Downloaded\nUse Cases / Workflows / Agents\nTools / Evidence / Governance"]]
-  DONE([" Done\nSpec ready for\nClaude Code / ServiceNow build "])
-
-  %% CONNECTIONS
-  START --> CREATE
-  CREATE --> MEMBERS
-  MEMBERS -->|Yes| ADD_MEM --> INGEST
-  MEMBERS -->|No| INGEST
+  %% ===== CONNECTIONS =====
+  START --> CREATE --> MEMBERS
+  MEMBERS -->|Yes| ADD_MEM --> SNLINK
+  MEMBERS -->|No| SNLINK
+  SNLINK -->|"Yes — link it"| LINK --> INGEST
+  SNLINK -->|"No — from scratch"| INGEST
 
   INGEST --> ENTRY
   ENTRY -->|Upload file| UPLOAD --> SUBMIT
   ENTRY -->|Type or paste| PASTE --> SUBMIT
-  SUBMIT --> EXTRACT --> CPS
+  SUBMIT --> EXTRACT --> DUPCHECK --> CLARDEC
+  CLARDEC -->|"Yes — resolve first"| CLARIFY --> EXTRACT
+  CLARDEC -->|"No — all clear"| SNDEC
 
-  CPS --> DR --> DR_EDIT_DEC
-  DR_EDIT_DEC -->|"Yes - fix something"| DR_PB_FIND
-  DR_PB_FIND --> DR_PB_MODAL --> DR_PB_SAVE --> DR_PB_AUTO --> DR
-  DR_EDIT_DEC -->|"No - looks good"| CP_Q
+  SNDEC -->|"Yes — map to instance"| PLANGEN --> PLANQ
+  PLANQ -->|Yes| PLANCLAR --> PLANGEN
+  PLANQ -->|No| PLANAPPR --> SYNC --> CAPTURE --> RECONCILE --> GATEDEC
+  GATEDEC -->|Yes| AUTOCP --> CP_Q
+  GATEDEC -->|No| HITLCP --> CP_Q
+  SNDEC -->|"No — greenfield"| CPS_DIRECT --> CP_Q
+
   CP_Q --> CP_DEC
   CP_DEC -->|Approve| APPROVE
   CP_DEC -->|Reject| REJECT
   CP_DEC -->|Send Back| SENDBACK
   APPROVE & REJECT & SENDBACK --> ALL_DONE
-  ALL_DONE -->|No - more to review| CP_Q
+  ALL_DONE -->|"No — more to review"| CP_Q
   ALL_DONE -->|Yes| REL_TYPE
+  REL_TYPE -->|"Patch / Minor / Major"| MASS --> BASELINE --> COMMITTED --> ITER
 
-  REL_TYPE -->|"Patch x.y.Z+1 small fixes"| MASS
-  REL_TYPE -->|"Minor x.Y+1.0 new entities"| MASS
-  REL_TYPE -->|"Major X+1.0.0 arch change"| MASS
+  ITER -->|"Yes — new requirements"| PA_START --> INGEST
+  ITER -->|"Yes — targeted fix"| PB_FIND --> PB_SAVE --> PB_AUTO --> ITER
+  ITER -->|"No — ready to build"| EXPORT
+  EXPORT --> SPEC --> DEPLOY
+  CATALOG -.->|"collision data"| SPEC
+  DEPLOY -.->|"next requirement (now linked)"| INGEST
 
-  MASS --> BUMP --> BASELINE --> COMMITTED
-
-  COMMITTED --> ITER
-  ITER -->|No| EXPORT
-  ITER -->|"Yes - new requirements"| PA_START
-  ITER -->|"Yes - targeted fix"| PB_START
-
-  PA_START --> PA_INGEST --> PA_SUBMIT --> PA_CPS --> CP_Q
-
-  PB_START --> PB_FIND --> PB_MODAL --> PB_SAVE --> PB_AUTO --> ITER
-
-  EXPORT --> SPEC --> DONE
-
-  %% STYLES
+  %% ===== STYLES =====
   classDef terminal   fill:#1e293b,stroke:#1e293b,color:#fff,rx:50
   classDef action     fill:#3b82f6,stroke:#2563eb,color:#fff
   classDef decision   fill:#f59e0b,stroke:#d97706,color:#1e293b
   classDef system     fill:#8b5cf6,stroke:#7c3aed,color:#fff
+  classDef snAction   fill:#3b82f6,stroke:#0d9488,stroke-width:3px,color:#fff
+  classDef snSystem   fill:#8b5cf6,stroke:#0d9488,stroke-width:3px,color:#fff
+  classDef optional   fill:#ccfbf1,stroke:#0d9488,color:#115e59,stroke-dasharray: 5 5
   classDef pathA      fill:#10b981,stroke:#059669,color:#fff
   classDef pathB      fill:#f97316,stroke:#ea580c,color:#fff
 
-  class START,DONE terminal
-  class CREATE,ADD_MEM,INGEST,UPLOAD,PASTE,SUBMIT,DR,CP_Q,APPROVE,REJECT,SENDBACK,MASS,EXPORT,PB_FIND,PB_MODAL,PB_SAVE,DR_PB_FIND,DR_PB_MODAL,DR_PB_SAVE action
-  class MEMBERS,ENTRY,CP_DEC,ALL_DONE,REL_TYPE,ITER,DR_EDIT_DEC decision
-  class EXTRACT,CPS,BUMP,BASELINE,PB_AUTO,PA_CPS,SPEC,DR_PB_AUTO system
-  class PA_START,PA_INGEST,PA_SUBMIT pathA
-  class PB_START pathB
-  class COMMITTED action
+  class START,DEPLOY terminal
+  class CREATE,ADD_MEM,INGEST,UPLOAD,PASTE,SUBMIT,CLARIFY,CP_Q,APPROVE,REJECT,SENDBACK,MASS,COMMITTED,EXPORT action
+  class MEMBERS,SNLINK,ENTRY,CLARDEC,SNDEC,PLANQ,GATEDEC,CP_DEC,ALL_DONE,REL_TYPE,ITER decision
+  class EXTRACT,DUPCHECK,CPS_DIRECT,BASELINE,SPEC,PB_AUTO system
+  class LINK,PLANGEN,PLANAPPR,SYNC snAction
+  class CAPTURE,RECONCILE,AUTOCP,HITLCP snSystem
+  class CATALOG,PLANCLAR optional
+  class PA_START pathA
+  class PB_FIND,PB_SAVE pathB
     </div>
+  </div>
+
+  <div class="caveat">
+    <p><b>Greenfield once, then brownfield forever.</b> The very first pass for a brand-new app skips the ServiceNow steps (Phase 3 and the deploy-back), because there's nothing to map against yet. Once that first design is deployed to a ServiceNow Dev instance, the app <em>exists</em> in ServiceNow — so every later requirement re-enters at Ingest and takes the linked path: checked against the live instance, mapped to what's already there, and deployed back. The two decision diamonds "App linked to ServiceNow?" are where that switch happens.</p>
+    <p style="margin-top:8px"><b>The Duplicate &amp; Conflict Check looks two ways.</b> One automatic check applies two lenses at once — is this already covered by our own existing design, and (when linked) is it already built and live in ServiceNow? Either real match blocks promotion, so the same thing is never built twice.</p>
+    <p style="margin-top:8px"><b>Assessment is automatic; Catalog Scan is a deploy-time safeguard.</b> Generating the import plan quietly assesses the instance for you — there's no separate step. The optional Catalog Scan earns its place on the way out: a whole-instance inventory so the Build Spec can warn if a deploy would create something that already exists on the instance.</p>
+    <p style="margin-top:8px"><b>The ServiceNow steps are mostly people, not automation.</b> A teal-outlined step that's <em>blue</em> is a deliberate human action — a person generates the import plan, reviews and approves which records get pulled, and launches the sync (after seeing the cost estimate, with cancel available). Only the <em>purple</em> steps ("System Pulls Records," "System Reconciles") run unattended — and even those hand their results to a human review queue before anything changes the design.</p>
+    <p style="margin-top:8px"><b>✨ marks every step that calls AI:</b> extracting entities from a requirement, the duplicate/conflict check (both lenses), generating the ServiceNow import plan, and pulling/reconciling ServiceNow data (AI is used there only for the interpretive record types — agents, use cases, tools, workflow intent; plain structured records are copied as-is, no AI). Every other step is a person deciding or the system assembling/packaging — no model call involved.</p>
   </div>
 
   <script>

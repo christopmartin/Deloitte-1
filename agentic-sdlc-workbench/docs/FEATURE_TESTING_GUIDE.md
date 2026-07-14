@@ -4,6 +4,18 @@ One running log of shipped features: what each one does, and exactly how to star
 
 ---
 
+## Docs: unified Main Flow (greenfield + brownfield ServiceNow) + new Big Picture overview — 2026-07-14
+
+**What changed:** The process flow docs used to be split awkwardly — a generic main flow with no ServiceNow content, and a separate brownfield ServiceNow page that repeated most of the same middle steps. Since the ServiceNow-linked path is actually the normal, everyday path (greenfield only happens once, on an app's first pass), the two are now one diagram: `docs/main-flow.html`. Greenfield setup is shown up front; a "linked to ServiceNow?" decision routes each requirement either straight into design (first pass) or through the ServiceNow mapping/duplicate-check/reconcile pipeline (every pass after); a dashed loop shows every later requirement re-entering the same path already linked. The old `docs/servicenow-brownfield-flow.html` now redirects to `main-flow.html` rather than existing as a second, overlapping page.
+
+Two smaller fixes landed in the same pass: the ServiceNow steps were re-colored so human actions (generate/approve the import plan, run the sync) read as blue "user action," not the same solid teal as the fully automatic steps (pull records, reconcile) — the original coloring made a heavily human-driven stretch of the flow look unmanned. And every step that actually calls AI (extract entities, duplicate/conflict check, generate import plan, pull records, reconcile) now carries a ✨ mark, so it's visible at a glance which steps are AI-assisted versus plain system/human steps.
+
+**New:** `docs/big-picture-flow.html` — a 10-step, no-branches version of the same flow for a first-look/exec view, with the same ✨ AI marks and a teal outline for ServiceNow-specific steps. Each step is clickable and drills straight into the detailed `main-flow.html`.
+
+**How to confirm:** Open `docs/big-picture-flow.html` — ten boxes, Start to a looping arrow back to step 3; click any box and confirm it opens `docs/main-flow.html`. On `main-flow.html`, confirm the ✨ mark appears only on the five AI-calling steps (Extract, Duplicate & Conflict Check, Generate Import Plan, Pull Records, Reconcile) and that the ServiceNow steps that are human actions (Generate/Approve Plan, Run Sync) render blue, not purple. Open `docs/servicenow-brownfield-flow.html` directly and confirm it redirects to `main-flow.html`.
+
+---
+
 ## Fix: kept documents couldn't be resubmitted after a Data Maintenance wipe — 2026-07-13
 
 **What it was:** Right after shipping Data Maintenance (below), a document kept during a wipe was left showing "Create Change Packet" in the Document Catalog instead of "Submit for Analysis" — there was nothing to promote, since the wipe had just cleared its old extraction results. The document was stuck.

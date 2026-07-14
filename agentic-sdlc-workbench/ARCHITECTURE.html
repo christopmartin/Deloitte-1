@@ -476,6 +476,7 @@ flowchart TD
 
   <div class="diagram-wrap">
     <h3>ServiceNow Round-Trip</h3>
+    <p style="margin-bottom:12px"><em>Developer-level view of the modules below. For the plain-language, step-by-step user journey (link → ingest → discovery plan → sync → reconcile → Change Packet → deploy back), see the ServiceNow-linked path in <a href="docs/main-flow.html">docs/main-flow.html</a>.</em></p>
     <div class="mermaid">
 flowchart LR
     A(["Link project to SN instance\nPOST .../servicenow-link"]) --> B["Store instance + scope\nAES-256-GCM credentials"]
