@@ -16,6 +16,21 @@ Two smaller fixes landed in the same pass: the ServiceNow steps were re-colored 
 
 ---
 
+## Fix: ServiceNow duplicate question repeated + silent duplicate requirements across ingest rounds — 2026-07-14
+
+**What it was:** Answering a "Possible ServiceNow Duplicate" clarification (e.g. "ignore it, keep both") didn't stick — the very next round, the AI would check the same requirement again and ask the same question, sometimes twice. The deeper issue: when nothing needed clarification, a later round was quietly told to re-derive the whole document from scratch, silently creating reworded duplicate copies of requirements already extracted in an earlier round. One of those reworded duplicates still resembled a ServiceNow record, so the duplicate check flagged it too — that's why the same finding appeared twice.
+
+**What changed:**
+1. Answering a ServiceNow-duplicate question now permanently resolves it for that requirement — it will never be asked again, no matter how many more rounds the document goes through.
+2. Later rounds now get an explicit list of everything already extracted from this document, with clear instructions not to recreate any of it — closing the gap that let duplicates slip through.
+3. Two backup safety nets were added in case a duplicate requirement still gets created somehow: (a) if two near-identical requirements ever reach the ServiceNow check in the same pass, only one is checked; (b) a new, non-blocking warning at promote time flags near-identical requirements for a human to consolidate — same style as the existing duplicate-workflow/tool warning, never blocks the promote.
+
+The routine follow-up behavior (re-asking when your answer was a placeholder like "TBD") is unchanged — that was always working correctly.
+
+**How to confirm:** Submit a requirement likely to match something already in a connected ServiceNow instance. Answer the "Possible ServiceNow Duplicate" question with "keep both" and continue through further rounds — it should not reappear. Compare the staged requirement titles before and after a later round — no reworded copies should appear. Locked in by new/updated automated tests in `backend-node/test-sn-overlap-check.js` and a new `backend-node/test-quality-check.js` — `node run-tests.js` from `backend-node/` runs all 32 suites green.
+
+---
+
 ## Fix: kept documents couldn't be resubmitted after a Data Maintenance wipe — 2026-07-13
 
 **What it was:** Right after shipping Data Maintenance (below), a document kept during a wipe was left showing "Create Change Packet" in the Document Catalog instead of "Submit for Analysis" — there was nothing to promote, since the wipe had just cleared its old extraction results. The document was stuck.

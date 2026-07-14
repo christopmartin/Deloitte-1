@@ -19,6 +19,11 @@ const PLACEHOLDER_RE = /\b(tbd|to be defined|to be determined|to confirm|confirm
 const SPLIT_PARENT_JACCARD = 0.4;
 const LEAF_DUP_JACCARD = 0.55;
 const SIBLING_JACCARD = 0.4;
+// A reworded restatement of a requirement (title+description) typically scores LOWER
+// than a reworded short entity name would (more content words to differ on) — calibrated
+// against the actual reported incident's duplicate pair. Set below LEAF_DUP_JACCARD (0.55);
+// false positives here are cheap (a 'warn' finding the human acknowledges, never blocks).
+const REQUIREMENT_DUP_JACCARD = 0.5;
 const LEAF_DEDUP_TYPES = new Set(['tool', 'rest_message', 'connection_alias', 'data_source', 'nl_business_rule', 'guardrail']);
 const STRUCTURAL_TYPES = new Set(['agent_spec', 'workflow', 'tool', 'rest_message', 'connection_alias', 'inbound_rest_api']);
 
@@ -115,6 +120,42 @@ function checkLeafDuplicates(items) {
             { type, name: nameB, extraction_id: b.id },
           ],
           suggested_action: `Consolidate into one ${humanType(type)} record before promoting to avoid duplicate build artifacts.`,
+        });
+      }
+    }
+  }
+  return findings;
+}
+
+// ── Check 2b: same requirement staged twice under a reworded title (2026-07-14) ──
+// Standalone rather than folded into checkLeafDuplicates — FR/NFR text is title+description
+// (richer than a leaf entity's bare name) and needs its own tighter threshold, and keeping
+// this separate avoids touching the existing, already-tested checkLeafDuplicates.
+function requirementText(type, data) {
+  const base = `${data.title || ''} ${data.description || ''}`;
+  return type === 'nonfunctional_req' ? `${base} ${data.measurable_target || ''}` : base;
+}
+
+function checkRequirementDuplicates(items) {
+  const findings = [];
+  for (const type of ['functional_req', 'nonfunctional_req']) {
+    const candidates = items.filter(it => it.type === type);
+    for (let i = 0; i < candidates.length; i++) {
+      for (let j = i + 1; j < candidates.length; j++) {
+        const a = candidates[i], b = candidates[j];
+        const textA = requirementText(type, a.data || {}), textB = requirementText(type, b.data || {});
+        if (jaccard(tokenize(textA), tokenize(textB)) < REQUIREMENT_DUP_JACCARD) continue;
+        const nameA = nameOf(type, a.data), nameB = nameOf(type, b.data);
+        findings.push({
+          severity: 'warn',
+          category: 'duplicate_requirement',
+          title: `Possible duplicate ${humanType(type)}: "${nameA}" vs "${nameB}"`,
+          detail: 'These look like the same requirement staged twice under different wording, likely across extraction rounds.',
+          entities: [
+            { type, name: nameA, extraction_id: a.id },
+            { type, name: nameB, extraction_id: b.id },
+          ],
+          suggested_action: `Consolidate into one ${humanType(type)} record before promoting.`,
         });
       }
     }
@@ -233,6 +274,7 @@ function runChecks(items) {
   const findings = [
     ...checkSplitParents(items),
     ...checkLeafDuplicates(items),
+    ...checkRequirementDuplicates(items),
     ...checkPlaceholders(items),
     ...checkAiInventedStructure(items),
     ...checkRequirementCoverage(items),
@@ -256,4 +298,4 @@ function runQualityCheck(db, ingestId) {
   return { ingest_id: ingestId, ...runChecks(items) };
 }
 
-module.exports = { runQualityCheck, runChecks, nameOf, tokenize, jaccard };
+module.exports = { runQualityCheck, runChecks, nameOf, tokenize, jaccard, checkRequirementDuplicates };

@@ -184,6 +184,38 @@ function buildExistingDesignSummary(projectId) {
   return lines.join('\n');
 }
 
+/**
+ * Compact manifest of THIS ingest's own currently staged/needs_clarification extraction
+ * rows — the "don't recreate these" list buildExistingDesignSummary can't provide, since
+ * that only reads MATERIALIZED (promoted) entities, and nothing is promoted mid-ingest.
+ * Without this, round 2+ has no concrete list to check itself against and silently
+ * re-derives round-1 requirements under reworded titles (see backlog fix, 2026-07-14).
+ * Called once per round, before that round's own tool calls are made, so it only ever
+ * reflects PRIOR rounds' work. Returns '' on round 1 (nothing staged yet).
+ */
+function buildStagedThisIngestManifest(ingestId) {
+  const CAP = 150;
+  const rows = db.prepare(
+    `SELECT extraction_id, entity_type, entity_data, confidence, status
+     FROM asdlc_ingest_extraction
+     WHERE ingest_id=? AND status IN ('staged','needs_clarification')
+     ORDER BY created_at`
+  ).all(ingestId);
+  if (!rows.length) return '';
+
+  const lines = [];
+  let omitted = 0;
+  for (const r of rows) {
+    if (lines.length >= CAP) { omitted++; continue; }
+    let data; try { data = JSON.parse(r.entity_data) || {}; } catch { data = {}; }
+    const name = registry.entityName(r.entity_type, data) ||
+      data.title || data.name || data.rule_name || data.gate_name || data.segment_name || '(untitled)';
+    lines.push(`  [ref: ${r.extraction_id}] ${r.entity_type} | "${name}" (${r.status}, confidence ${Math.round((r.confidence || 0) * 100)}%)`);
+  }
+  if (omitted > 0) lines.push(`  (… ${omitted} more staged entities omitted for brevity)`);
+  return lines.join('\n');
+}
+
 /** Upsert an extraction row. Matches an existing staged row by (1) the stable clarification_ref the
  *  model echoes back during a clarification round, then (2) entity_type + primary name — so a refined
  *  name can never produce a duplicate on re-runs. */
@@ -304,7 +336,7 @@ function renderBestPracticesBlock(bestPractices, citationFieldHint) {
   ];
 }
 
-function buildSystemPrompt(doc, threshold, answeredClarifications, existingSummary, bestPractices) {
+function buildSystemPrompt(doc, threshold, answeredClarifications, existingSummary, bestPractices, stagedManifest) {
   // Static prose lives in agent/prompts/*.md (versioned, diffable). The ASSEMBLY
   // logic — which sections to include and in what order — stays here. Dynamic
   // sections (best practices, document context, clarification answers) are built
@@ -342,6 +374,14 @@ function buildSystemPrompt(doc, threshold, answeredClarifications, existingSumma
     lines.push(render('extraction/no-existing-design'));
   }
 
+  if (stagedManifest && stagedManifest.trim()) {
+    lines.push(
+      ``,
+      `## Already staged this ingest (do not recreate)`,
+      render('extraction/already-staged-this-ingest', { staged_manifest: stagedManifest }),
+    );
+  }
+
   lines.push(
     ``,
     `## Document context`,
@@ -376,7 +416,7 @@ function buildSystemPrompt(doc, threshold, answeredClarifications, existingSumma
   return lines.join('\n');
 }
 
-function buildUserMessage(doc, round, threshold) {
+function buildUserMessage(doc, round, threshold, hasStagedManifest) {
   if (round === 1) {
     return (
       `Please analyse the following document and extract all design entities.\n\n` +
@@ -395,18 +435,26 @@ function buildUserMessage(doc, round, threshold) {
     return `  - [ref: ${u.extraction_id}] ${u.entity_type}: "${name}" (previous confidence ${Math.round(u.confidence * 100)}%)`;
   }).join('\n');
 
+  const noneUncertain = `  (none — no items are below threshold. Do NOT re-derive or recreate any ` +
+    `already-staged item; only act on the clarification answers above` +
+    (hasStagedManifest ? ` and the "Already staged this ingest" list in the system prompt.)` : `.)`);
+
+  const noDupeLine = hasStagedManifest
+    ? `Do not re-extract items that were already staged (above threshold) — see the "Already staged this ingest" list in the system prompt for exactly which entities that covers.`
+    : `Do not re-extract items that were already staged (above threshold).`;
+
   return [
     `Clarification answers have been provided (see system prompt).`,
     ``,
     `The following items were previously below the ${threshold} confidence threshold:`,
-    summary || '  (none — re-analysing full document)',
+    summary || noneUncertain,
     ``,
     `Please re-extract ONLY these items, using the clarification answers to improve accuracy.`,
     `IMPORTANT: For each item, copy the ref token shown in its "[ref: ...]" prefix into the`,
     `"clarification_ref" field of your extraction tool call, so the system updates the existing`,
     `staged row instead of creating a duplicate. You MAY refine the name/title if the answer`,
     `corrects it — the ref keeps it de-duplicated either way.`,
-    `Do not re-extract items that were already staged (above threshold).`,
+    noDupeLine,
     ``,
     `Original document for reference:\n---\n${doc.raw_text}`,
   ].join('\n');
@@ -700,7 +748,7 @@ async function synthesizeDesign(doc, threshold, round, pass1Items, existingSumma
   console.log(`[claude-processor] Synthesis pass (role=synthesis/${aiConfig.resolveModel('synthesis')}) — mode ${level}, ${pass1Items.length} captured`);
 
   const toolUses = await runExtractionLoop(
-    buildSystemPrompt(doc, threshold, answeredClarifications, existingSummary, bestPractices),
+    buildSystemPrompt(doc, threshold, answeredClarifications, existingSummary, bestPractices, buildStagedThisIngestManifest(doc.ingest_id)),
     buildSynthesisUserMessage(doc, pass1Items, standingQuestions),
     { projectId: doc.project_id, ingestId: doc.ingest_id, round, source: 'ingest_synthesis', platform },
     'synthesis'
@@ -752,6 +800,7 @@ async function processDocument(ingestId) {
   const round                = getCurrentRound(ingestId);
   const answeredClarifications = round > 1 ? getAnsweredClarifications(ingestId) : [];
   const existingSummary      = buildExistingDesignSummary(doc.project_id);
+  const stagedManifest       = buildStagedThisIngestManifest(ingestId);
   // Platform-scoped AI Guidance: per-document override, else the application default.
   const platform             = doc.platform || aiConfig.getProjectPlatform(doc.project_id);
   const bestPractices        = aiConfig.getActiveBestPractices(Object.keys(registry.byEntityType), platform);
@@ -769,8 +818,8 @@ async function processDocument(ingestId) {
   let allToolUses;
   try {
     allToolUses = await runExtractionLoop(
-      buildSystemPrompt(doc, threshold, answeredClarifications, existingSummary, bestPractices),
-      buildUserMessage(doc, round, threshold),
+      buildSystemPrompt(doc, threshold, answeredClarifications, existingSummary, bestPractices, stagedManifest),
+      buildUserMessage(doc, round, threshold, !!stagedManifest),
       { projectId: doc.project_id, ingestId, round, platform }
     );
   } catch (err) {

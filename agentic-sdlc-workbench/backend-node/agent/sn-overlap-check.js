@@ -28,11 +28,19 @@ const { fetchAllRows, makeFetch } = require('./sn-capture');
 const { normalizeInstanceUrl } = require('./sn-catalog');
 const { CATALOG_SURFACES } = require('./sn-instance-catalog');
 const { loadDocumentRequirements, writeSnOverlapClarification } = require('./cross-check');
+const { tokenize: qcTokenize, jaccard: qcJaccard } = require('./quality-check');
 
 const MAX_KEYWORDS = 8;
 const ROWS_PER_TABLE_CAP = 10;
 const MAX_CANDIDATES_TO_AI = 15;
 const VERDICTS = new Set(['possible_overlap', 'likely_duplicate']);
+// A reworded restatement of the same requirement (title+description) typically scores
+// LOWER than a reworded short entity name would (more content words to differ on), so
+// this sits below quality-check.js's own LEAF_DUP_JACCARD (0.55), not above it — calibrated
+// against the actual reported incident's duplicate pair. Silent (no human sees a skipped
+// candidate), so kept conservative rather than as lenient as the human-visible promote-time
+// warning in quality-check.js. Purely an in-memory collapse, never touches the DB.
+const REQ_DUP_JACCARD = 0.6;
 
 // A short, curated subset of sn-instance-catalog.js's own table list — the record types
 // where "ServiceNow may already have this" is a meaningful, common risk. Deliberately not
@@ -58,12 +66,43 @@ function resolveSnConnection(project) {
   return { scope, instance, user, pw };
 }
 
-/** Already-open (unanswered) sn_overlap: refs for this document — skip re-checking these. */
-function openOverlapRefs(ingestId) {
+/**
+ * Requirement extraction_ids that have ALREADY been checked for a ServiceNow overlap,
+ * in this ingest — answered or not. A human's answer (even "ignore, proceed as new")
+ * is a permanent decision; re-checking after it's answered is what caused the same
+ * finding to be re-raised every subsequent round. Keyed by extraction_id (stable
+ * across rounds), not the ordinal 'FR-draft-N' display slug (which renumbers as other
+ * rows are added/removed) — see checkServiceNowOverlap below.
+ */
+function alreadyCheckedRequirementIds(ingestId) {
   const rows = db.prepare(
-    "SELECT target_field FROM asdlc_ingest_clarification WHERE ingest_id=? AND answer_text IS NULL AND target_field LIKE 'sn_overlap:%'"
+    "SELECT target_field FROM asdlc_ingest_clarification WHERE ingest_id=? AND target_field LIKE 'sn_overlap:%'"
   ).all(ingestId);
   return new Set(rows.map(r => r.target_field.slice('sn_overlap:'.length)));
+}
+
+/**
+ * Safety net: if the same real requirement got staged twice under reworded titles
+ * (a separate, upstream extraction bug), don't send both copies to the AI judge — that
+ * produces two near-identical "possible duplicate" findings for what a human sees as one
+ * question. Keep only the first-seen (or higher-confidence) requirement of each near-
+ * duplicate pair, comparing within the same req_type only. Purely in-memory; never
+ * touches the DB or `loadDocumentRequirements` itself.
+ */
+function collapseNearDuplicates(reqs) {
+  const kept = [];
+  for (const r of reqs) {
+    const rText = qcTokenize(r.text);
+    const dupIndex = kept.findIndex(k =>
+      k.req_type === r.req_type && qcJaccard(rText, qcTokenize(k.text)) >= REQ_DUP_JACCARD
+    );
+    if (dupIndex === -1) {
+      kept.push(r);
+    } else if ((r.confidence || 0) > (kept[dupIndex].confidence || 0)) {
+      kept[dupIndex] = r;
+    }
+  }
+  return kept;
 }
 
 /** Top salient keywords pooled across the requirements being checked. */
@@ -200,8 +239,8 @@ async function checkServiceNowOverlap({ doc, ingestId, round, fetchImpl }) {
     const conn = resolveSnConnection(project);
     if (!conn) return { checked: 0, raised: 0 }; // not ServiceNow-connected — zero cost, zero behavior change
 
-    const already = openOverlapRefs(ingestId);
-    const reqs = loadDocumentRequirements(ingestId).filter(r => !already.has(r.slug));
+    const already = alreadyCheckedRequirementIds(ingestId);
+    const reqs = collapseNearDuplicates(loadDocumentRequirements(ingestId).filter(r => !already.has(r.id)));
     if (!reqs.length) return { checked: 0, raised: 0 };
 
     const keywords = extractKeywords(reqs);
@@ -219,7 +258,7 @@ async function checkServiceNowOverlap({ doc, ingestId, round, fetchImpl }) {
       const entityType = req.req_type === 'nonfunctional' ? 'nonfunctional_req' : 'functional_req';
       const question = `A ServiceNow "${v.candidate.name}" (${v.candidate.table}) may already cover this requirement. ${v.reason}`;
       const context = `Candidate: ${v.candidate.table} "${v.candidate.name}" (sys_id ${v.candidate.sys_id})${v.candidate.extra ? ' — ' + v.candidate.extra : ''}. Verdict: ${v.verdict}.`;
-      const wrote = writeSnOverlapClarification(ingestId, round, { requirementRef: req.slug, entityType, question, context });
+      const wrote = writeSnOverlapClarification(ingestId, round, { requirementRef: req.id, entityType, question, context });
       if (wrote) raised++;
     }
     return { checked: reqs.length, raised };
@@ -229,4 +268,7 @@ async function checkServiceNowOverlap({ doc, ingestId, round, fetchImpl }) {
   }
 }
 
-module.exports = { checkServiceNowOverlap, _internal: { tokenize, wordHit, extractKeywords, rankCandidates, resolveSnConnection } };
+module.exports = {
+  checkServiceNowOverlap,
+  _internal: { tokenize, wordHit, extractKeywords, rankCandidates, resolveSnConnection, collapseNearDuplicates, alreadyCheckedRequirementIds },
+};

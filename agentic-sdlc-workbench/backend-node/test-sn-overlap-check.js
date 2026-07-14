@@ -14,6 +14,12 @@
 //       once answered.
 //   (4) dedup: a requirement that already has an open sn_overlap: clarification is skipped
 //       entirely — the live ServiceNow lookup is never even attempted for it.
+//   (5) regression (2026-07-14): an ANSWERED sn_overlap: clarification must also permanently
+//       suppress re-checking that requirement — this is the "same duplicate question shown
+//       twice in round 2" bug. A different, never-checked requirement in the same ingest is
+//       still checked normally.
+//   (6) near-duplicate staged requirements (e.g. from an upstream re-extraction bug) collapse
+//       to one before reaching the AI judge, instead of producing two near-identical findings.
 //
 // Run:  node test-sn-overlap-check.js   (from backend-node/)
 'use strict';
@@ -136,11 +142,24 @@ async function testClarificationGate() {
   assert(cc.hasOpenConflicts(ingestId2) === false, 'an open discovery: row alone does not block promote');
 }
 
+function seededFrId(ingestId) {
+  return db.prepare("SELECT extraction_id FROM asdlc_ingest_extraction WHERE ingest_id=? AND entity_type='functional_req'").get(ingestId).extraction_id;
+}
+
+function addFr(ingestId, title, description, confidence = 0.9) {
+  const id = generateId();
+  db.prepare(`INSERT INTO asdlc_ingest_extraction (extraction_id, ingest_id, entity_type, entity_data, confidence, status)
+              VALUES (?,?,?,?,?,?)`)
+    .run(id, ingestId, 'functional_req', JSON.stringify({ title, description }), confidence, 'staged');
+  return id;
+}
+
 async function testDedupSkipsAlreadyOpen() {
-  console.log('\n--- Part 4: an already-flagged requirement is skipped entirely ---');
+  console.log('\n--- Part 4: an already-flagged requirement is skipped entirely (still open) ---');
   const project = db.prepare('SELECT project_id FROM asdlc_project LIMIT 1').get();
-  const ingestId = makeDoc(project.project_id); // one staged FR -> synthesizes ref 'FR-draft-1'
-  cc.writeSnOverlapClarification(ingestId, 1, { requirementRef: 'FR-draft-1', entityType: 'functional_req', question: 'q', context: '' });
+  const ingestId = makeDoc(project.project_id); // one staged FR
+  const frId = seededFrId(ingestId);
+  cc.writeSnOverlapClarification(ingestId, 1, { requirementRef: frId, entityType: 'functional_req', question: 'q', context: '' });
 
   setSnConnection(project.project_id);
 
@@ -151,12 +170,67 @@ async function testDedupSkipsAlreadyOpen() {
   assert(res.checked === 0 && res.raised === 0, 'reports nothing to check');
 }
 
+async function testAnsweredStillSuppresses() {
+  console.log('\n--- Part 5: an ANSWERED sn_overlap: question must NOT be re-asked (the reported bug) ---');
+  const project = db.prepare('SELECT project_id FROM asdlc_project LIMIT 1').get();
+  setSnConnection(project.project_id);
+  const ingestId = makeDoc(project.project_id, { withReq: false });
+
+  const checkedFrId = addFr(ingestId, 'Provide a general purpose request catalog item', 'A catch-all request form for employees.');
+  const otherFrId   = addFr(ingestId, 'Capture request description and due date', 'Every request records a description and a due date.');
+
+  // Simulate: round 1 flagged checkedFrId, and the human answered it (any answer — resolved).
+  cc.writeSnOverlapClarification(ingestId, 1, { requirementRef: checkedFrId, entityType: 'functional_req', question: 'q', context: '' });
+  const row = db.prepare("SELECT clarification_id FROM asdlc_ingest_clarification WHERE ingest_id=? AND target_field=?")
+    .get(ingestId, `sn_overlap:${checkedFrId}`);
+  db.prepare("UPDATE asdlc_ingest_clarification SET answer_text='Confirmed different, proceed as new.', answered_at=datetime('now') WHERE clarification_id=?")
+    .run(row.clarification_id);
+
+  let fetchCalls = 0;
+  const mockFetch = async (url) => {
+    fetchCalls++;
+    const table = (/table\/(\w+)/.exec(url) || [])[1] || '';
+    if (table === 'sc_cat_item') {
+      return { ok: true, status: 200, json: async () => ({ result: [{ sys_id: 'cand1', name: 'Capture request description', category: 'Hardware' }] }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ result: [] }) };
+  };
+  const res = await checkServiceNowOverlap({ doc: { project_id: project.project_id }, ingestId, round: 2, fetchImpl: mockFetch });
+  assert(res.checked === 1, 'the answered requirement is excluded — only the OTHER, never-checked requirement is checked');
+  assert(fetchCalls === 5, 'the live lookup still runs, but only for the requirement that was never checked before');
+}
+
+async function testCollapseNearDuplicates() {
+  console.log('\n--- Part 6: near-duplicate staged requirements collapse before reaching the AI judge ---');
+  const { collapseNearDuplicates } = _internal;
+
+  const original = { req_type: 'functional', id: 'a', slug: 'FR-draft-1',
+    title: 'Provide a general purpose request catalog item',
+    text: 'Provide a general purpose request catalog item. A catch-all request form for employees to submit any kind of request.',
+    confidence: 0.8 };
+  const reworded = { req_type: 'functional', id: 'b', slug: 'FR-draft-2',
+    title: 'Provide a general-purpose catch-all request form',
+    text: 'Provide a general-purpose catch-all request form. Employees can submit any kind of request through it.',
+    confidence: 0.9 };
+  const distinct = { req_type: 'functional', id: 'c', slug: 'FR-draft-3',
+    title: 'Route requests to Level 1 Triage',
+    text: 'Route requests to Level 1 Triage for initial handling and prioritization.',
+    confidence: 0.85 };
+
+  const collapsed = collapseNearDuplicates([original, reworded, distinct]);
+  assert(collapsed.length === 2, 'the reworded near-duplicate collapses into the original, leaving 2 distinct requirements');
+  assert(collapsed.some(r => r.id === 'b'), 'the higher-confidence copy of the near-duplicate pair is kept');
+  assert(collapsed.some(r => r.id === 'c'), 'the genuinely distinct requirement is untouched');
+}
+
 (async () => {
   try {
     await testPureHelpers();
     await testNoOpPaths();
     await testClarificationGate();
     await testDedupSkipsAlreadyOpen();
+    await testAnsweredStillSuppresses();
+    await testCollapseNearDuplicates();
   } catch (err) {
     console.error('FATAL:', err);
     fail++;
