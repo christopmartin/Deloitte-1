@@ -116,9 +116,14 @@ function buildWipePlan(pid, { keepDocuments = false } = {}) {
       sql: `UPDATE ${t} SET sn_artifact_id=NULL WHERE project_id=? AND sn_artifact_id IS NOT NULL`,
       params: [pid],
     })),
+    // 'pending' — same status a brand-new upload gets (schema.sql default) — not
+    // 'staged', which everywhere else in this codebase means "has real staged
+    // extraction rows, ready to promote" (see the send-back flow in server.js,
+    // which always re-runs extraction immediately after setting it). This document
+    // just had all its extractions deleted above, so it has none.
     ...(keepDocuments ? [{
-      label: 'asdlc_ingest_document (reset to staged)',
-      sql: `UPDATE asdlc_ingest_document SET ingest_status='staged', change_packets_generated=0, processing_notes=NULL, updated_at=datetime('now') WHERE project_id=?`,
+      label: 'asdlc_ingest_document (reset to pending)',
+      sql: `UPDATE asdlc_ingest_document SET ingest_status='pending', change_packets_generated=0, processing_notes=NULL, updated_at=datetime('now') WHERE project_id=?`,
       params: [pid],
     }] : []),
   ];

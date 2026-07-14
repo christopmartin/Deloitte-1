@@ -4,6 +4,16 @@ One running log of shipped features: what each one does, and exactly how to star
 
 ---
 
+## Fix: kept documents couldn't be resubmitted after a Data Maintenance wipe — 2026-07-13
+
+**What it was:** Right after shipping Data Maintenance (below), a document kept during a wipe was left showing "Create Change Packet" in the Document Catalog instead of "Submit for Analysis" — there was nothing to promote, since the wipe had just cleared its old extraction results. The document was stuck.
+
+**What changed:** The wipe now correctly resets a kept document to the same "not yet processed" state a brand-new upload gets, so "Submit for Analysis" appears as expected. The Document Catalog screen was also hardened so it won't show the wrong action even if a document's status gets out of sync some other way. One document already affected by this ("General purpose SR form" in "MSP Temp Test") was corrected directly.
+
+**How to confirm:** Open **Ingest Documents**, find "General purpose SR form" in "MSP Temp Test" — it should show status **Pending** with a **Start Extraction** button. To test the fix going forward: run a Data Maintenance wipe (keep documents checked) on any application with a processed document, then confirm the kept document immediately offers Submit for Analysis, not Create Change Packet.
+
+---
+
 ## Admin: Data Maintenance — reset an application's design data — 2026-07-13
 
 **What it does:** A new Administration page lets you clear out one application's design data (use cases, workflows, requirements, everything else generated from ingest) so it can be re-ingested from scratch — without deleting the application itself or its setup. By default, it also keeps your uploaded Document Catalog entries and resets them so you can resubmit them into the fresh design without re-uploading files (there's a checkbox if you'd rather delete those too). Every delete shows an exact row-count preview first, and requires typing the application's name to confirm — this cannot be undone.

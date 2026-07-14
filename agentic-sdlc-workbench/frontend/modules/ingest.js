@@ -697,7 +697,7 @@ async function renderDetail(doc, pane) {
       body.appendChild(buildServiceNowPlanSection(fresh, planRow, discoveryQs.filter(c => !c.answer_text), pane));
     }
 
-  } else if (fresh.ingest_status === 'staged') {
+  } else if (fresh.ingest_status === 'staged' && extractions.some(e => e.status === 'staged')) {
     body.appendChild(buildExtractionsSection(
       extractions.filter(e => e.status === 'staged'), true, fresh, pane
     ));
@@ -711,6 +711,12 @@ async function renderDetail(doc, pane) {
     if (extractions.some(e => e.status === 'staged' && (e.entity_type === 'functional_req' || e.entity_type === 'nonfunctional_req'))) {
       body.appendChild(buildServiceNowPlanSection(fresh, planRow, discoveryQs.filter(c => !c.answer_text), pane));
     }
+
+  } else if (fresh.ingest_status === 'staged') {
+    // 'staged' status but no actual staged extraction rows — treat the same as
+    // 'pending' rather than trusting the status string alone (can happen after a
+    // Data Maintenance reset, or any other path that touches ingest_status directly).
+    body.appendChild(buildTriggerSection(fresh, pane));
 
   } else if (fresh.ingest_status === 'promoted') {
     body.appendChild(buildPromotedSection(fresh));
